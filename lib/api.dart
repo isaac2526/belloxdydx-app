@@ -61,9 +61,29 @@ class Api {
   }
 
   // ---------- auth ----------
-  static Future<bool> login(String email, String password) async {
+  // Accepts an email OR a username. If it is not an email, we ask the
+  // backend for the matching email first, then sign in. Clear errors.
+  static Future<bool> login(String login, String password) async {
     final auth = Supabase.instance.client.auth;
-    await auth.signInWithPassword(email: email.trim(), password: password);
+    var email = login.trim();
+
+    if (!email.contains("@")) {
+      try {
+        final lr = await http.post(_u("/api/auth/resolve-username"),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({"username": email}));
+        final lj = _decode(lr);
+        if (lr.statusCode == 200 && lj["email"] != null) {
+          email = lj["email"] as String;
+        }
+      } catch (_) {}
+    }
+
+    try {
+      await auth.signInWithPassword(email: email, password: password);
+    } on AuthException catch (e) {
+      throw ApiException(e.message);
+    }
 
     final r = await http.post(_u("/api/auth/login"),
         headers: _headers(), body: jsonEncode({"deviceId": deviceId()}));
