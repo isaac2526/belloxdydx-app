@@ -37,9 +37,10 @@ class _LoginScreenState extends State<LoginScreen> {
         lockedDays = e.daysLeft;
         busy = false;
       });
-    } catch (_) {
+    } catch (e) {
+      // Show the REAL reason so we never guess in the dark again.
       setState(() {
-        error = "Email or password is not correct, or network wobbled.";
+        error = e.toString().replaceFirst("Exception: ", "");
         busy = false;
       });
     }
