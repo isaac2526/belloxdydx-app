@@ -13,6 +13,8 @@ class DeviceLockedException implements Exception {
 class ApiException implements Exception {
   final String message;
   ApiException(this.message);
+  @override
+  String toString() => message;
 }
 
 // The app's single voice to the Belloxdydx backend. Same rules as the
@@ -83,10 +85,17 @@ class Api {
       await auth.signInWithPassword(email: email, password: password);
     } on AuthException catch (e) {
       throw ApiException(e.message);
+    } catch (e) {
+      throw ApiException("Sign-in error: " + e.toString());
     }
 
-    final r = await http.post(_u("/api/auth/login"),
-        headers: _headers(), body: jsonEncode({"deviceId": deviceId()}));
+    late http.Response r;
+    try {
+      r = await http.post(_u("/api/auth/login"),
+          headers: _headers(), body: jsonEncode({"deviceId": deviceId()}));
+    } catch (e) {
+      throw ApiException("Reaching the site failed: " + e.toString());
+    }
     final j = _decode(r);
 
     if (r.statusCode == 409 && j["error"] == "device_locked") {
@@ -95,7 +104,9 @@ class Api {
     }
     if (r.statusCode != 200) {
       await auth.signOut();
-      throw ApiException("Could not finish sign in. Try again.");
+      throw ApiException(
+          "Site rejected login (" + r.statusCode.toString() + "): " +
+              (j["error"]?.toString() ?? "unknown"));
     }
     sessionToken = j["mobileToken"] as String?;
     activated = j["activated"] == true;
