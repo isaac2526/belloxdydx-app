@@ -6,7 +6,7 @@
 // ============================================================
 
 const supabaseUrl = "https://ziprpmqnxeylxywmesbb.supabase.co";
-const supabaseAnonKey = "sb_publishable_Eu-OFxtHXwMSIh-s5SszkQ_dRuHkrg5";
+const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InppcHJwbXFueGV5bHh5d21lc2JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMxMTYxMDEsImV4cCI6MjA5ODY5MjEwMX0.sLih7P5u6bPxsPAemMTsknoT8xGDGEHe8jHn23jBZVE";
 
 const baseUrl = "https://www.belloxdydx.org";
 
