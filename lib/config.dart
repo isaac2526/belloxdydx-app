@@ -5,8 +5,8 @@
 // The anon key is designed to live inside apps. It is safe here.
 // ============================================================
 
-const supabaseUrl = "PASTE_YOUR_SUPABASE_PROJECT_URL_HERE";
-const supabaseAnonKey = "PASTE_YOUR_SUPABASE_ANON_PUBLIC_KEY_HERE";
+const supabaseUrl = "https://ziprpmqnxeylxywmesbb.supabase.co";
+const supabaseAnonKey = "sb_publishable_Eu-OFxtHXwMSIh-s5SszkQ_dRuHkrg5";
 
 const baseUrl = "https://www.belloxdydx.org";
 
