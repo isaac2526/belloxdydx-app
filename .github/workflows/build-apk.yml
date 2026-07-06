@@ -22,6 +22,15 @@ jobs:
       - name: Install the screenshot killer
         run: cp native/MainActivity.kt android/app/src/main/kotlin/tech/isaacarinola/belloxdydx/MainActivity.kt
 
+      - name: Guarantee INTERNET permission (release builds need it explicit)
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i 's|<manifest \(.*\)>|<manifest \1>\n    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>|' "$MANIFEST"
+          fi
+          echo "----- manifest after patch -----"
+          cat "$MANIFEST"
+
       - name: Proper app name
         run: sed -i 's/android:label="belloxdydx"/android:label="Belloxdydx"/' android/app/src/main/AndroidManifest.xml
 
