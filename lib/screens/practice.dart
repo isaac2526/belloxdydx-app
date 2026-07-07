@@ -161,7 +161,7 @@ class _PracticeScreenState extends State<PracticeScreen> {
           ] else ...[
             Card(
               color: fb["correct"] == true
-                  ? const const Color(0xFF14331F)
+                  ? const Color(0xFF14331F)
                   : const Color(0xFF3A1620),
               child: Padding(
                 padding: const EdgeInsets.all(14),
