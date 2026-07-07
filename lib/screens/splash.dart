@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../api.dart';
 import '../config.dart';
+import '../security.dart';
+import '../biometric.dart';
 import 'login.dart';
 import 'shell.dart';
 
-// The game-style loader: a real 0 to 100 tied to real work, so
-// students always know the app is alive and how far along it is.
+// The game-style 0 to 100 loader tied to real startup work.
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
   @override
@@ -21,7 +23,8 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    _smooth = Timer.periodic(const Duration(milliseconds: 40), (_) {
+    Security.lockDown();
+    _smooth = Timer.periodic(const Duration(milliseconds: 35), (_) {
       if (!mounted) return;
       setState(() {
         if (shown < target) shown = (shown + 2).clamp(0, target);
@@ -31,35 +34,45 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _boot() async {
-    setState(() => target = 25);
+    setState(() => target = 20);
     await Api.installPingOnce();
 
-    setState(() => target = 55);
     if (!Api.signedIn) {
       setState(() => target = 100);
-      await Future.delayed(const Duration(milliseconds: 700));
+      await Future.delayed(const Duration(milliseconds: 650));
       _go(const LoginScreen());
       return;
     }
 
-    setState(() => target = 80);
+    // Biometric gate on relaunch, if the student turned it on.
+    setState(() => target = 45);
+    if (await Biometric.isEnabled()) {
+      final ok = await Biometric.prompt("Unlock Belloxdydx");
+      if (!ok) {
+        setState(() => target = 100);
+        await Future.delayed(const Duration(milliseconds: 400));
+        _go(const LoginScreen());
+        return;
+      }
+    }
+
+    setState(() => target = 75);
     try {
       await Api.fetchContent();
       unawaited(Api.streakTouch());
       setState(() => target = 100);
-      await Future.delayed(const Duration(milliseconds: 500));
+      await Future.delayed(const Duration(milliseconds: 450));
       _go(const ShellScreen());
     } catch (_) {
       setState(() => target = 100);
-      await Future.delayed(const Duration(milliseconds: 500));
-      _go(const ShellScreen()); // shell shows its own retry if content is null
+      await Future.delayed(const Duration(milliseconds: 450));
+      _go(const ShellScreen());
     }
   }
 
   void _go(Widget w) {
     if (!mounted) return;
-    Navigator.of(context)
-        .pushReplacement(MaterialPageRoute(builder: (_) => w));
+    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => w));
   }
 
   @override
@@ -70,46 +83,46 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final gold = const Color(0xFFF5B301);
     return Scaffold(
       body: SafeArea(
         child: Column(
           children: [
             const Spacer(),
             ClipRRect(
-              borderRadius: BorderRadius.circular(28),
-              child: Image.asset("assets/logo.png", width: 110, height: 110),
+              borderRadius: BorderRadius.circular(30),
+              child: Image.asset("assets/logo.png", width: 116, height: 116),
             ),
             const SizedBox(height: 18),
-            const Text("Belloxdydx",
-                style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
+            Text("Belloxdydx",
+                style: GoogleFonts.spaceGrotesk(
+                    fontSize: 30, fontWeight: FontWeight.w800)),
             const SizedBox(height: 6),
-            const Text("Smash your 100 level exams",
-                style: TextStyle(color: Colors.white54)),
+            Text("Smash your 100 level exams",
+                style: TextStyle(color: Theme.of(context).hintColor)),
             const Spacer(),
             Text("${shown.toInt()}%",
-                style: const TextStyle(
-                    fontSize: 42,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFFF5B301))),
-            const SizedBox(height: 10),
+                style: GoogleFonts.spaceGrotesk(
+                    fontSize: 44, fontWeight: FontWeight.w800, color: gold)),
+            const SizedBox(height: 12),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 48),
+              padding: const EdgeInsets.symmetric(horizontal: 52),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(8),
                 child: LinearProgressIndicator(
                   value: shown / 100,
                   minHeight: 8,
-                  backgroundColor: Colors.white10,
-                  color: const Color(0xFFF5B301),
+                  backgroundColor: Colors.grey.withOpacity(0.2),
+                  color: gold,
                 ),
               ),
             ),
-            const SizedBox(height: 40),
-            const Padding(
-              padding: EdgeInsets.only(bottom: 18, left: 24, right: 24),
+            const SizedBox(height: 44),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 18, left: 24, right: 24),
               child: Text(brandFooter,
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  style: TextStyle(color: Theme.of(context).hintColor, fontSize: 11)),
             ),
           ],
         ),

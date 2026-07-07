@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_widget_from_html/flutter_widget_from_html.dart';
 import 'package:http/http.dart' as http;
+import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,10 +11,10 @@ import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
 import '../watermark.dart';
 
-// The sealed reading room. FLAG_SECURE already blacks out every
-// screenshot and recording; the watermark handles second-phone photos;
-// and "Save offline" keeps bytes ONLY inside the app's private vault,
-// invisible to file managers, never in Downloads, never shareable.
+// The sealed reading room. Screen is locked (screenshots black), the
+// watermark names any second-phone photo, and "Save offline" keeps
+// PDFs, notes AND audio inside the app's private vault, readable with
+// no network, invisible to file managers, never shareable.
 
 class VaultIndex {
   static Future<List<Map<String, dynamic>>> list() async {
@@ -36,7 +37,7 @@ class VaultIndex {
     items.removeWhere((e) => e["id"] == id);
     await p.setString("vault_index", jsonEncode(items));
     final dir = await getApplicationDocumentsDirectory();
-    for (final ext in ["pdf", "html"]) {
+    for (final ext in ["pdf", "html", "mp3", "m4a"]) {
       final f = File("${dir.path}/vault/$id.$ext");
       if (await f.exists()) await f.delete();
     }
@@ -48,6 +49,20 @@ class VaultIndex {
     if (!await v.exists()) await v.create(recursive: true);
     return File("${v.path}/$id.$ext");
   }
+
+  static Future<String?> localAudioPath(String id) async {
+    for (final ext in ["mp3", "m4a"]) {
+      final f = await fileFor(id, ext);
+      if (await f.exists()) return f.path;
+    }
+    return null;
+  }
+}
+
+String _audioExt(String url) {
+  final u = url.toLowerCase();
+  if (u.contains(".m4a")) return "m4a";
+  return "mp3";
 }
 
 class ViewerScreen extends StatefulWidget {
@@ -55,12 +70,13 @@ class ViewerScreen extends StatefulWidget {
   final String title;
   final String type;
   final bool offline;
-  const ViewerScreen(
-      {super.key,
-      required this.materialId,
-      required this.title,
-      required this.type,
-      this.offline = false});
+  const ViewerScreen({
+    super.key,
+    required this.materialId,
+    required this.title,
+    required this.type,
+    this.offline = false,
+  });
 
   @override
   State<ViewerScreen> createState() => _ViewerScreenState();
@@ -71,6 +87,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
   String? note;
   PdfControllerPinch? pdf;
   String? videoUrl;
+  AudioPlayer? _player;
   bool saving = false;
   bool saved = false;
 
@@ -89,10 +106,15 @@ class _ViewerScreenState extends State<ViewerScreen> {
   Future<void> _load() async {
     try {
       if (widget.offline) {
+        final audioPath = await VaultIndex.localAudioPath(widget.materialId);
+        if (audioPath != null) {
+          await _initAudio(audioPath, isLocal: true);
+          setState(() => status = "audio");
+          return;
+        }
         final pdfFile = await VaultIndex.fileFor(widget.materialId, "pdf");
         if (await pdfFile.exists()) {
-          final bytes = await pdfFile.readAsBytes();
-          pdf = PdfControllerPinch(document: PdfDocument.openData(bytes));
+          pdf = PdfControllerPinch(document: PdfDocument.openData(await pdfFile.readAsBytes()));
           setState(() => status = "pdf");
           return;
         }
@@ -116,6 +138,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
         setState(() => status = "video");
         return;
       }
+      if (url != null && (url.toLowerCase().contains(".mp3") || url.toLowerCase().contains(".m4a"))) {
+        await _initAudio(url, isLocal: false);
+        setState(() => status = "audio");
+        return;
+      }
       if (html != null && html.trim().isNotEmpty) {
         note = html;
         setState(() => status = "note");
@@ -130,11 +157,21 @@ class _ViewerScreenState extends State<ViewerScreen> {
       }
       setState(() => status = "unsupported");
     } on ApiException catch (e) {
-      setState(() => status =
-          e.message == "not_activated" ? "not_activated" : "error");
+      setState(() => status = e.message == "not_activated" ? "not_activated" : "error");
     } catch (_) {
       setState(() => status = "error");
     }
+  }
+
+  Future<void> _initAudio(String path, {required bool isLocal}) async {
+    _player = AudioPlayer();
+    try {
+      if (isLocal) {
+        await _player!.setFilePath(path);
+      } else {
+        await _player!.setUrl(path);
+      }
+    } catch (_) {}
   }
 
   Future<void> _saveOffline() async {
@@ -144,7 +181,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
       final url = m["url"] as String?;
       final html = m["content_html"] as String?;
       String kind = "";
-      if (url != null && url.toLowerCase().contains(".pdf")) {
+
+      if (url != null && (url.toLowerCase().contains(".mp3") || url.toLowerCase().contains(".m4a"))) {
+        final r = await http.get(Uri.parse(url));
+        final f = await VaultIndex.fileFor(widget.materialId, _audioExt(url));
+        await f.writeAsBytes(r.bodyBytes);
+        kind = "audio";
+      } else if (url != null && url.toLowerCase().contains(".pdf")) {
         final r = await http.get(Uri.parse(url));
         final f = await VaultIndex.fileFor(widget.materialId, "pdf");
         await f.writeAsBytes(r.bodyBytes);
@@ -154,6 +197,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         await f.writeAsString(html);
         kind = "html";
       }
+
       if (kind.isNotEmpty) {
         await VaultIndex.add({
           "id": widget.materialId,
@@ -167,17 +211,20 @@ class _ViewerScreenState extends State<ViewerScreen> {
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text(
-                  "Saved to your in-app vault. Readable offline, only inside Belloxdydx.")));
+              content: Text("Saved to your in-app vault. Readable offline, only inside Belloxdydx.")));
         }
       } else {
         setState(() => saving = false);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("This item cannot be saved offline.")));
+        }
       }
     } catch (_) {
       setState(() => saving = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Could not save. Try again.")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("Could not save. Try again.")));
       }
     }
   }
@@ -185,11 +232,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
   @override
   void dispose() {
     pdf?.dispose();
+    _player?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final onBg = Theme.of(context).textTheme.bodyLarge?.color;
     Widget body;
     switch (status) {
       case "loading":
@@ -201,13 +250,14 @@ class _ViewerScreenState extends State<ViewerScreen> {
           Positioned.fill(child: Watermark(text: wm)),
         ]);
         break;
+      case "audio":
+        body = _AudioBody(player: _player!, title: widget.title, wm: wm);
+        break;
       case "note":
         body = Stack(children: [
           SingleChildScrollView(
             padding: const EdgeInsets.all(16),
-            child: HtmlWidget(note!,
-                textStyle:
-                    const TextStyle(fontSize: 16, color: Colors.white)),
+            child: HtmlWidget(note!, textStyle: TextStyle(fontSize: 16, color: onBg)),
           ),
           Positioned.fill(child: Watermark(text: wm)),
         ]);
@@ -215,14 +265,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
       case "video":
         body = Center(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.ondemand_video, size: 60, color: Colors.white38),
+            const Icon(Icons.ondemand_video, size: 60, color: Colors.grey),
             const SizedBox(height: 12),
             const Text("Videos play on the website for now."),
             const SizedBox(height: 12),
             if (videoUrl != null)
               FilledButton(
-                onPressed: () => launchUrl(Uri.parse(videoUrl!),
-                    mode: LaunchMode.externalApplication),
+                onPressed: () => launchUrl(Uri.parse(videoUrl!), mode: LaunchMode.externalApplication),
                 child: const Text("Open video"),
               ),
           ]),
@@ -232,8 +281,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         body = const Center(
             child: Padding(
           padding: EdgeInsets.all(24),
-          child: Text(
-              "🔑 This is premium content. Activate your account to read it.",
+          child: Text("🔑 This is premium content. Activate your account to read it.",
               textAlign: TextAlign.center),
         ));
         break;
@@ -252,8 +300,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
         );
     }
 
-    final canSave =
-        !widget.offline && (status == "pdf" || status == "note");
+    final canSave = !widget.offline &&
+        (status == "pdf" || status == "note" || status == "audio");
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -262,17 +310,89 @@ class _ViewerScreenState extends State<ViewerScreen> {
             IconButton(
               tooltip: "Save offline (in-app vault)",
               icon: saving
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : Icon(saved ? Icons.download_done : Icons.download,
-                      color: const Color(0xFFF5B301)),
+                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  : Icon(saved ? Icons.download_done : Icons.download, color: const Color(0xFFF5B301)),
               onPressed: saving || saved ? null : _saveOffline,
             ),
         ],
       ),
       body: body,
     );
+  }
+}
+
+class _AudioBody extends StatefulWidget {
+  final AudioPlayer player;
+  final String title;
+  final String wm;
+  const _AudioBody({required this.player, required this.title, required this.wm});
+  @override
+  State<_AudioBody> createState() => _AudioBodyState();
+}
+
+class _AudioBodyState extends State<_AudioBody> {
+  @override
+  Widget build(BuildContext context) {
+    final gold = const Color(0xFFF5B301);
+    return Stack(children: [
+      Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.multitrack_audio, size: 80, color: gold),
+            const SizedBox(height: 16),
+            Text(widget.title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 24),
+            StreamBuilder<Duration>(
+              stream: widget.player.positionStream,
+              builder: (context, snap) {
+                final pos = snap.data ?? Duration.zero;
+                final total = widget.player.duration ?? Duration.zero;
+                final max = total.inMilliseconds.toDouble();
+                final val = pos.inMilliseconds.clamp(0, max == 0 ? 1 : max).toDouble();
+                return Column(children: [
+                  Slider(
+                    value: val,
+                    max: max == 0 ? 1 : max,
+                    activeColor: gold,
+                    onChanged: (v) => widget.player.seek(Duration(milliseconds: v.toInt())),
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(_fmt(pos)),
+                      Text(_fmt(total)),
+                    ],
+                  ),
+                ]);
+              },
+            ),
+            const SizedBox(height: 16),
+            StreamBuilder<PlayerState>(
+              stream: widget.player.playerStateStream,
+              builder: (context, snap) {
+                final playing = snap.data?.playing ?? false;
+                return IconButton.filled(
+                  iconSize: 44,
+                  style: IconButton.styleFrom(backgroundColor: gold, foregroundColor: const Color(0xFF0B1220)),
+                  icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                  onPressed: () => playing ? widget.player.pause() : widget.player.play(),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+      Positioned.fill(child: IgnorePointer(child: Watermark(text: widget.wm))),
+    ]);
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, "0");
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, "0");
+    return "$m:$s";
   }
 }

@@ -152,7 +152,7 @@ class _PracticeScreenState extends State<PracticeScreen> {
                       onTap: () => _answer("${o["key"]}"),
                       leading: CircleAvatar(
                           radius: 15,
-                          backgroundColor: const Color(0xFF23304D),
+                          backgroundColor: Theme.of(context).colorScheme.surface,
                           child: Text("${o["key"]}",
                               style: const TextStyle(fontSize: 13))),
                       title: Text("${o["text"] ?? ""}"),
@@ -161,7 +161,7 @@ class _PracticeScreenState extends State<PracticeScreen> {
           ] else ...[
             Card(
               color: fb["correct"] == true
-                  ? const Color(0xFF14331F)
+                  ? const const Color(0xFF14331F)
                   : const Color(0xFF3A1620),
               child: Padding(
                 padding: const EdgeInsets.all(14),

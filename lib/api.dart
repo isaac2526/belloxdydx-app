@@ -10,6 +10,14 @@ class DeviceLockedException implements Exception {
   DeviceLockedException(this.daysLeft);
 }
 
+class FrozenException implements Exception {
+  final String? reason;
+  FrozenException(this.reason);
+  @override
+  String toString() =>
+      reason ?? "Your account is frozen. Contact Tutor Bello.";
+}
+
 class ApiException implements Exception {
   final String message;
   ApiException(this.message);
@@ -98,6 +106,10 @@ class Api {
     }
     final j = _decode(r);
 
+    if (r.statusCode == 423 && j["error"] == "account_frozen") {
+      await auth.signOut();
+      throw FrozenException(j["reason"] as String?);
+    }
     if (r.statusCode == 409 && j["error"] == "device_locked") {
       await auth.signOut();
       throw DeviceLockedException((j["daysLeft"] as num?)?.toInt() ?? 1);
@@ -201,6 +213,15 @@ class Api {
     try {
       await http.post(_u("/api/app/install"),
           headers: _headers(), body: jsonEncode({"platform": "android"}));
+    } catch (_) {}
+  }
+
+  // ---------- security ----------
+  static Future<void> reportViolation(String kind) async {
+    try {
+      await http.post(_u("/api/violations/report"),
+          headers: _headers(),
+          body: jsonEncode({"kind": kind, "platform": "android"}));
     } catch (_) {}
   }
 

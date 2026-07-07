@@ -2,12 +2,12 @@ package tech.isaacarinola.belloxdydx
 
 import android.os.Bundle
 import android.view.WindowManager
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 
-// FLAG_SECURE: the whole app becomes invisible to screenshots,
-// screen recorders and the recent-apps preview. Captures come out
-// BLACK. This is the native power no website can have.
-class MainActivity : FlutterActivity() {
+// FlutterFragmentActivity is REQUIRED by local_auth (fingerprint/face).
+// FLAG_SECURE makes the whole app invisible to screenshots and screen
+// recorders: captures come out black at the OS level, app-wide.
+class MainActivity : FlutterFragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)

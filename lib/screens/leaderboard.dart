@@ -48,7 +48,7 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                           fontSize: 24, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 10),
                   Card(
-                    color: const Color(0xFF23304D),
+                    color: Theme.of(context).colorScheme.surface,
                     child: ListTile(
                       leading: const Text("🏅",
                           style: TextStyle(fontSize: 26)),
