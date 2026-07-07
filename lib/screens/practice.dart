@@ -124,7 +124,7 @@ class _PracticeScreenState extends State<PracticeScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           Text("Question ${index + 1} of ${questions.length}",
-              style: const TextStyle(color: Colors.white54)),
+              style: TextStyle(color: Theme.of(context).hintColor)),
           const SizedBox(height: 10),
           Card(
             child: Padding(
@@ -181,7 +181,7 @@ class _PracticeScreenState extends State<PracticeScreen> {
                         "${fb["explanationHtml"]}".trim().isNotEmpty) ...[
                       const SizedBox(height: 8),
                       HtmlWidget("${fb["explanationHtml"]}",
-                          textStyle: const TextStyle(color: Colors.white70)),
+                          textStyle: TextStyle(color: Theme.of(context).hintColor)),
                     ],
                   ],
                 ),

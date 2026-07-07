@@ -17,24 +17,48 @@ const lightBorder = Color(0x14000000);
 // A tiny theme controller the whole app listens to, so dark/light flips
 // instantly and remembers the choice.
 class ThemeController extends ChangeNotifier {
-  ThemeMode _mode = ThemeMode.dark;
+  ThemeMode _mode = ThemeMode.system;
   ThemeMode get mode => _mode;
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     final v = p.getString("bx_theme");
-    _mode = v == "light" ? ThemeMode.light : ThemeMode.dark;
+    if (v == "light") {
+      _mode = ThemeMode.light;
+    } else if (v == "dark") {
+      _mode = ThemeMode.dark;
+    } else {
+      _mode = ThemeMode.system; // follow the phone's own setting
+    }
     notifyListeners();
   }
 
   Future<void> toggle() async {
-    _mode = _mode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+    // If following the system, first tap flips to the opposite of what
+    // is currently shown; after that it toggles explicitly.
+    final showingDark = isDarkIn(_lastBrightness);
+    _mode = showingDark ? ThemeMode.light : ThemeMode.dark;
     notifyListeners();
     final p = await SharedPreferences.getInstance();
     await p.setString("bx_theme", _mode == ThemeMode.light ? "light" : "dark");
   }
 
-  bool get isDark => _mode == ThemeMode.dark;
+  Future<void> useSystem() async {
+    _mode = ThemeMode.system;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.remove("bx_theme");
+  }
+
+  Brightness _lastBrightness = Brightness.dark;
+  void noteBrightness(Brightness b) => _lastBrightness = b;
+  bool isDarkIn(Brightness sys) =>
+      _mode == ThemeMode.dark ||
+      (_mode == ThemeMode.system && sys == Brightness.dark);
+
+  bool get isDark => _mode == ThemeMode.dark ||
+      (_mode == ThemeMode.system && _lastBrightness == Brightness.dark);
+  bool get isSystem => _mode == ThemeMode.system;
 }
 
 ThemeData _base(Brightness b, Color bg, Color surface, Color border) {

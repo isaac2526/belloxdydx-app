@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 
@@ -149,7 +151,9 @@ class Api {
   /// true = still the crowned session; false = superseded, sign out.
   static Future<bool> heartbeat() async {
     try {
-      final r = await http.get(_u("/api/auth/heartbeat"), headers: _headers());
+      final r = await http
+          .get(_u("/api/auth/heartbeat"), headers: _headers())
+          .timeout(const Duration(seconds: 15));
       if (r.statusCode == 401) return false;
       return true;
     } catch (_) {
@@ -158,11 +162,49 @@ class Api {
   }
 
   // ---------- bootstrap ----------
+  static Future<File> _cacheFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File("${dir.path}/content_cache.json");
+  }
+
+  static Future<void> loadCachedContent() async {
+    try {
+      final f = await _cacheFile();
+      if (await f.exists()) {
+        content = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+  }
+
+  // Strong data affinity: try the network a few times with a real
+  // timeout before giving up, and always fall back to the last good
+  // copy saved on disk so the app opens even on a shaky line.
   static Future<Map<String, dynamic>> fetchContent() async {
-    final r = await http.get(_u("/api/mobile/content"), headers: _headers());
-    if (r.statusCode != 200) throw ApiException("Could not load content.");
-    content = _decode(r);
-    return content!;
+    Object? lastErr;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final r = await http
+            .get(_u("/api/mobile/content"), headers: _headers())
+            .timeout(const Duration(seconds: 20));
+        if (r.statusCode == 200) {
+          content = _decode(r);
+          try {
+            final f = await _cacheFile();
+            await f.writeAsString(jsonEncode(content));
+          } catch (_) {}
+          return content!;
+        }
+        lastErr = ApiException("Server said ${r.statusCode}.");
+      } catch (e) {
+        lastErr = e;
+        await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
+      }
+    }
+    // Network failed: fall back to cache if we have it.
+    await loadCachedContent();
+    if (content != null) return content!;
+    throw ApiException(
+        "Could not load your courses. You seem offline and nothing is saved yet. Connect once to download.");
   }
 
   static Future<Map<String, dynamic>> fetchMaterial(String id) async {
@@ -216,6 +258,24 @@ class Api {
     } catch (_) {}
   }
 
+  // ---------- AI ----------
+  static Future<String> aiChat(List<Map<String, String>> messages) async {
+    try {
+      final r = await http
+          .post(_u("/api/ai/chat"),
+              headers: _headers(), body: jsonEncode({"messages": messages}))
+          .timeout(const Duration(seconds: 45));
+      final j = _decode(r);
+      if (r.statusCode == 200 && j["reply"] != null) {
+        return j["reply"] as String;
+      }
+      return (j["message"] as String?) ??
+          "Bello AI hit a snag. Try again shortly.";
+    } catch (_) {
+      return "Could not reach Bello AI. Check your connection and retry.";
+    }
+  }
+
   // ---------- security ----------
   static Future<void> reportViolation(String kind) async {
     try {
@@ -264,5 +324,65 @@ class Api {
     final r = await http.post(_u("/api/practice/$attemptId"),
         headers: _headers(), body: jsonEncode({"action": "finish"}));
     return _decode(r);
+  }
+
+  // ---------- tests / CBT ----------
+  // A live/timed test keeps its deadline on the SERVER (endsAt). Leaving
+  // the app never pauses it; on return we recompute the time left. This
+  // is the honest behaviour: an exam is an exam.
+  static Future<List<Map<String, dynamic>>> fetchTests() async {
+    final r = await http
+        .get(_u("/api/mobile/tests"), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode == 403) throw ApiException("not_activated");
+    if (r.statusCode != 200) throw ApiException("Could not load tests.");
+    final j = _decode(r);
+    return ((j["tests"] as List?) ?? []).cast<Map<String, dynamic>>();
+  }
+
+  static Future<Map<String, dynamic>> cbtStart(String testId) async {
+    final r = await http.post(_u("/api/cbt/start"),
+        headers: _headers(), body: jsonEncode({"testId": testId}));
+    final j = _decode(r);
+    if (r.statusCode == 403) throw ApiException("not_activated");
+    if (r.statusCode != 200) {
+      throw ApiException(j["error"]?.toString() ?? "Could not start.");
+    }
+    return j;
+  }
+
+  static Future<Map<String, dynamic>> cbtFeed(String attemptId) async {
+    final r = await http
+        .get(_u("/api/cbt/$attemptId"), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) throw ApiException("Could not load the test.");
+    return _decode(r);
+  }
+
+  static Future<void> cbtAnswer(
+      String attemptId, String questionId, String choice, String answerText) async {
+    try {
+      await http.post(_u("/api/cbt/answer"),
+          headers: _headers(),
+          body: jsonEncode({
+            "attemptId": attemptId,
+            "questionId": questionId,
+            "choice": choice,
+            "answerText": answerText,
+          }));
+    } catch (_) {}
+  }
+
+  static Future<Map<String, dynamic>> cbtSubmit(String attemptId) async {
+    final r = await http.post(_u("/api/cbt/submit"),
+        headers: _headers(), body: jsonEncode({"attemptId": attemptId}));
+    return _decode(r);
+  }
+
+  static Future<void> cbtViolation(String attemptId) async {
+    try {
+      await http.post(_u("/api/cbt/violation"),
+          headers: _headers(), body: jsonEncode({"attemptId": attemptId}));
+    } catch (_) {}
   }
 }

@@ -42,9 +42,9 @@ class _ActivateScreenState extends State<ActivateScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
+            Text(
                 "Enter your 9 digit activation key. The phone in your hand right now becomes your account's device.",
-                style: TextStyle(color: Colors.white70)),
+                style: TextStyle(color: Theme.of(context).hintColor)),
             const SizedBox(height: 18),
             TextField(
               controller: key9,

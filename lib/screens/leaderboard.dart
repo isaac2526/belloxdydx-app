@@ -66,8 +66,8 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                   ...((data!["top"] as List).cast<Map>()).map((r) => ListTile(
                         dense: true,
                         leading: Text("#${r["rank"]}",
-                            style: const TextStyle(
-                                color: Colors.white54,
+                            style: TextStyle(
+                                color: Theme.of(context).hintColor,
                                 fontWeight: FontWeight.w700)),
                         title: Text("@${r["username"]}"),
                         trailing: Text("${r["total"]} pts",

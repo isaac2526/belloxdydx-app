@@ -37,7 +37,7 @@ class VaultIndex {
     items.removeWhere((e) => e["id"] == id);
     await p.setString("vault_index", jsonEncode(items));
     final dir = await getApplicationDocumentsDirectory();
-    for (final ext in ["pdf", "html", "mp3", "m4a"]) {
+    for (final ext in ["pdf", "html", "mp3", "m4a", "png", "jpg", "webp"]) {
       final f = File("${dir.path}/vault/$id.$ext");
       if (await f.exists()) await f.delete();
     }
@@ -57,6 +57,26 @@ class VaultIndex {
     }
     return null;
   }
+
+  static Future<String?> localImagePath(String id) async {
+    for (final ext in ["png", "jpg", "webp"]) {
+      final f = await fileFor(id, ext);
+      if (await f.exists()) return f.path;
+    }
+    return null;
+  }
+}
+
+bool _looksImage(String url) {
+  final u = url.toLowerCase();
+  return u.contains(".png") || u.contains(".jpg") || u.contains(".jpeg") || u.contains(".webp");
+}
+
+String _imgExt(String url) {
+  final u = url.toLowerCase();
+  if (u.contains(".png")) return "png";
+  if (u.contains(".webp")) return "webp";
+  return "jpg";
 }
 
 String _audioExt(String url) {
@@ -88,6 +108,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
   PdfControllerPinch? pdf;
   String? videoUrl;
   AudioPlayer? _player;
+  String? _remoteImage;
+  String? _localImage;
   bool saving = false;
   bool saved = false;
 
@@ -106,6 +128,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
   Future<void> _load() async {
     try {
       if (widget.offline) {
+        final imgPath = await VaultIndex.localImagePath(widget.materialId);
+        if (imgPath != null) {
+          _localImage = imgPath;
+          setState(() => status = "image");
+          return;
+        }
         final audioPath = await VaultIndex.localAudioPath(widget.materialId);
         if (audioPath != null) {
           await _initAudio(audioPath, isLocal: true);
@@ -141,6 +169,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
       if (url != null && (url.toLowerCase().contains(".mp3") || url.toLowerCase().contains(".m4a"))) {
         await _initAudio(url, isLocal: false);
         setState(() => status = "audio");
+        return;
+      }
+      if (url != null && _looksImage(url)) {
+        _remoteImage = url;
+        setState(() => status = "image");
         return;
       }
       if (html != null && html.trim().isNotEmpty) {
@@ -187,6 +220,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
         final f = await VaultIndex.fileFor(widget.materialId, _audioExt(url));
         await f.writeAsBytes(r.bodyBytes);
         kind = "audio";
+      } else if (url != null && _looksImage(url)) {
+        final r = await http.get(Uri.parse(url));
+        final f = await VaultIndex.fileFor(widget.materialId, _imgExt(url));
+        await f.writeAsBytes(r.bodyBytes);
+        kind = "image";
       } else if (url != null && url.toLowerCase().contains(".pdf")) {
         final r = await http.get(Uri.parse(url));
         final f = await VaultIndex.fileFor(widget.materialId, "pdf");
@@ -253,6 +291,21 @@ class _ViewerScreenState extends State<ViewerScreen> {
       case "audio":
         body = _AudioBody(player: _player!, title: widget.title, wm: wm);
         break;
+      case "image":
+        body = Stack(children: [
+          Positioned.fill(
+            child: InteractiveViewer(
+              maxScale: 5,
+              child: Center(
+                child: _localImage != null
+                    ? Image.file(File(_localImage!))
+                    : Image.network(_remoteImage!),
+              ),
+            ),
+          ),
+          Positioned.fill(child: Watermark(text: wm)),
+        ]);
+        break;
       case "note":
         body = Stack(children: [
           SingleChildScrollView(
@@ -301,7 +354,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
     }
 
     final canSave = !widget.offline &&
-        (status == "pdf" || status == "note" || status == "audio");
+        (status == "pdf" || status == "note" || status == "audio" || status == "image");
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),

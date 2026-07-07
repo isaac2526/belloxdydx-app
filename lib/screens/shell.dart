@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../security.dart';
 import 'home.dart';
+import 'ai.dart';
 import 'vault.dart';
-import 'announcements.dart';
 import 'leaderboard.dart';
 import 'profile.dart';
 import 'login.dart';
@@ -59,7 +59,7 @@ class _ShellScreenState extends State<ShellScreen> with WidgetsBindingObserver {
     final pages = [
       const HomeScreen(),
       const VaultScreen(),
-      const AnnouncementsScreen(),
+      const AiScreen(),
       const LeaderboardScreen(),
       const ProfileScreen(),
     ];
@@ -71,7 +71,7 @@ class _ShellScreenState extends State<ShellScreen> with WidgetsBindingObserver {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.menu_book_outlined), selectedIcon: Icon(Icons.menu_book), label: "Courses"),
           NavigationDestination(icon: Icon(Icons.download_outlined), selectedIcon: Icon(Icons.download_done), label: "Offline"),
-          NavigationDestination(icon: Icon(Icons.campaign_outlined), selectedIcon: Icon(Icons.campaign), label: "News"),
+          NavigationDestination(icon: Icon(Icons.auto_awesome_outlined), selectedIcon: Icon(Icons.auto_awesome), label: "Bello AI"),
           NavigationDestination(icon: Icon(Icons.emoji_events_outlined), selectedIcon: Icon(Icons.emoji_events), label: "Ranks"),
           NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: "Profile"),
         ],

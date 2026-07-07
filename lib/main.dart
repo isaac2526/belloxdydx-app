@@ -24,6 +24,11 @@ class BelloxdydxApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = context.watch<ThemeController>();
+    // Tell the controller what the device brightness currently is, so
+    // "follow system" shows the right icon on the toggles.
+    final sysBrightness = MediaQuery.maybeOf(context)?.platformBrightness ??
+        WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    theme.noteBrightness(sysBrightness);
     return MaterialApp(
       title: "Belloxdydx",
       debugShowCheckedModeBanner: false,

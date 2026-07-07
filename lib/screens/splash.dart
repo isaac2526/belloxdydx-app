@@ -57,17 +57,17 @@ class _SplashScreenState extends State<SplashScreen> {
     }
 
     setState(() => target = 75);
+    // Load whatever we saved last so the app can open with NO network.
+    await Api.loadCachedContent();
     try {
-      await Api.fetchContent();
+      await Api.fetchContent(); // refreshes + re-caches; falls back internally
       unawaited(Api.streakTouch());
-      setState(() => target = 100);
-      await Future.delayed(const Duration(milliseconds: 450));
-      _go(const ShellScreen());
     } catch (_) {
-      setState(() => target = 100);
-      await Future.delayed(const Duration(milliseconds: 450));
-      _go(const ShellScreen());
+      // offline with no cache is handled inside Home with a retry.
     }
+    setState(() => target = 100);
+    await Future.delayed(const Duration(milliseconds: 400));
+    _go(const ShellScreen());
   }
 
   void _go(Widget w) {

@@ -25,13 +25,13 @@ class _VaultScreenState extends State<VaultScreen> {
   Widget build(BuildContext context) {
     return SafeArea(
       child: items.isEmpty
-          ? const Center(
+          ? Center(
               child: Padding(
-              padding: EdgeInsets.all(24),
+              padding: const EdgeInsets.all(24),
               child: Text(
                   "Your offline vault is empty.\n\nOpen any note or slide and tap the ⬇ download icon. It saves INSIDE the app only, readable with zero network, invisible to file managers.",
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white70)),
+                  style: TextStyle(color: Theme.of(context).hintColor)),
             ))
           : ListView(
               padding: const EdgeInsets.all(16),
@@ -40,8 +40,8 @@ class _VaultScreenState extends State<VaultScreen> {
                     style:
                         TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
                 const SizedBox(height: 4),
-                const Text("Reads with no network. Lives only inside the app.",
-                    style: TextStyle(color: Colors.white54)),
+                Text("Reads with no network. Lives only inside the app.",
+                    style: TextStyle(color: Theme.of(context).hintColor)),
                 const SizedBox(height: 14),
                 ...items.map((e) => Card(
                       margin: const EdgeInsets.only(bottom: 8),
