@@ -4,19 +4,27 @@ import 'package:url_launcher/url_launcher.dart';
 // A gentle, non blocking Update popup. When the website reports a
 // newer build, this offers a one tap link to the fresh APK. Students
 // can dismiss it and keep working; nagging is not our style.
-void showUpdateDialog(BuildContext context, Map<String, dynamic> info) {
+void showUpdateDialog(BuildContext context, Map<String, dynamic> info,
+    {bool required = false}) {
   final notes = "${info["notes"] ?? ""}";
   final url = "${info["apkUrl"] ?? ""}";
   final name = "${info["versionName"] ?? ""}";
   showDialog(
     context: context,
-    builder: (_) => AlertDialog(
-      title: Text("Update available${name.isNotEmpty ? "  ·  v$name" : ""}"),
+    // A required update cannot be waved away.
+    barrierDismissible: !required,
+    builder: (_) => PopScope(
+      canPop: !required,
+      child: AlertDialog(
+      title: Text((required ? "Update required" : "Update available") +
+          (name.isNotEmpty ? "  ·  v$name" : "")),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text("A newer version of Belloxdydx is ready."),
+          Text(required
+              ? "This version of Belloxdydx is no longer supported. Update to keep studying."
+              : "A newer version of Belloxdydx is ready."),
           if (notes.trim().isNotEmpty) ...[
             const SizedBox(height: 10),
             Text(notes,
@@ -25,13 +33,14 @@ void showUpdateDialog(BuildContext context, Map<String, dynamic> info) {
         ],
       ),
       actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text("Later"),
-        ),
+        if (!required)
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Later"),
+          ),
         FilledButton(
           onPressed: () {
-            Navigator.pop(context);
+            if (!required) Navigator.pop(context);
             if (url.startsWith("http")) {
               launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
             }
@@ -39,6 +48,7 @@ void showUpdateDialog(BuildContext context, Map<String, dynamic> info) {
           child: const Text("Update now"),
         ),
       ],
+      ),
     ),
   );
 }

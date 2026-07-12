@@ -1,15 +1,17 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../api.dart';
+import '../config.dart';
 import '../security.dart';
+import '../update_gate.dart';
+import '../widgets/connection_bar.dart';
 import 'home.dart';
+import 'courses.dart';
 import 'ai.dart';
 import 'vault.dart';
 import 'leaderboard.dart';
 import 'profile.dart';
 import 'login.dart';
-import '../config.dart';
-import '../update_gate.dart';
 
 class ShellScreen extends StatefulWidget {
   const ShellScreen({super.key});
@@ -35,8 +37,12 @@ class _ShellScreenState extends State<ShellScreen> with WidgetsBindingObserver {
   Future<void> _maybePromptUpdate() async {
     final info = await Api.checkUpdate();
     final latest = (info["versionCode"] as num?)?.toInt() ?? 0;
-    if (latest > appVersionCode && mounted) {
-      showUpdateDialog(context, info);
+    final minimum = (info["minVersionCode"] as num?)?.toInt() ?? 0;
+    if (!mounted) return;
+    if (appVersionCode < minimum) {
+      showUpdateDialog(context, info, required: true); // cannot be dismissed
+    } else if (latest > appVersionCode) {
+      showUpdateDialog(context, info); // gentle nudge
     }
   }
 
@@ -54,7 +60,8 @@ class _ShellScreenState extends State<ShellScreen> with WidgetsBindingObserver {
       Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text("Signed in on another device. Only one login can be alive.")));
+          content:
+              Text("Signed in on another device. Only one login can be alive.")));
     }
   }
 
@@ -69,22 +76,47 @@ class _ShellScreenState extends State<ShellScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final pages = [
       HomeScreen(onGoTab: (i) => setState(() => tab = i)),
+      const CoursesScreen(),
       const VaultScreen(),
       const AiScreen(),
       const LeaderboardScreen(),
       const ProfileScreen(),
     ];
     return Scaffold(
-      body: pages[tab],
+      body: Column(
+        children: [
+          const ConnectionBar(),
+          Expanded(child: pages[tab]),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.menu_book_outlined), selectedIcon: Icon(Icons.menu_book), label: "Courses"),
-          NavigationDestination(icon: Icon(Icons.download_outlined), selectedIcon: Icon(Icons.download_done), label: "Offline"),
-          NavigationDestination(icon: Icon(Icons.auto_awesome_outlined), selectedIcon: Icon(Icons.auto_awesome), label: "Bello AI"),
-          NavigationDestination(icon: Icon(Icons.emoji_events_outlined), selectedIcon: Icon(Icons.emoji_events), label: "Ranks"),
-          NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: "Profile"),
+          NavigationDestination(
+              icon: Icon(Icons.dashboard_outlined),
+              selectedIcon: Icon(Icons.dashboard),
+              label: "Home"),
+          NavigationDestination(
+              icon: Icon(Icons.menu_book_outlined),
+              selectedIcon: Icon(Icons.menu_book),
+              label: "Courses"),
+          NavigationDestination(
+              icon: Icon(Icons.download_outlined),
+              selectedIcon: Icon(Icons.download_done),
+              label: "Offline"),
+          NavigationDestination(
+              icon: Icon(Icons.auto_awesome_outlined),
+              selectedIcon: Icon(Icons.auto_awesome),
+              label: "Bello AI"),
+          NavigationDestination(
+              icon: Icon(Icons.emoji_events_outlined),
+              selectedIcon: Icon(Icons.emoji_events),
+              label: "Ranks"),
+          NavigationDestination(
+              icon: Icon(Icons.person_outline),
+              selectedIcon: Icon(Icons.person),
+              label: "Profile"),
         ],
       ),
     );

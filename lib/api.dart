@@ -64,6 +64,38 @@ class Api {
 
   static Uri _u(String path) => Uri.parse("$baseUrl$path");
 
+  // Turns any ugly technical failure into one clean human sentence, and
+  // never shows a student a server address or a stack trace.
+  static String netMessage(Object e) {
+    final s = e.toString().toLowerCase();
+    if (s.contains("socketexception") ||
+        s.contains("failed host lookup") ||
+        s.contains("network is unreachable") ||
+        s.contains("connection refused") ||
+        s.contains("connection closed") ||
+        s.contains("timeout") ||
+        s.contains("timed out") ||
+        s.contains("handshake")) {
+      return "No internet connection. Turn on your data or WiFi, then try again.";
+    }
+    if (e is ApiException) return e.message;
+    return "Something went wrong. Please try again.";
+  }
+
+  // Is the phone online, and how sharp is the line? Any HTTP reply at all
+  // means online, even a 404, because the phone reached us.
+  static Future<int> ping() async {
+    final started = DateTime.now();
+    try {
+      await http
+          .get(_u("/api/ping"))
+          .timeout(const Duration(seconds: 6));
+      return DateTime.now().difference(started).inMilliseconds;
+    } catch (_) {
+      return -1; // offline
+    }
+  }
+
   static Map<String, dynamic> _decode(http.Response r) {
     try {
       return jsonDecode(r.body) as Map<String, dynamic>;
@@ -94,9 +126,14 @@ class Api {
     try {
       await auth.signInWithPassword(email: email, password: password);
     } on AuthException catch (e) {
-      throw ApiException(e.message);
+      final m = e.message.toLowerCase();
+      throw ApiException(m.contains("invalid login")
+          ? "Wrong username or password. Check and try again."
+          : m.contains("email not confirmed")
+              ? "Your email is not confirmed yet."
+              : e.message);
     } catch (e) {
-      throw ApiException("Sign-in error: " + e.toString());
+      throw ApiException(netMessage(e));
     }
 
     late http.Response r;

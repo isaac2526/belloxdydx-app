@@ -1,12 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../api.dart';
 import '../theme.dart';
 import 'announcements.dart';
-import 'course.dart';
 import 'practice.dart';
 import 'cbt.dart';
-import 'cbt_result.dart';
 
 class HomeScreen extends StatefulWidget {
   final void Function(int tab)? onGoTab;
@@ -19,11 +18,22 @@ class _HomeScreenState extends State<HomeScreen> {
   bool busy = false;
   Map<String, dynamic> home = {};
   bool loadingHome = true;
+  Timer? _tick;
 
   @override
   void initState() {
     super.initState();
     _loadHome();
+    // The countdown counts down for real, once a second.
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && home["marathonIso"] != null) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadHome() async {
@@ -76,6 +86,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
     final courses = (c["courses"] as List?) ?? [];
+    final courseCount = courses.length;
     final materials = (c["materials"] as List?) ?? [];
     final me = (c["me"] as Map?) ?? {};
     final firstName = home["firstName"] ?? me["first_name"] ?? "champ";
@@ -92,7 +103,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 16,
-        title: const Text("Belloxdydx"),
+        title: const Text("Dashboard"),
         actions: [
           IconButton(
             tooltip: theme.isDark ? "Light mode" : "Dark mode",
@@ -164,38 +175,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
 
             // ---------- resume card (verified) ----------
-            if (resume != null)
-              Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: gold.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: gold.withOpacity(0.5)),
-                ),
-                child: ListTile(
-                  onTap: () {
-                    final id = "${resume["id"]}";
-                    if (resume["kind"] == "cbt") {
-                      Navigator.of(context).push(MaterialPageRoute(
-                          builder: (_) => CbtExamScreen(
-                              attemptId: id, title: "Continue exam")));
-                    } else {
-                      Navigator.of(context).push(MaterialPageRoute(
-                          builder: (_) => PracticeScreen(
-                              resumeAttemptId: id,
-                              courseId: "",
-                              courseCode:
-                                  "${resume["courseCode"] ?? "Practice"}")));
-                    }
-                  },
-                  leading: Icon(Icons.play_circle_fill, color: gold, size: 34),
-                  title: const Text("Continue where you stopped",
-                      style: TextStyle(fontWeight: FontWeight.w800)),
-                  subtitle: Text(
-                      "${resume["courseCode"] ?? ""} · your progress is saved"),
-                  trailing: const Icon(Icons.chevron_right),
-                ),
-              ),
+            if (resume != null) _resumeCard(resume, gold),
 
             // ---------- Tests & Exams ----------
             Card(
@@ -219,7 +199,7 @@ class _HomeScreenState extends State<HomeScreen> {
               margin: const EdgeInsets.only(bottom: 12),
               color: cardColor,
               child: ListTile(
-                onTap: () => widget.onGoTab?.call(2),
+                onTap: () => widget.onGoTab?.call(3),
                 leading: Icon(Icons.smart_toy_outlined, color: gold),
                 title: Text("Ask Bello AI",
                     style:
@@ -231,48 +211,41 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // ---------- streak + quote row ----------
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: Card(
-                    color: cardColor,
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text("STUDY STREAK",
-                              style: TextStyle(
-                                  fontSize: 10,
-                                  letterSpacing: 1,
-                                  color: Theme.of(context).hintColor)),
-                          const SizedBox(height: 6),
-                          Row(children: [
-                            const Text("🔥", style: TextStyle(fontSize: 22)),
-                            const SizedBox(width: 6),
-                            Text("${streak["current"] ?? 0}",
-                                style: TextStyle(
-                                    fontSize: 26,
-                                    fontWeight: FontWeight.w900,
-                                    color: onCard)),
-                            const SizedBox(width: 4),
-                            Text("days",
-                                style: TextStyle(
-                                    color: Theme.of(context).hintColor)),
-                          ]),
-                          const SizedBox(height: 4),
-                          Text("Best: ${streak["best"] ?? 0} days",
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: Theme.of(context).hintColor)),
-                        ],
-                      ),
-                    ),
-                  ),
+            // ---------- streak ----------
+            Card(
+              color: cardColor,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("STUDY STREAK",
+                        style: TextStyle(
+                            fontSize: 10,
+                            letterSpacing: 1,
+                            color: Theme.of(context).hintColor)),
+                    const SizedBox(height: 6),
+                    Row(children: [
+                      const Text("🔥", style: TextStyle(fontSize: 22)),
+                      const SizedBox(width: 6),
+                      Text("${streak["current"] ?? 0}",
+                          style: TextStyle(
+                              fontSize: 26,
+                              fontWeight: FontWeight.w900,
+                              color: onCard)),
+                      const SizedBox(width: 4),
+                      Text("days",
+                          style:
+                              TextStyle(color: Theme.of(context).hintColor)),
+                    ]),
+                    const SizedBox(height: 4),
+                    Text("Best run: ${streak["best"] ?? 0} days",
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: Theme.of(context).hintColor)),
+                  ],
                 ),
-              ],
+              ),
             ),
             const SizedBox(height: 4),
             if ((quote["content"] ?? "").toString().isNotEmpty)
@@ -343,76 +316,60 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 10),
 
-            // ---------- your courses ----------
-            Text("YOUR COURSES",
-                style: TextStyle(
-                    fontSize: 11,
-                    letterSpacing: 1,
-                    fontWeight: FontWeight.w700,
-                    color: Theme.of(context).hintColor)),
+            // ---------- doorway to courses ----------
+            Card(
+              color: cardColor,
+              child: ListTile(
+                onTap: () => widget.onGoTab?.call(1),
+                leading: Icon(Icons.menu_book, color: gold),
+                title: Text("Your courses",
+                    style:
+                        TextStyle(fontWeight: FontWeight.w700, color: onCard)),
+                subtitle: Text(
+                    "$courseCount courses · notes, slides and practice",
+                    style: TextStyle(color: Theme.of(context).hintColor)),
+                trailing: Icon(Icons.chevron_right, color: onCard),
+              ),
+            ),
             const SizedBox(height: 8),
-            ...courses.map((co) {
-              final m = co as Map;
-              final count = materials
-                  .where((x) => (x as Map)["course_id"] == m["id"])
-                  .length;
-              return Card(
-                margin: const EdgeInsets.only(bottom: 10),
-                color: cardColor,
-                child: Column(
-                  children: [
-                    ListTile(
-                      onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                              builder: (_) => CourseScreen(course: m))),
-                      leading: CircleAvatar(
-                        backgroundColor: gold,
-                        child: Text(
-                            (m["code"] ?? "?")
-                                .toString()
-                                .split(" ")
-                                .first
-                                .substring(0, 1),
-                            style: TextStyle(
-                                color: navy, fontWeight: FontWeight.w800)),
-                      ),
-                      title: Text("${m["code"]}",
-                          style: TextStyle(
-                              fontWeight: FontWeight.w700, color: onCard)),
-                      subtitle: Text("${m["title"]} · $count materials",
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style:
-                              TextStyle(color: Theme.of(context).hintColor)),
-                      trailing: Icon(Icons.chevron_right, color: onCard),
-                    ),
-                    // Practice button under EVERY course, like the website.
-                    Padding(
-                      padding:
-                          const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: () => Navigator.of(context).push(
-                              MaterialPageRoute(
-                                  builder: (_) => PracticeScreen(
-                                      courseId: "${m["id"]}",
-                                      courseCode: "${m["code"]}"))),
-                          icon: Icon(Icons.quiz, color: gold, size: 18),
-                          label: Text("Practice ${m["code"]} questions",
-                              style: TextStyle(color: onCard)),
-                          style: OutlinedButton.styleFrom(
-                            side: BorderSide(color: gold.withOpacity(0.5)),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
           ],
         ),
+      ),
+    );
+  }
+
+  // Taking the map as a non nullable argument means no null doubts
+  // can follow us into the tap handler.
+  Widget _resumeCard(Map resume, Color gold) {
+    final id = "${resume["id"]}";
+    final kind = "${resume["kind"]}";
+    final code = "${resume["courseCode"] ?? ""}";
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: gold.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: gold.withOpacity(0.5)),
+      ),
+      child: ListTile(
+        onTap: () {
+          if (kind == "cbt") {
+            Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) =>
+                    CbtExamScreen(attemptId: id, title: "Continue exam")));
+          } else {
+            Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => PracticeScreen(
+                    resumeAttemptId: id,
+                    courseId: "",
+                    courseCode: code.isEmpty ? "Practice" : code)));
+          }
+        },
+        leading: Icon(Icons.play_circle_fill, color: gold, size: 34),
+        title: const Text("Continue where you stopped",
+            style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text("$code · your progress is saved"),
+        trailing: const Icon(Icons.chevron_right),
       ),
     );
   }

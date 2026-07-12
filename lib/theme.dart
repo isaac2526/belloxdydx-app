@@ -17,7 +17,9 @@ const lightBorder = Color(0x14000000);
 // A tiny theme controller the whole app listens to, so dark/light flips
 // instantly and remembers the choice.
 class ThemeController extends ChangeNotifier {
-  ThemeMode _mode = ThemeMode.system;
+  // The app opens in light mode by default. Students can switch to
+  // dark from Profile, and the choice is remembered.
+  ThemeMode _mode = ThemeMode.light;
   ThemeMode get mode => _mode;
 
   Future<void> load() async {
