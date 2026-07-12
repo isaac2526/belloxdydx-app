@@ -8,6 +8,8 @@ import 'vault.dart';
 import 'leaderboard.dart';
 import 'profile.dart';
 import 'login.dart';
+import '../config.dart';
+import '../update_gate.dart';
 
 class ShellScreen extends StatefulWidget {
   const ShellScreen({super.key});
@@ -27,6 +29,15 @@ class _ShellScreenState extends State<ShellScreen> with WidgetsBindingObserver {
     Security.watch(() => context);
     _beat = Timer.periodic(const Duration(seconds: 45), (_) => _check());
     _check();
+    _maybePromptUpdate();
+  }
+
+  Future<void> _maybePromptUpdate() async {
+    final info = await Api.checkUpdate();
+    final latest = (info["versionCode"] as num?)?.toInt() ?? 0;
+    if (latest > appVersionCode && mounted) {
+      showUpdateDialog(context, info);
+    }
   }
 
   @override
@@ -57,7 +68,7 @@ class _ShellScreenState extends State<ShellScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      const HomeScreen(),
+      HomeScreen(onGoTab: (i) => setState(() => tab = i)),
       const VaultScreen(),
       const AiScreen(),
       const LeaderboardScreen(),

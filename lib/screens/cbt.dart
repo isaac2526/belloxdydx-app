@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_widget_from_html/flutter_widget_from_html.dart';
 import '../api.dart';
 import '../watermark.dart';
+import 'cbt_result.dart';
 
 // The tests & exams hub. A live/timed exam runs on a SERVER clock:
 // leaving the app does not pause it. Practice can pause; exams cannot.
@@ -247,22 +248,38 @@ class _CbtExamScreenState extends State<CbtExamScreen> with WidgetsBindingObserv
   void _showResult(Map<String, dynamic>? j) {
     if (!mounted) return;
     _ticker?.cancel();
+    final score = j?["score"];
+    final total = j?["total"];
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (_) => AlertDialog(
-        title: const Text("Submitted ✓"),
-        content: Text(j != null && j["score"] != null
-            ? "You scored ${j["score"]} out of ${j["total"]}."
+        title: const Text("Submitted \u2713"),
+        content: Text(score != null
+            ? "You scored $score out of $total.\n\nReview every question with the correct answers and explanations?"
             : "Your test has been submitted."),
         actions: [
-          FilledButton(
+          TextButton(
             onPressed: () {
               Navigator.pop(context); // dialog
               Navigator.pop(context); // exam screen
             },
             child: const Text("Done"),
           ),
+          if (score != null)
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(context); // dialog
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        CbtResultScreen(attemptId: widget.attemptId),
+                  ),
+                );
+              },
+              child: const Text("See corrections"),
+            ),
         ],
       ),
     );

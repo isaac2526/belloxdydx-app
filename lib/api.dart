@@ -207,6 +207,45 @@ class Api {
         "Could not load your courses. You seem offline and nothing is saved yet. Connect once to download.");
   }
 
+  // The app dashboard in one call: greeting, streak, quote, marathon,
+  // and a resume card the server already verified is still openable.
+  static Future<Map<String, dynamic>> fetchHome() async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final r = await http
+            .get(_u("/api/mobile/home2"), headers: _headers())
+            .timeout(const Duration(seconds: 12));
+        if (r.statusCode == 200) return _decode(r);
+      } catch (_) {
+        await Future.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+      }
+    }
+    return {};
+  }
+
+  // Full post exam review: every question, the pick, the answer, the why.
+  static Future<Map<String, dynamic>> cbtResult(String attemptId) async {
+    final r = await http.get(_u("/api/mobile/cbt-result/$attemptId"),
+        headers: _headers());
+    final j = _decode(r);
+    if (r.statusCode != 200) {
+      throw ApiException(j["error"]?.toString() ?? "Could not load the review.");
+    }
+    return j;
+  }
+
+  // Ask the website if a newer APK exists. Never throws; update is a
+  // gentle nudge, never a blocker.
+  static Future<Map<String, dynamic>> checkUpdate() async {
+    try {
+      final r = await http
+          .get(_u("/api/mobile/version"), headers: _headers())
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode == 200) return _decode(r);
+    } catch (_) {}
+    return {};
+  }
+
   static Future<Map<String, dynamic>> fetchMaterial(String id) async {
     final r =
         await http.get(_u("/api/mobile/material/$id"), headers: _headers());

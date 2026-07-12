@@ -5,8 +5,12 @@ import '../api.dart';
 class PracticeScreen extends StatefulWidget {
   final String courseId;
   final String courseCode;
+  final String? resumeAttemptId;
   const PracticeScreen(
-      {super.key, required this.courseId, required this.courseCode});
+      {super.key,
+      required this.courseId,
+      required this.courseCode,
+      this.resumeAttemptId});
 
   @override
   State<PracticeScreen> createState() => _PracticeScreenState();
@@ -28,7 +32,10 @@ class _PracticeScreenState extends State<PracticeScreen> {
 
   Future<void> _start() async {
     try {
-      attemptId = await Api.practiceStart(widget.courseId);
+      // Resume an existing session when the dashboard sent us here,
+      // otherwise begin a fresh practice for the course.
+      attemptId = widget.resumeAttemptId ??
+          await Api.practiceStart(widget.courseId);
       final feed = await Api.practiceFeed(attemptId!);
       questions = ((feed["questions"] as List?) ?? []).cast<Map>();
       index = ((feed["attempt"] as Map?)?["current_index"] as num?)
