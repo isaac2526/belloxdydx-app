@@ -1,44 +1,23 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'api.dart';
-import 'config.dart';
-import 'theme.dart';
-import 'screens/splash.dart';
-import 'screens/login.dart';
+import 'clone_shell.dart';
 
-Future<void> main() async {
+// Belloxdydx v4 — the exact-clone era. The website is the app; this
+// shell adds the native powers (secure screen, persistent session,
+// branded offline, deep links) and nothing else stands between the
+// student and the real platform.
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
-  await Api.init();
-  final theme = ThemeController();
-  await theme.load();
-  runApp(
-    ChangeNotifierProvider.value(value: theme, child: const BelloxdydxApp()),
-  );
+  runApp(const BelloxdydxApp());
 }
 
 class BelloxdydxApp extends StatelessWidget {
   const BelloxdydxApp({super.key});
-
   @override
   Widget build(BuildContext context) {
-    final theme = context.watch<ThemeController>();
-    // Tell the controller what the device brightness currently is, so
-    // "follow system" shows the right icon on the toggles.
-    final sysBrightness = MediaQuery.maybeOf(context)?.platformBrightness ??
-        WidgetsBinding.instance.platformDispatcher.platformBrightness;
-    theme.noteBrightness(sysBrightness);
-    return MaterialApp(
+    return const MaterialApp(
       title: "Belloxdydx",
       debugShowCheckedModeBanner: false,
-      theme: lightTheme,
-      darkTheme: darkTheme,
-      themeMode: theme.mode,
-      routes: {
-        "/login": (_) => const LoginScreen(),
-      },
-      home: const SplashScreen(),
+      home: CloneShell(),
     );
   }
 }
