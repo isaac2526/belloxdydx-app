@@ -30,7 +30,11 @@ class _LoginScreenState extends State<LoginScreen> {
     });
     try {
       final activated = await Api.login(email.text, pass.text);
-      await Api.fetchContent();
+      // Content is best-effort — the dashboard has its own retry. A slow
+      // first fetch must NEVER block a student who just logged in.
+      try {
+        await Api.fetchContent();
+      } catch (_) {}
 
       // Offer biometric enrollment once, after a successful password login.
       if (await Biometric.available() && !(await Biometric.isEnabled())) {

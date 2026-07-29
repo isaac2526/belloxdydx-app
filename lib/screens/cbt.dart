@@ -104,7 +104,88 @@ class _CbtListScreenState extends State<CbtListScreen> {
         ),
       );
     }
-    return Scaffold(appBar: AppBar(title: const Text("Tests & Exams")), body: body);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Tests & Exams"),
+        actions: [
+          IconButton(
+            tooltip: "Open a shared test link",
+            icon: const Icon(Icons.link),
+            onPressed: _enterCode,
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _enterCode,
+        icon: const Icon(Icons.link),
+        label: const Text("Open shared link"),
+      ),
+      body: body,
+    );
+  }
+
+  // A test or exam shared as a link (belloxdydx.org/cbt/<id> or
+  // /test/<id>) or a bare code can be opened straight from the app.
+  Future<void> _enterCode() async {
+    final ctrl = TextEditingController();
+    final value = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Open a shared test"),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text(
+            "Paste the test link Tutor Bello shared, or type the test code.",
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              hintText: "https://belloxdydx.org/cbt/…  or  code",
+            ),
+          ),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancel")),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, ctrl.text.trim()),
+              child: const Text("Open")),
+        ],
+      ),
+    );
+    if (value == null || value.isEmpty) return;
+    // Pull the id out of any belloxdydx link shape, else use the raw text.
+    final m = RegExp(r"(?:cbt|test|exam|t)/([A-Za-z0-9-]{6,})").firstMatch(value);
+    final id = m != null ? m.group(1)! : value;
+    await _openById(id);
+  }
+
+  Future<void> _openById(String testId) async {
+    try {
+      final res = await Api.cbtStart(testId);
+      final attemptId = res["attemptId"] as String;
+      if (!mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => CbtExamScreen(
+              attemptId: attemptId, title: "${res["title"] ?? "Test"}")));
+      _load();
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(e.message == "not_activated"
+                ? "Tests are premium — activate your account first."
+                : e.message)));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(friendly(e))));
+      }
+    }
   }
 
   Future<void> _openTest(Map<String, dynamic> t) async {

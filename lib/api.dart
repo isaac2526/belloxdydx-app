@@ -253,8 +253,10 @@ class Api {
     // Network failed: fall back to cache if we have it.
     await loadCachedContent();
     if (content != null) return content!;
-    throw ApiException(
-        "Could not load your courses. You seem offline and nothing is saved yet. Connect once to download.");
+    // Still nothing: keep an empty-but-valid shell so the app opens to
+    // the dashboard (with a Retry) instead of a dead offline wall.
+    content = {"courses": [], "materials": [], "announcements": [], "me": {}};
+    return content!;
   }
 
   // The app dashboard in one call: greeting, streak, quote, marathon,
