@@ -2,6 +2,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../api.dart';
+import '../widgets/charts.dart';
+import 'millionaire.dart';
+import 'league.dart';
+import 'daily.dart';
+import 'mistakes.dart';
+import 'cgpa.dart';
 import '../theme.dart';
 import 'announcements.dart';
 import 'practice.dart';
@@ -192,6 +198,127 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: TextStyle(color: Theme.of(context).hintColor)),
                 trailing: Icon(Icons.chevron_right, color: onCard),
               ),
+            ),
+
+            // ---------- WHO WANTS TO BE A BELLOXDYDX MILLIONAIRE ----------
+            GestureDetector(
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const MillionaireScreen())),
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(18),
+                  gradient: const LinearGradient(colors: [
+                    Color(0xFF070B22),
+                    Color(0xFF1C2766),
+                    Color(0xFF070B22)
+                  ]),
+                  border: Border.all(color: const Color(0xFFD4AF37)),
+                ),
+                child: Row(children: [
+                  const Text("🎰", style: TextStyle(fontSize: 30)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: const [
+                          Text("WHO WANTS TO BE A BELLOXDYDX MILLIONAIRE?",
+                              style: TextStyle(
+                                  color: Color(0xFFF5B301),
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 13)),
+                          SizedBox(height: 3),
+                          Text(
+                              "15 questions · the clock ticks · ₦1,000,000 bragging money",
+                              style: TextStyle(
+                                  color: Color(0xFF9FB0CC), fontSize: 11)),
+                        ]),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        color: const Color(0xFFF5B301)),
+                    child: const Text("PLAY ▶",
+                        style: TextStyle(
+                            color: Color(0xFF0B1220),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 12)),
+                  ),
+                ]),
+              ),
+            ),
+
+            // ---------- competition + tools row ----------
+            Row(children: [
+              Expanded(
+                  child: _MiniDoor("⚔️", "League", const Color(0xFF3ECF8E),
+                      () => Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const LeagueScreen())))),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: _MiniDoor("⚡", "Daily", const Color(0xFF3EA0EE),
+                      () => Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const DailyScreen())))),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: _MiniDoor("🩹", "Mistakes", const Color(0xFFE5484D),
+                      () => Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const MistakesScreen())))),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: _MiniDoor("🧮", "CGPA", const Color(0xFF8B5CF6),
+                      () => Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const CgpaScreen())))),
+            ]),
+            const SizedBox(height: 12),
+
+            // ---------- your numbers (charts) ----------
+            FutureBuilder<Map<String, dynamic>>(
+              future: Api.summary(),
+              builder: (context, snap) {
+                final d = snap.data;
+                if (d == null || (d["testsTaken"] ?? 0) == 0) {
+                  return const SizedBox();
+                }
+                final bars = ((d["courseBars"] as List?) ?? [])
+                    .cast<Map>()
+                    .map((b) => MapEntry(
+                        "${b["label"]}", (b["value"] as num?) ?? 0))
+                    .toList();
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text("📊 Your numbers",
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w800, fontSize: 13)),
+                          const SizedBox(height: 8),
+                          Row(children: [
+                            _Stat("Attempts", "${d["testsTaken"]}"),
+                            _Stat("Average", "${d["avg"]}%"),
+                            _Stat("Answered", "${d["answered"]}"),
+                          ]),
+                          const SizedBox(height: 10),
+                          AccuracyBar(
+                              correct: (d["correct"] as num?)?.toInt() ?? 0,
+                              wrong: (d["wrong"] as num?)?.toInt() ?? 0),
+                          if (bars.isNotEmpty) ...[
+                            const SizedBox(height: 12),
+                            const Text("Attempts per course",
+                                style: TextStyle(fontSize: 11)),
+                            const SizedBox(height: 6),
+                            SizedBox(height: 110, child: MiniBars(data: bars)),
+                          ],
+                        ]),
+                  ),
+                );
+              },
             ),
 
             // ---------- Ask Bello AI ----------
@@ -391,6 +518,55 @@ class _HomeScreenState extends State<HomeScreen> {
         Text(label,
             style: TextStyle(fontSize: 9, color: Theme.of(context).hintColor)),
       ],
+    );
+  }
+}
+
+
+class _MiniDoor extends StatelessWidget {
+  final String emoji;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+  const _MiniDoor(this.emoji, this.label, this.color, this.onTap);
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          color: color.withOpacity(0.12),
+          border: Border.all(color: color.withOpacity(0.5)),
+        ),
+        child: Column(children: [
+          Text(emoji, style: const TextStyle(fontSize: 20)),
+          const SizedBox(height: 2),
+          Text(label,
+              style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w800, color: color)),
+        ]),
+      ),
+    );
+  }
+}
+
+class _Stat extends StatelessWidget {
+  final String label;
+  final String value;
+  const _Stat(this.label, this.value);
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Column(children: [
+        Text(value,
+            style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFFF5B301))),
+        Text(label, style: const TextStyle(fontSize: 10)),
+      ]),
     );
   }
 }

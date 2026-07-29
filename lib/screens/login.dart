@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api.dart';
+import 'register.dart';
 import '../config.dart';
 import '../biometric.dart';
 import 'shell.dart';
@@ -45,7 +46,7 @@ class _LoginScreenState extends State<LoginScreen> {
       });
     } catch (e) {
       setState(() {
-        error = e.toString();
+        error = friendly(e);
         busy = false;
       });
     }
@@ -143,8 +144,14 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             const SizedBox(height: 12),
             Center(
-                child: Text("New here? Create your account on the website.",
+                child: Text("New here? Create your account right here →",
                     style: TextStyle(color: hint, fontSize: 12))),
+              TextButton(
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => const RegisterScreen())),
+                child: const Text("Create account",
+                    style: TextStyle(fontWeight: FontWeight.w800)),
+              ),
             const SizedBox(height: 40),
             Center(
                 child: Text(brandFooter,

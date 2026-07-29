@@ -12,7 +12,7 @@ const baseUrl = "https://www.belloxdydx.org";
 
 // This app's own build number. The website reports the latest; if this
 // is lower, the app shows an Update popup. Bump on each release.
-const appVersionCode = 2;
+const appVersionCode = 3;
 
 const brandFooter =
     "Designed with excellence for academic distinction — Isaac Arinola Tech";

@@ -393,7 +393,23 @@ class _CbtExamScreenState extends State<CbtExamScreen> with WidgetsBindingObserv
                               fontSize: 13,
                               color: selected ? const Color(0xFF0B1220) : onBg)),
                     ),
-                    title: Text("${o["text"] ?? ""}"),
+                    title: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if ((o["image_url"] ?? "").toString().isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: Image.network("${o["image_url"]}",
+                                  height: 120,
+                                  errorBuilder: (_, __, ___) =>
+                                      const SizedBox()),
+                            ),
+                          ),
+                        Text("${o["text"] ?? ""}"),
+                      ],
+                    ),
                   ),
                 );
               }),

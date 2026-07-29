@@ -6,6 +6,7 @@ import '../config.dart';
 import '../security.dart';
 import '../biometric.dart';
 import 'login.dart';
+import 'landing.dart';
 import 'shell.dart';
 
 // The game-style 0 to 100 loader tied to real startup work.
@@ -40,7 +41,7 @@ class _SplashScreenState extends State<SplashScreen> {
     if (!Api.signedIn) {
       setState(() => target = 100);
       await Future.delayed(const Duration(milliseconds: 650));
-      _go(const LoginScreen());
+      _go(const LandingScreen());
       return;
     }
 
@@ -51,7 +52,7 @@ class _SplashScreenState extends State<SplashScreen> {
       if (!ok) {
         setState(() => target = 100);
         await Future.delayed(const Duration(milliseconds: 400));
-        _go(const LoginScreen());
+        _go(const LandingScreen());
         return;
       }
     }

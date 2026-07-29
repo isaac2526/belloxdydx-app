@@ -136,9 +136,20 @@ class _PracticeScreenState extends State<PracticeScreen> {
           Card(
             child: Padding(
               padding: const EdgeInsets.all(14),
-              child: HtmlWidget("${q["question_html"] ?? ""}",
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                if ((q["question_image_url"] ?? "").toString().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.network("${q["question_image_url"]}",
+                          errorBuilder: (_, __, ___) => const SizedBox()),
+                    ),
+                  ),
+                HtmlWidget("${q["question_html"] ?? ""}",
                   textStyle:
                       const TextStyle(fontSize: 17, color: Colors.white)),
+              ]),
             ),
           ),
           const SizedBox(height: 12),
@@ -162,7 +173,23 @@ class _PracticeScreenState extends State<PracticeScreen> {
                           backgroundColor: Theme.of(context).colorScheme.surface,
                           child: Text("${o["key"]}",
                               style: const TextStyle(fontSize: 13))),
-                      title: Text("${o["text"] ?? ""}"),
+                      title: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if ((o["image_url"] ?? "").toString().isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: Image.network("${o["image_url"]}",
+                                    height: 120,
+                                    errorBuilder: (_, __, ___) =>
+                                        const SizedBox()),
+                              ),
+                            ),
+                          Text("${o["text"] ?? ""}"),
+                        ],
+                      ),
                     ),
                   )),
           ] else ...[

@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
+import 'shield.dart';
 
 class DeviceLockedException implements Exception {
   final int daysLeft;
@@ -29,6 +30,18 @@ class ApiException implements Exception {
 
 // The app's single voice to the Belloxdydx backend. Same rules as the
 // website: merciful device lock, one live session, heartbeat judgement.
+/// Turns any raw failure into words a student should see. Raw
+/// exceptions can carry hosts and addresses; those never leave here.
+String friendly(Object e) {
+  if (e is FrozenException) return e.toString();
+  if (e is ApiException) return e.message;
+  final t = e.toString().toLowerCase();
+  if (t.contains("socket") || t.contains("network") || t.contains("connection") || t.contains("timeout") || t.contains("handshake")) {
+    return "Network wobbled. Check your connection and try again.";
+  }
+  return "Something went wrong. Pull to refresh or try again.";
+}
+
 class Api {
   static late SharedPreferences _prefs;
   static String? sessionToken;
@@ -224,7 +237,7 @@ class Api {
             .get(_u("/api/mobile/content"), headers: _headers())
             .timeout(const Duration(seconds: 20));
         if (r.statusCode == 200) {
-          content = _decode(r);
+          content = shieldDeep(_decode(r)) as Map<String, dynamic>;
           try {
             final f = await _cacheFile();
             await f.writeAsString(jsonEncode(content));
@@ -291,7 +304,7 @@ class Api {
     if (r.statusCode != 200) {
       throw ApiException("Could not open this material.");
     }
-    return j["material"] as Map<String, dynamic>;
+    return shieldDeep(j["material"]) as Map<String, dynamic>;
   }
 
   static Future<Map<String, dynamic>> leaderboard() async {
@@ -375,6 +388,9 @@ class Api {
     }
     return j["attemptId"] as String;
   }
+
+  static Map<String, dynamic> _shieldedJson(dynamic j) =>
+      shieldDeep(j) as Map<String, dynamic>;
 
   static Future<Map<String, dynamic>> practiceFeed(String attemptId) async {
     final r =
@@ -460,5 +476,130 @@ class Api {
       await http.post(_u("/api/cbt/violation"),
           headers: _headers(), body: jsonEncode({"attemptId": attemptId}));
     } catch (_) {}
+  }
+
+  // ============================================================
+  // DROP: the website's later era, spoken fluently by the app
+  // ============================================================
+
+  /// In-app account creation — the same door the website uses.
+  static Future<String?> register({
+    required String surname,
+    required String firstName,
+    required String matric,
+    required String email,
+    required String phone,
+    required String username,
+    required String password,
+    String referral = "",
+  }) async {
+    final r = await http
+        .post(_u("/api/auth/register"),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "surname": surname,
+              "firstName": firstName,
+              "matric": matric,
+              "email": email,
+              "phone": phone,
+              "username": username,
+              "password": password,
+              "referral": referral,
+            }))
+        .timeout(const Duration(seconds: 25));
+    if (r.statusCode == 200) return null;
+    final j = _decode(r);
+    final code = j["error"]?.toString() ?? "failed";
+    switch (code) {
+      case "username_taken":
+        return "That username is taken. Pick another.";
+      case "invalid_username":
+        return "Usernames: 3–20 letters, numbers or _ only.";
+      case "email_taken":
+      case "email_exists":
+        return "That email already has an account. Log in instead.";
+      case "weak_password":
+        return "Password too short — use at least 6 characters.";
+      default:
+        return "Could not create the account. Check your details and try again.";
+    }
+  }
+
+  /// Weekly league table + Hall of Winners.
+  static Future<Map<String, dynamic>> league() async {
+    final r = await http
+        .get(_u("/api/league"), headers: _headers())
+        .timeout(const Duration(seconds: 15));
+    if (r.statusCode != 200) throw ApiException("Could not load the League.");
+    return _decode(r);
+  }
+
+  /// The student's chart numbers in one call.
+  static Future<Map<String, dynamic>> summary() async {
+    final r = await http
+        .get(_u("/api/me/summary"), headers: _headers())
+        .timeout(const Duration(seconds: 15));
+    if (r.statusCode != 200) return {};
+    return _decode(r);
+  }
+
+  /// Personalized daily challenge (server draws from THIS student's courses).
+  static Future<Map<String, dynamic>> daily() async {
+    final r = await http
+        .get(_u("/api/daily"), headers: _headers())
+        .timeout(const Duration(seconds: 15));
+    final j = _decode(r);
+    if (r.statusCode == 423) throw FrozenException(j["reason"]?.toString());
+    if (r.statusCode != 200) {
+      throw ApiException(j["error"] == "empty_bank"
+          ? "No questions in your world yet. Practice a course first."
+          : "Could not fetch today's challenge.");
+    }
+    return _shieldedJson(j);
+  }
+
+  /// My Mistakes deck.
+  static Future<List<Map<String, dynamic>>> mistakes() async {
+    final r = await http
+        .get(_u("/api/mistakes"), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) throw ApiException("Could not load your mistakes.");
+    final j = _shieldedJson(_decode(r));
+    return ((j["items"] as List?) ?? []).cast<Map<String, dynamic>>();
+  }
+
+  /// Millionaire: deal a fresh game (15 + 3 spares).
+  static Future<List<Map<String, dynamic>>> millionaireStart(
+      List<String> courseIds) async {
+    final r = await http
+        .post(_u("/api/millionaire"),
+            headers: _headers(), body: jsonEncode({"courseIds": courseIds}))
+        .timeout(const Duration(seconds: 25));
+    final j = _decode(r);
+    if (r.statusCode != 200) {
+      throw ApiException(
+          j["message"]?.toString() ?? "Could not set the stage.");
+    }
+    final shielded = _shieldedJson(j);
+    return ((shielded["questions"] as List?) ?? [])
+        .cast<Map<String, dynamic>>();
+  }
+
+  /// Millionaire: record the ending for the Hall of Winners.
+  static Future<void> millionaireReport(int won, bool crowned) async {
+    try {
+      await http.put(_u("/api/millionaire"),
+          headers: _headers(),
+          body: jsonEncode({"won": won, "crowned": crowned}));
+    } catch (_) {}
+  }
+
+  /// Ask the Class — real answer spread for one question.
+  static Future<Map<String, dynamic>> millionairePoll(String qid) async {
+    final r = await http
+        .get(_u("/api/millionaire/poll?qid=$qid"), headers: _headers())
+        .timeout(const Duration(seconds: 12));
+    if (r.statusCode != 200) return {"sample": 0, "spread": {}};
+    return _decode(r);
   }
 }
