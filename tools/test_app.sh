@@ -35,10 +35,12 @@ pkill -9 -f "bx-static-file-server" 2>/dev/null || true
 sleep 1
 
 echo "==> starting mock backend on :$MOCK_PORT"
-WS_TRACE=1 node tools/mock_backend.js "$MOCK_PORT" >"$OUT/mock.log" 2>&1 &
+WS_TRACE=1 BX_PROD_SIM=${BX_PROD_SIM:-} node tools/mock_backend.js "$MOCK_PORT" >"$OUT/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 1.5
-curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/rest/v1/rpc/bx_capabilities" \
+# Ping, not bx_capabilities: in BX_PROD_SIM the RPC layer is deliberately
+# absent, which is the whole point of that mode.
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/api/ping" \
   -H 'Content-Type: application/json' -d '{}' >/dev/null \
   || { echo "FATAL: mock backend did not start"; cat "$OUT/mock.log"; exit 1; }
 

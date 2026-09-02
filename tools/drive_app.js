@@ -432,6 +432,9 @@ async function waitFor(page, texts, timeout = 20000) {
 
   const consoleErrors = [];
   page.on('console', (m) => {
+    if (m.text().startsWith('[DIAG]') || m.text().startsWith('[backend]')) {
+      fs.appendFileSync(path.join(OUT, 'diag.log'), m.text() + '\n');
+    }
     if (m.type() === 'error') consoleErrors.push(m.text().slice(0, 300));
   });
   page.on('pageerror', (e) => consoleErrors.push('pageerror: ' + String(e).slice(0, 300)));

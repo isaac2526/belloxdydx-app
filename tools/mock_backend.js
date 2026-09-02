@@ -912,6 +912,77 @@ const server = http.createServer(async (req, res) => {
   if (path === '/auth/v1/recover') { return send(res, 200, {}); }
 
   // ---------- Supabase REST ----------
+  // ---------- Production simulation ----------
+  // Production has NOT had the bx_* migration applied, so the app there
+  // falls back to the website API — a path the drive had never once
+  // exercised. BX_PROD_SIM makes this mock behave the same way: no RPC
+  // layer, and a profiles table that RLS keeps to itself.
+  if (process.env.BX_PROD_SIM && path.startsWith('/rest/v1/rpc/')) {
+    const fn = path.replace('/rest/v1/rpc/', '');
+    return send(res, 404, {
+      code: 'PGRST202',
+      message: `Could not find the function public.${fn}(...) in the schema cache`,
+    });
+  }
+
+  if (process.env.BX_PROD_SIM && path === '/rest/v1/profiles') {
+    // RLS with no SELECT policy does not error — it returns nothing.
+    return send(res, 200, []);
+  }
+
+  // The legacy endpoints the app falls back to. These all exist on the
+  // real website; they are here so the fallback can be tested.
+  if (process.env.BX_PROD_SIM) {
+    const u = authUser(req);
+    if (path === '/api/auth/login') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      state.devices[u.id] = body.deviceId || 'unknown-device';
+      return send(res, 200, { ok: true, mobileToken: `mob-${u.id}` });
+    }
+    if (path === '/api/profile' && req.method === 'GET') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, { profile: profileOf(u) });
+    }
+    if (path === '/api/auth/heartbeat') {
+      return u ? send(res, 200, { ok: true }) : send(res, 401, { error: 'unauthenticated' });
+    }
+    if (path === '/api/mobile/home2') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_dashboard(u, {}));
+    }
+    if (path === '/api/me/summary') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_dashboard(u, {}));
+    }
+    if (path === '/api/mobile/content') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_content(u, {}));
+    }
+    if (path === '/api/mobile/tests') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, { tests: RPC.bx_tests(u, {}) });
+    }
+    if (path === '/api/mobile/leaderboard') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, { rows: RPC.bx_leaderboard(u, {}) });
+    }
+    if (path === '/api/daily') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_daily(u, {}));
+    }
+    if (path === '/api/league') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_league(u, {}));
+    }
+    if (path === '/api/mistakes') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, { questions: RPC.bx_mistakes(u, {}) });
+    }
+    if (path === '/api/streak/touch') {
+      return send(res, 200, { ok: true });
+    }
+  }
+
   if (path.startsWith('/rest/v1/rpc/')) {
     const fn = path.replace('/rest/v1/rpc/', '');
     const impl = RPC[fn];
