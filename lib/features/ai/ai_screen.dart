@@ -112,8 +112,7 @@ class _AiScreenState extends ConsumerState<AiScreen> {
       if (reduceMotion(context)) {
         _scroll.jumpTo(0);
       } else {
-        _scroll.animateTo(0,
-            duration: BxDuration.base, curve: BxCurves.enter);
+        _scroll.animateTo(0, duration: BxDuration.base, curve: BxCurves.enter);
       }
     });
   }
@@ -373,8 +372,8 @@ class _AiMark extends StatelessWidget {
         shape: BoxShape.circle,
         border: Border.all(color: c.gold.withValues(alpha: 0.42)),
       ),
-      child: Icon(Icons.auto_awesome_rounded,
-          size: size * 0.5, color: c.goldDeep),
+      child:
+          Icon(Icons.auto_awesome_rounded, size: size * 0.5, color: c.goldDeep),
     );
   }
 }
@@ -560,30 +559,40 @@ class _Composer extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
                       Expanded(
-                        child: TextField(
-                          controller: controller,
-                          focusNode: focusNode,
-                          readOnly: locked,
-                          onTap: locked ? onLockedTap : null,
-                          minLines: 1,
-                          maxLines: 5,
-                          keyboardType: TextInputType.multiline,
-                          textCapitalization: TextCapitalization.sentences,
-                          textInputAction: TextInputAction.newline,
-                          style: BxType.body(c.ink),
-                          decoration: InputDecoration(
-                            hintText: locked
-                                ? 'Activate to chat with Bello'
-                                : 'Ask Bello anything…',
-                            isDense: true,
-                            contentPadding: const EdgeInsets.symmetric(
-                                horizontal: BxSpace.md, vertical: BxSpace.sm),
-                            prefixIcon: locked
-                                ? Icon(Icons.lock_outline_rounded,
-                                    size: 18, color: c.muted)
-                                : null,
-                            prefixIconConstraints: const BoxConstraints(
-                                minWidth: 38, minHeight: 38),
+                        // A hint is not a name: once the student types a
+                        // character it disappears, and the most important
+                        // input in the app is announced as an unlabelled
+                        // text field for the rest of the conversation.
+                        child: Semantics(
+                          label: locked
+                              ? 'Activate to chat with Bello'
+                              : 'Ask Bello anything',
+                          textField: true,
+                          child: TextField(
+                            controller: controller,
+                            focusNode: focusNode,
+                            readOnly: locked,
+                            onTap: locked ? onLockedTap : null,
+                            minLines: 1,
+                            maxLines: 5,
+                            keyboardType: TextInputType.multiline,
+                            textCapitalization: TextCapitalization.sentences,
+                            textInputAction: TextInputAction.newline,
+                            style: BxType.body(c.ink),
+                            decoration: InputDecoration(
+                              hintText: locked
+                                  ? 'Activate to chat with Bello'
+                                  : 'Ask Bello anything…',
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: BxSpace.md, vertical: BxSpace.sm),
+                              prefixIcon: locked
+                                  ? Icon(Icons.lock_outline_rounded,
+                                      size: 18, color: c.muted)
+                                  : null,
+                              prefixIconConstraints: const BoxConstraints(
+                                  minWidth: 38, minHeight: 38),
+                            ),
                           ),
                         ),
                       ),

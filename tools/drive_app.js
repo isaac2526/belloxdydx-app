@@ -56,7 +56,14 @@ async function nodes(page) {
   return page.evaluate(() => {
     const out = [];
     document.querySelectorAll('flt-semantics').forEach((el) => {
-      const label = el.getAttribute('aria-label') || el.textContent || '';
+      // A Flutter text field is an <input> INSIDE the semantics element,
+      // and the accessible name lives on that input — not on the wrapper.
+      // Reading only the wrapper makes every text field invisible here.
+      const field = el.querySelector(':scope > input, :scope > textarea');
+      const label = el.getAttribute('aria-label')
+        || (field && (field.getAttribute('aria-label') || field.getAttribute('placeholder')))
+        || el.textContent
+        || '';
       const r = el.getBoundingClientRect();
       if (!label.trim()) return;
       if (r.width < 1 || r.height < 1) return;
@@ -75,6 +82,26 @@ async function nodes(page) {
     });
     return out;
   });
+}
+
+/**
+ * Writes the whole semantics tree to a file.
+ *
+ * When a control cannot be found, the useful question is what the app
+ * IS exposing — guessing from a screenshot costs a build cycle each time.
+ */
+async function dumpTree(page, name) {
+  const rows = await page.evaluate(() => [...document.querySelectorAll('flt-semantics')].map((el) => {
+    const r = el.getBoundingClientRect();
+    const field = el.querySelector(':scope > input, :scope > textarea');
+    const extra = field
+      ? ` <${field.tagName.toLowerCase()} aria-label="${field.getAttribute('aria-label')}" placeholder="${field.getAttribute('placeholder')}">`
+      : '';
+    const label = (el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 60);
+    return `${String(Math.round(r.y)).padStart(5)} ${String(Math.round(r.x)).padStart(4)} `
+      + `${Math.round(r.width)}x${Math.round(r.height)} [${el.getAttribute('role') || '-'}] ${label}${extra}`;
+  }));
+  fs.writeFileSync(path.join(OUT, `tree-${name}.txt`), rows.join('\n'));
 }
 
 async function labels(page) {
@@ -200,6 +227,27 @@ async function tapTab(page, name, settle = 1400) {
   return true;
 }
 
+/**
+ * Gets back to the tabbed shell from wherever we are.
+ *
+ * Several screens are pushed over the shell and a couple of them (a
+ * running game, an exam) hold on to you deliberately. Without this, one
+ * screen that refuses to close makes every later check report a missing
+ * button when the button is simply on another route.
+ */
+async function toShell(page, tries = 4) {
+  for (let i = 0; i < tries; i++) {
+    if (await tapTab(page, 'Home', 1400)) return true;
+    if (await tap(page, 'Back', { exact: true, settle: 1200 })) continue;
+    for (const out of ['Leave', 'Quit', 'Not now', 'Close', 'Done']) {
+      if (await tap(page, out, { exact: true, settle: 1200 })) break;
+    }
+    await page.goBack().catch(() => {});
+    await sleep(1200);
+  }
+  return tapTab(page, 'Home', 1400);
+}
+
 /** Leaves a pushed route the way a student would: the app bar's back arrow. */
 async function goBack(page, settle = 1400) {
   if (await tap(page, 'Back', { exact: true, settle })) return true;
@@ -296,7 +344,11 @@ async function fillByLabel(page, labelText, value, dy = 40) {
 
 /** Focuses whatever field is on screen and types into it. */
 async function typeIntoFocused(page, value) {
-  const focused = await page.$('input:focus, textarea:focus');
+  let focused = null;
+  for (let i = 0; i < 6 && !focused; i++) {
+    focused = await page.$('input:focus, textarea:focus');
+    if (!focused) await sleep(300);
+  }
   if (!focused) return false;
   await page.keyboard.press('Control+A').catch(() => {});
   if (value === '') {
@@ -703,11 +755,126 @@ async function waitFor(page, texts, timeout = 20000) {
       log('warn', 'dark theme', 'appearance control not found');
     }
 
+    // ---------- Bello AI ----------
+    await toShell(page);
+    // The chat is where the loading states actually matter: a student
+    // waits on this one, so "Bello is thinking…" has to appear and then
+    // give way to an answer.
+    await tapTab(page, 'Bello AI', 2000);
+    const aiReady = await waitFor(page, ['Ask Bello anything', 'Ask me anything'], 12000);
+    if (aiReady) {
+      let asked = await fillByLabel(page, 'Ask Bello anything', 'What is momentum?', 0);
+      if (!asked) {
+        // Flutter draws a text field as a bare <input> with no label of
+        // its own, so fall back to where it visibly is: the wide box on
+        // the same row as Send, just to its left.
+        const send = await find(page, 'Send', { exact: true });
+        if (send) {
+          await page.mouse.click(Math.max(40, send.x - 160), send.y);
+          await sleep(700);
+          asked = await typeIntoFocused(page, 'What is momentum?');
+        }
+      }
+      if (!asked) await dumpTree(page, 'ai');
+      log(asked ? 'ok' : 'warn', 'ai · compose', asked ? 'typed a question' : 'could not type into the composer');
+      if (asked) {
+        await tap(page, 'Send', { settle: 400 });
+        // The thinking state is short by design, so look for it or the
+        // answer — either proves the request went out.
+        const thinking = await waitFor(page, ['thinking', 'momentum', 'Momentum'], 20000);
+        log(thinking ? 'ok' : 'warn', 'ai · reply',
+          thinking ? `Bello answered — saw "${thinking}"` : 'no reply and no thinking state');
+        await shot(page, 'ai-reply');
+      }
+    } else {
+      log('warn', 'ai · compose', 'the chat screen did not open');
+    }
+
+    // ---------- suggestion chips ----------
+    await tapTab(page, 'Bello AI', 1200);
+    if (await tap(page, 'New chat', { settle: 1500 })) {
+      // Clearing a conversation is destructive and nothing is saved, so
+      // the app asks first. Confirm it, or the modal blocks everything.
+      const guarded = !!(await find(page, 'Start a new chat'));
+      log(guarded ? 'ok' : 'warn', 'ai · new chat',
+        guarded ? 'asks before throwing the conversation away' : 'cleared without asking');
+      await shot(page, 'ai-newchat');
+      await tap(page, 'New chat', { exact: true, settle: 2000 });
+
+      const chipped = await tap(page, 'Quiz me on', { settle: 2500 });
+      log(chipped ? 'ok' : 'warn', 'ai · suggestion',
+        chipped ? 'a starter chip fills the composer' : 'no starter chips offered');
+      await shot(page, 'ai-suggestion');
+    }
+
+    // ---------- Revise ----------
+    await toShell(page);
+    await tapTab(page, 'Revise', 2000);
+    const revise = await waitFor(page, ['Smart revision', 'Revision'], 12000);
+    log(revise ? 'ok' : 'warn', 'revise screen', revise ? `opened — saw "${revise}"` : 'did not open');
+    await shot(page, 'revise');
+    if (await scrollToTap(page, 'My Mistakes', { settle: 3000 })) {
+      const deck = await waitFor(page, ['Card 1', 'Nothing missed yet', 'Building your drill'], 15000);
+      log(deck ? 'ok' : 'warn', 'mistake bank',
+        deck ? `opened — saw "${deck}"` : 'did not open');
+      await shot(page, 'mistakes');
+      await goBack(page);
+    } else {
+      log('warn', 'mistake bank', 'no route to My Mistakes from Revise');
+    }
+
+    // ---------- announcements ----------
+    await toShell(page);
+    await tapTab(page, 'You', 1600);
+    if (await scrollToTap(page, 'Announcements', { settle: 3000 })) {
+      const notices = await waitFor(page, ['Marathon', 'noticeboard', 'Nothing posted yet'], 12000);
+      log(notices ? 'ok' : 'warn', 'announcements',
+        notices ? `noticeboard opened — saw "${notices}"` : 'did not load');
+      await shot(page, 'announcements');
+      await goBack(page);
+    } else {
+      log('warn', 'announcements', 'no route from the You tab');
+    }
+
+    // ---------- millionaire ----------
+    await toShell(page);
+    await tapTab(page, 'You', 1600);
+    if (await scrollToTap(page, 'Millionaire', { settle: 3000 })) {
+      const stage = await waitFor(page, ['Enter the hot seat', 'Fifteen questions', 'Hall of Winners'], 12000);
+      log(stage ? 'ok' : 'warn', 'millionaire',
+        stage ? `stage set — saw "${stage}"` : 'did not open');
+      await shot(page, 'millionaire');
+      if (await tap(page, 'Enter the hot seat', { settle: 4000 })) {
+        const playing = await waitFor(page, ['Ask the class', 'Question 1', '1 of 15'], 15000);
+        log(playing ? 'ok' : 'warn', 'millionaire · play',
+          playing ? `hot seat live — saw "${playing}"` : 'game did not start');
+        await shot(page, 'millionaire-play');
+      }
+      await goBack(page);
+    } else {
+      log('warn', 'millionaire', 'no route from the You tab');
+    }
+
+    // ---------- offline vault ----------
+    // The millionaire stage holds on to you on purpose, so make sure we
+    // are actually back in the shell before looking for a tab.
+    await toShell(page);
+    await tapTab(page, 'You', 1600);
+    if (await scrollToTap(page, 'Offline Vault', { settle: 3000 })) {
+      const vault = await waitFor(page, ['Saved material', 'Nothing saved yet', 'Zero-data reading'], 12000);
+      log(vault ? 'ok' : 'warn', 'offline vault',
+        vault ? `opened — saw "${vault}"` : 'did not open');
+      await shot(page, 'vault');
+      await goBack(page);
+    } else {
+      log('warn', 'offline vault', 'no route from the You tab');
+    }
+
     // ---------- the single-session rule ----------
     // This is the one rule that can throw a student out mid-revision, so
     // test BOTH directions. It shipped broken once: an empty read was
     // taken for a takeover and signed people out at random.
-    await tapTab(page, 'Home', 1200);
+    await toShell(page);
     const joined = fs.existsSync(path.join(OUT, 'mock.log'))
       && /ws {2}join .*active_sessions/.test(fs.readFileSync(path.join(OUT, 'mock.log'), 'utf8'));
     log(joined ? 'ok' : 'warn', 'realtime subscribe',
