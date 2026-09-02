@@ -1,9 +1,49 @@
-name: Build Belloxdydx APK
-on: [push, workflow_dispatch]
+name: Build Belloxdydx
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: "3.47.2"
 
 jobs:
-  build:
+  # ============================================================
+  # Static checks. Runs first so a broken build fails in ~2 minutes
+  # instead of after a full Android toolchain download.
+  # ============================================================
+  analyze:
+    name: Analyze & test
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Unit & widget tests
+        run: flutter test --reporter expanded
+
+  # ============================================================
+  # Android — APK for direct install, AAB for the Play Store.
+  # ============================================================
+  android:
+    name: Android APK + AAB
+    runs-on: ubuntu-latest
+    needs: analyze
     steps:
       - uses: actions/checkout@v4
 
@@ -14,43 +54,118 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
+          cache: true
 
-      - name: Create the Android shell around our code
-        run: flutter create --org tech.isaacarinola --project-name belloxdydx --platforms android .
-
-      - name: Install the screenshot killer
-        run: cp native/MainActivity.kt android/app/src/main/kotlin/tech/isaacarinola/belloxdydx/MainActivity.kt
-
-      - name: Guarantee INTERNET permission (release builds need it explicit)
+      - name: Generate the Android shell
         run: |
-          MANIFEST=android/app/src/main/AndroidManifest.xml
-          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-            sed -i 's|<manifest \(.*\)>|<manifest \1>\n    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>|' "$MANIFEST"
-          fi
-          echo "----- manifest after patch -----"
-          cat "$MANIFEST"
+          flutter create --org tech.isaacarinola --project-name belloxdydx \
+            --platforms android .
 
-      - name: Proper app name
-        run: sed -i 's/android:label="belloxdydx"/android:label="Belloxdydx"/' android/app/src/main/AndroidManifest.xml
+      - name: Install the screenshot killer (FLAG_SECURE)
+        run: |
+          mkdir -p android/app/src/main/kotlin/tech/isaacarinola/belloxdydx
+          cp native/MainActivity.kt \
+            android/app/src/main/kotlin/tech/isaacarinola/belloxdydx/MainActivity.kt
+
+      - name: Permissions, label and deep links
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q "android.permission.INTERNET" "$M" || sed -i \
+            's|<manifest \(.*\)>|<manifest \1>\n    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>|' "$M"
+          sed -i 's/android:label="belloxdydx"/android:label="Belloxdydx"/' "$M"
+          python3 tools/patch_manifest.py
+          echo '----- manifest -----'
+          cat "$M"
 
       - run: flutter pub get
 
       - name: Brand icon
         run: dart run flutter_launcher_icons
 
-      - name: Build the APK
-        run: flutter build apk --release
+      - name: Build APK
+        run: flutter build apk --release --split-debug-info=build/symbols
 
-      - name: Build the Play Store bundle
-        run: flutter build appbundle --release
+      - name: Build Play Store bundle
+        run: flutter build appbundle --release --split-debug-info=build/symbols
+
+      - name: Report sizes
+        run: |
+          echo "### Android artefacts" >> $GITHUB_STEP_SUMMARY
+          ls -lh build/app/outputs/flutter-apk/app-release.apk | awk '{print "- APK: "$5}' >> $GITHUB_STEP_SUMMARY
+          ls -lh build/app/outputs/bundle/release/app-release.aab | awk '{print "- AAB: "$5}' >> $GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         with:
           name: belloxdydx-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
           name: belloxdydx-playstore-aab
           path: build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+  # ============================================================
+  # iOS — an UNSIGNED .ipa for testing.
+  #
+  # This must run on macOS: an IPA needs Xcode's toolchain, which does
+  # not exist on Linux. No Apple developer account is needed for an
+  # unsigned build — it installs on a jailbroken device, a simulator
+  # via a re-sign, or through a tool like AltStore/Sideloadly.
+  # ============================================================
+  ios:
+    name: iOS unsigned IPA
+    runs-on: macos-14
+    needs: analyze
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Generate the iOS shell
+        run: |
+          flutter create --org tech.isaacarinola --project-name belloxdydx \
+            --platforms ios .
+
+      - name: Display name and permission strings
+        run: |
+          P=ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Belloxdydx" "$P" || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Belloxdydx" "$P"
+          /usr/libexec/PlistBuddy -c "Add :NSFaceIDUsageDescription string 'Unlock Belloxdydx with Face ID so only you can open your account.'" "$P" || true
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string 'Attach an image to a question report.'" "$P" || true
+
+      - run: flutter pub get
+
+      - name: Brand icon
+        run: dart run flutter_launcher_icons
+
+      - name: Build unsigned .app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package it into an .ipa
+        run: |
+          set -e
+          APP=build/ios/iphoneos/Runner.app
+          test -d "$APP"
+          rm -rf build/ipa && mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          cd build/ipa
+          zip -qry belloxdydx-unsigned.ipa Payload
+          cd -
+          ls -lh build/ipa/belloxdydx-unsigned.ipa
+          echo "### iOS artefact" >> $GITHUB_STEP_SUMMARY
+          ls -lh build/ipa/belloxdydx-unsigned.ipa | awk '{print "- IPA (unsigned): "$5}' >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: belloxdydx-ios-unsigned-ipa
+          path: build/ipa/belloxdydx-unsigned.ipa
+          if-no-files-found: error
