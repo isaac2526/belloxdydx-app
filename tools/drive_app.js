@@ -146,25 +146,56 @@ async function tap(page, text, { exact = false, settle = 900 } = {}) {
   const line = vh - NAV_GUARD;
   const clear = (node) => node.y >= 8 && node.y <= line;
 
+  // Pinned means the navigation bar: it sits in the strip AND does not
+  // move when the page scrolls. Requiring both matters — an off-screen
+  // control that simply refused to scroll is not pinned, and treating it
+  // as pinned means clicking its coordinates, which are outside the
+  // viewport, and landing on the nav bar instead.
+  // Starts false on purpose: a control below the fold also sits "in the
+  // strip" by coordinates, and assuming it is pinned would skip the
+  // scrolling it needs and click the nav bar instead.
   let pinned = false;
-  for (let i = 0; i < 4 && !clear(n) && !pinned; i++) {
+  for (let i = 0; i < 5 && !clear(n) && !pinned; i++) {
     const was = n.y;
     await page.mouse.move(215, Math.min(400, line - 40));
     await page.mouse.wheel(0, Math.round(n.y - vh * 0.45));
     await sleep(420);
     const again = await find(page, text, { exact });
     if (!again) break;
-    pinned = Math.abs(again.y - was) < 4;   // it did not move: it is the nav bar
     n = again;
+    pinned = Math.abs(again.y - was) < 4 && again.y - again.h / 2 > line;
   }
 
-  // Last resort for something that cannot be scrolled clear: aim at the
-  // part of it that is still above the bar.
   let y = n.y;
-  if (!pinned && y > line && n.y - n.h / 2 < line) y = line - 8;
-  y = Math.max(6, Math.min(y, vh - 6));
+  if (!pinned && !clear(n)) {
+    const top = n.y - n.h / 2;
+    const bottom = n.y + n.h / 2;
+    // Aim at whatever part of it IS visible; if none is, say so rather
+    // than clicking a coordinate off the screen and hitting the nav bar.
+    if (top < line && bottom > 6) y = Math.max(12, Math.min(line - 10, (Math.max(top, 6) + Math.min(bottom, line)) / 2));
+    else return false;
+  }
 
-  await page.mouse.click(n.x, y);
+  await page.mouse.click(n.x, Math.max(6, Math.min(y, vh - 6)));
+  await sleep(settle);
+  return true;
+}
+
+/**
+ * Taps a bottom-navigation destination.
+ *
+ * "You", "Home" and "Ranks" are ordinary words that also appear in body
+ * copy, and a generic label search happily picks the wrong one — it once
+ * landed on Bello AI while looking for the You tab. The bar is the strip
+ * along the bottom edge, so look for the label there and nowhere else.
+ */
+async function tapTab(page, name, settle = 1400) {
+  const vh = await page.evaluate(() => window.innerHeight);
+  const hit = (await nodes(page))
+    .filter((n) => n.y > vh - NAV_GUARD && n.label.toLowerCase() === name.toLowerCase())
+    .sort((a, b) => a.w * a.h - b.w * b.h)[0];
+  if (!hit) return false;
+  await page.mouse.click(hit.x, hit.y);
   await sleep(settle);
   return true;
 }
@@ -190,13 +221,15 @@ async function scrollToTap(page, text, opts = {}) {
   const { steps = 14, dy = 320, at = [215, 520], settle = 900, exact = false } = opts;
   await page.mouse.move(at[0], at[1]);
   for (let i = 0; i <= steps; i++) {
+    // tap() refuses to click something it could not bring on screen, so
+    // keep scrolling and ask again rather than accepting the first no.
     if (await find(page, text, { exact })) {
-      return tap(page, text, { exact, settle });
+      if (await tap(page, text, { exact, settle })) return true;
     }
+    await page.mouse.move(at[0], at[1]);
     await page.mouse.wheel(0, dy);
     await sleep(260);
   }
-  // One last look after the final scroll settles.
   await sleep(500);
   return tap(page, text, { exact, settle });
 }
@@ -213,12 +246,27 @@ async function scrollToTap(page, text, opts = {}) {
  * silently ignored.
  */
 async function fillByLabel(page, labelText, value, dy = 40) {
-  const all = await nodes(page);
   const needle = labelText.toLowerCase();
-  const label = all
+  const locate = async () => (await nodes(page))
     .filter((n) => n.label.toLowerCase() === needle)
     .sort((a, b) => a.w * a.h - b.w * b.h)[0];
+
+  let label = await locate();
   if (!label) return false;
+
+  // A long form does not fit on a phone. Bring the label into the middle
+  // of the screen before clicking under it, or the click lands on
+  // whatever happens to be at those coordinates instead.
+  const vh = await page.evaluate(() => window.innerHeight);
+  for (let i = 0; i < 5 && (label.y < 90 || label.y + dy > vh - 120); i++) {
+    const was = label.y;
+    await page.mouse.move(215, Math.min(420, vh - 200));
+    await page.mouse.wheel(0, Math.round(label.y - vh * 0.4));
+    await sleep(400);
+    const again = await locate();
+    if (!again || Math.abs(again.y - was) < 4) break;
+    label = again;
+  }
 
   // Two attempts: Flutter's web editing pipeline drops keystrokes that
   // arrive faster than it can process them, so type deliberately and
@@ -432,7 +480,7 @@ async function waitFor(page, texts, timeout = 20000) {
       ['Ranks', ['Leaderboard', 'Your standing', 'points']],
       ['You', ['Sign out', 'Your account', 'Settings']],
     ]) {
-      const tapped = await tap(page, tab, { settle: 1600 });
+      const tapped = await tapTab(page, tab, 1600);
       if (!tapped) { log('fail', `tab · ${tab}`, 'destination not tappable'); continue; }
       const seen = await waitFor(page, expect, 12000);
       log(seen ? 'ok' : 'warn', `tab · ${tab}`, seen ? `shows "${seen}"` : 'expected content not seen');
@@ -440,7 +488,7 @@ async function waitFor(page, texts, timeout = 20000) {
     }
 
     // ---------- courses drill-down ----------
-    await tap(page, 'Courses', { settle: 1400 });
+    await tapTab(page, 'Courses', 1400);
     if (await tap(page, 'PHY 101', { settle: 1800 })) {
       log('ok', 'course hub', 'opened PHY 101');
       await shot(page, 'course-hub');
@@ -487,7 +535,7 @@ async function waitFor(page, texts, timeout = 20000) {
     }
 
     // ---------- practice flow ----------
-    await tap(page, 'Courses', { settle: 1200 });
+    await tapTab(page, 'Courses', 1200);
     await tap(page, 'MTH 101', { settle: 1600 });
     const started = await tap(page, 'Practice 20 questions', { settle: 4000 });
     if (started) {
@@ -559,7 +607,7 @@ async function waitFor(page, texts, timeout = 20000) {
           // bottom nav — leaving it is the student's only way back, and
           // every later step depends on that button working.
           const left = (await scrollToTap(page, 'Back to', { settle: 2500 }))
-            || (await tap(page, 'Home', { settle: 2000 }));
+            || (await tapTab(page, 'Home', 2000));
           const backOnShell = await waitFor(page, ['Practice', 'Dashboard', 'Tests & exams'], 12000);
           log(backOnShell ? 'ok' : 'warn', 'result · leave',
             backOnShell ? `returned to the app — saw "${backOnShell}"` : 'stuck on the result screen');
@@ -573,7 +621,7 @@ async function waitFor(page, texts, timeout = 20000) {
     }
 
     // ---------- CBT ----------
-    await tap(page, 'Courses', { settle: 1200 });
+    await tapTab(page, 'Courses', 1200);
     await tap(page, 'PHY 101', { settle: 1600 });
     // The tests panel sits below the four section cards, and the button
     // reads Start, Continue or Retake depending on what the student has
@@ -626,7 +674,7 @@ async function waitFor(page, texts, timeout = 20000) {
     }
 
     // ---------- dropdowns (CGPA) ----------
-    await tap(page, 'You', { settle: 1400 });
+    await tapTab(page, 'You', 1400);
     await shot(page, 'you-tab');
     if (await scrollToTap(page, 'CGPA', { settle: 2000, at: [215, 600] })) {
       log('ok', 'cgpa screen', 'opened from the You tab');
@@ -646,7 +694,7 @@ async function waitFor(page, texts, timeout = 20000) {
     }
 
     // ---------- theme toggle ----------
-    await tap(page, 'You', { settle: 1200 });
+    await tapTab(page, 'You', 1200);
     if (await scrollToTap(page, 'Dark', { exact: true, settle: 1500, at: [215, 600] })) {
       log('ok', 'dark theme', 'switched');
       await shot(page, 'dark-theme');
@@ -659,7 +707,7 @@ async function waitFor(page, texts, timeout = 20000) {
     // This is the one rule that can throw a student out mid-revision, so
     // test BOTH directions. It shipped broken once: an empty read was
     // taken for a takeover and signed people out at random.
-    await tap(page, 'Home', { settle: 1200 });
+    await tapTab(page, 'Home', 1200);
     const joined = fs.existsSync(path.join(OUT, 'mock.log'))
       && /ws {2}join .*active_sessions/.test(fs.readFileSync(path.join(OUT, 'mock.log'), 'utf8'));
     log(joined ? 'ok' : 'warn', 'realtime subscribe',
@@ -681,6 +729,98 @@ async function waitFor(page, texts, timeout = 20000) {
         ? `signed out on takeover — saw "${kicked}"`
         : `still signed in after takeover (${took.channels} channel(s) notified)`);
     await shot(page, 'session-taken');
+
+    // ---------- creating an account ----------
+    // The takeover above left us on the welcome screen, which is exactly
+    // where a new student starts.
+    await tap(page, 'Create free account', { settle: 2500 });
+    const onRegister = await waitFor(page, ['Create your account', 'Surname'], 12000);
+    log(onRegister ? 'ok' : 'fail', 'register screen',
+      onRegister ? `opened — saw "${onRegister}"` : 'could not reach the sign-up form');
+    await shot(page, 'register');
+
+    if (onRegister) {
+      const stamp = String(Math.floor(Date.now() / 1000)).slice(-6);
+      const form = [
+        ['Surname', 'Okafor'],
+        ['First name', 'Chidi'],
+        ['Email', `chidi${stamp}@example.com`],
+        ['Phone', '08099887766'],
+        ['Username', `chidi${stamp}`],
+        ['Password', 'Password@1#'],
+        ['Repeat password', 'Password@1#'],
+      ];
+      const missed = [];
+      for (const [label, value] of form) {
+        if (!(await fillByLabel(page, label, value))) missed.push(label);
+      }
+      log(missed.length === 0 ? 'ok' : 'warn', 'register form',
+        missed.length === 0
+          ? `${form.length} fields filled`
+          : `could not fill: ${missed.join(', ')}`);
+      await shot(page, 'register-filled');
+
+      if (missed.length === 0) {
+        await scrollToTap(page, 'Create my account', { settle: 5000 });
+        const made = await waitFor(page, ['Activate', 'activation key', 'Dashboard'], 20000);
+        log(made ? 'ok' : 'fail', 'account created',
+          made ? `signed in and sent to activation — saw "${made}"` : 'registration did not complete');
+        await shot(page, 'register-done');
+      }
+    }
+
+    // ---------- preview mode ----------
+    // A brand new account has not paid yet. That is a real state a lot
+    // of students sit in, so check the app lets them in and tells them
+    // plainly what is locked.
+    if (await tap(page, 'Do this later', { settle: 3500 })) {
+      const preview = await waitFor(page, ['Preview', 'Activate', 'Dashboard'], 15000);
+      log(preview ? 'ok' : 'warn', 'preview mode',
+        preview ? `unactivated student reaches the app — saw "${preview}"` : 'did not reach the app');
+      await shot(page, 'preview-dashboard');
+
+      await tapTab(page, 'Courses', 1800);
+      await tap(page, 'PHY 101', { settle: 2000 });
+      const gated = await waitFor(page, ['Activate', 'Preview', 'locked'], 8000);
+      log(gated ? 'ok' : 'warn', 'preview · locked content',
+        gated ? `locked content is signposted — saw "${gated}"` : 'no activation prompt found');
+      await shot(page, 'preview-course');
+    }
+
+    // ---------- signing out ----------
+    const onYou = await tapTab(page, 'You', 1800);
+    await shot(page, 'signout-you');
+    if (!onYou) log('warn', 'sign out', 'the You tab was not tappable');
+    if (await scrollToTap(page, 'Sign out', { settle: 1800 })) {
+      await shot(page, 'signout-confirm');
+      const dialog = (await labels(page)).filter((l) => l.length < 60);
+      await tap(page, 'Sign out', { exact: true, settle: 3500 });
+      const out = await waitFor(page, ['Create free account', 'Log in'], 15000);
+      log(out ? 'ok' : 'warn', 'sign out',
+        out ? `signed out cleanly — saw "${out}"`
+            : `still signed in; on screen: ${dialog.slice(0, 12).join(' | ')}`);
+      await shot(page, 'signed-out');
+    } else {
+      log('warn', 'sign out', 'no Sign out control on the You tab');
+    }
+
+    // ---------- password recovery ----------
+    // Reached the way a student reaches it: from the login screen, not
+    // by typing a URL a phone has no address bar for.
+    await tap(page, 'Log in', { settle: 2000 });
+    await sleep(5000);                       // the 3D intro gates the form
+    await tap(page, 'Forgot password?', { settle: 2500 });
+    const onForgot = await waitFor(page, ['Send me a reset link', 'reset link'], 12000);
+    if (onForgot) {
+      const typed = await fillByLabel(page, 'Email', 'kunle@example.com');
+      const sent = typed && (await tap(page, 'Send reset link', { settle: 4000 }));
+      const confirmed = sent && (await waitFor(page, ['Check your inbox', 'No email'], 12000));
+      log(confirmed ? 'ok' : 'warn', 'password recovery',
+        confirmed ? 'reset requested and confirmed' : 'did not reach the confirmation');
+      await shot(page, 'forgot');
+    } else {
+      log('warn', 'password recovery', 'could not open the reset screen');
+    }
 
     // ---------- console health ----------
     // Two kinds of noise are expected here and are NOT app faults, so
