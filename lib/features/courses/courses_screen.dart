@@ -48,11 +48,12 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
       await ref
           .read(contentRepoProvider)
           .loadContent(level: level, force: true);
+      ref.invalidate(contentProvider);
+      await ref.read(contentProvider.future);
     } catch (e) {
       if (!mounted) return;
       bxToast(context, _friendly(e), error: true);
     }
-    ref.invalidate(contentProvider);
   }
 
   Future<void> _switchLevel(StudyLevel level) async {
@@ -214,8 +215,10 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
       }
     }
 
+    // The key is deliberately free of the filter result: changing it while
+    // the student types would rebuild the search field and steal the caret.
     return BxStagger(
-      key: ValueKey('shelf-$level-${visible.length}'),
+      key: ValueKey('shelf-$level'),
       spacing: BxSpace.lg,
       children: blocks,
     );

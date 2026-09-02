@@ -156,7 +156,7 @@ async function waitFor(page, texts, timeout = 20000) {
     await shot(page, 'boot');
 
     // ---------- welcome ----------
-    const onWelcome = await waitFor(page, ['Log in', 'Create free account', 'Belloxdydx'], 25000);
+    const onWelcome = await waitFor(page, ['Create free account', 'Log in', 'CGPA calculator'], 25000);
     if (onWelcome) {
       log('ok', 'welcome screen', `saw "${onWelcome}"`);
       await shot(page, 'welcome');
@@ -210,8 +210,10 @@ async function waitFor(page, texts, timeout = 20000) {
     const dash = await labels(page);
     const expectDash = [
       ['stat tiles', ['Attempts submitted', 'Average score', 'Questions answered']],
+      ['accuracy chart', ['Your accuracy', 'Correct', 'Missed']],
+      ['course averages', ['Average score by course']],
       ['streak', ['12']],
-      ['quote', ['Small daily reading']],
+      ['quote', ['Small daily reading', 'Fuel for today']],
       ['recent results', ['Recent results']],
     ];
     for (const [name, needles] of expectDash) {
