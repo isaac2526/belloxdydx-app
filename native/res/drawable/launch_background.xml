@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The window Android paints before Flutter's first frame.
+
+  Deliberately a flat colour and nothing else. The generated default is
+  white, so a student opening the app saw a white flash and then the
+  splash appearing on the app's own off-white ground — two grounds in
+  a row, which reads as the interface jumping. Matching bx_ground to
+  BxColors.ground makes the handoff invisible: the colour is already
+  correct, and Flutter simply starts drawing on it.
+
+  No logo here on purpose. A logo in the window background sits where
+  Android centres it, Flutter's splash draws its own a little higher,
+  and the difference between the two is a visible hop.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/bx_ground" />
+</layer-list>

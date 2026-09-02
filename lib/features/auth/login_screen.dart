@@ -78,7 +78,24 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // The session becomes active and the router carries the student to
       // the dashboard on its own.
       await ref.read(sessionProvider.notifier).onSignedIn();
-      if (mounted) setState(() => _busy = false);
+      if (!mounted) return;
+
+      // Unless it does not. If the session failed to settle, this screen
+      // is the only thing still on the student's phone and the router
+      // will leave them right here — so it has to say what happened.
+      // Without this a failure at that stage looked exactly like the
+      // button doing nothing at all.
+      final session = ref.read(sessionProvider);
+      if (!session.isSignedIn) {
+        setState(() {
+          _busy = false;
+          _error = BxError(session.message ??
+              'You are signed in, but your account did not load. '
+                  'Try again in a moment.');
+        });
+        return;
+      }
+      setState(() => _busy = false);
     } on BxError catch (e) {
       if (!mounted) return;
       setState(() {

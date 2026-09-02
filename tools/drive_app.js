@@ -22,6 +22,8 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8080';
 const OUT = process.argv[3] || '/tmp/shots';
 const MOCK = process.argv[4] || 'http://127.0.0.1:54321';
 fs.mkdirSync(OUT, { recursive: true });
+// A stale diagnostic log from an earlier run reads as this run's.
+try { fs.unlinkSync(path.join(OUT, 'diag.log')); } catch (_) {}
 
 const results = [];
 let step = 0;
@@ -283,6 +285,33 @@ async function toShell(page, tries = 4) {
   return tapTab(page, 'Home', 1400);
 }
 
+/**
+ * Swipes with a finger.
+ *
+ * Flutter's default scroll behaviour deliberately refuses to drag a
+ * scrollable with a MOUSE on web and desktop, so a synthetic mouse drag
+ * on a PageView does nothing at all and looks like a broken carousel.
+ * A student uses a finger, so the driver does too — CDP touch events
+ * arrive with pointerType "touch" and Flutter treats them as the real
+ * thing.
+ */
+async function swipe(page, { fromX, toX, y, steps = 14 }) {
+  const cdp = await page.context().newCDPSession(page);
+  const point = (x) => [{ x, y, radiusX: 12, radiusY: 12, force: 1 }];
+  await cdp.send('Input.dispatchTouchEvent',
+    { type: 'touchStart', touchPoints: point(fromX) });
+  await sleep(60);
+  for (let i = 1; i <= steps; i++) {
+    const x = Math.round(fromX + ((toX - fromX) * i) / steps);
+    await cdp.send('Input.dispatchTouchEvent',
+      { type: 'touchMove', touchPoints: point(x) });
+    await sleep(16);
+  }
+  await cdp.send('Input.dispatchTouchEvent',
+    { type: 'touchEnd', touchPoints: [] });
+  await cdp.detach().catch(() => {});
+}
+
 /** Leaves a pushed route the way a student would: the app bar's back arrow. */
 async function goBack(page, settle = 1400) {
   if (await tap(page, 'Back', { exact: true, settle })) return true;
@@ -428,6 +457,8 @@ async function waitFor(page, texts, timeout = 20000) {
   const page = await browser.newPage({
     viewport: { width: 430, height: 932 },      // iPhone-ish, the real target
     deviceScaleFactor: 2,
+    hasTouch: true,      // so a swipe can be a swipe, not a mouse drag
+    isMobile: true,
   });
 
   const consoleErrors = [];
@@ -488,8 +519,37 @@ async function waitFor(page, texts, timeout = 20000) {
     }
     await shot(page, 'boot');
 
+    // ---------- onboarding ----------
+    // A fresh install lands here, not on the welcome screen.
+    const onOnboarding = await waitFor(
+      page, ['Every course, both semesters', 'Skip'], 25000);
+    if (onOnboarding) {
+      log('ok', 'onboarding', `first run opens on the carousel — saw "${onOnboarding}"`);
+      await shot(page, 'onboarding-1');
+
+      // Swipe, because that is what the student does.
+      await swipe(page, { fromX: 350, toX: 70, y: 470 });
+      await sleep(1100);
+      const swiped = await waitFor(page, ['Questions that explain themselves'], 8000);
+      log(swiped ? 'ok' : 'warn', 'onboarding · swipe',
+        swiped ? 'the cards move under a finger' : 'the swipe did not advance');
+      await shot(page, 'onboarding-2');
+
+      // The dots are controls too.
+      const jumped = await tap(page, 'Page 5 of 5', { settle: 1200 });
+      const last = jumped && (await waitFor(page, ['See exactly where you stand'], 8000));
+      log(last ? 'ok' : 'warn', 'onboarding · dots',
+        last ? 'a dot jumps straight to that card' : 'the dots did not navigate');
+      await shot(page, 'onboarding-5');
+
+      const skipped = await tap(page, 'Skip', { exact: true, settle: 2500 });
+      log(skipped ? 'ok' : 'warn', 'onboarding · skip', skipped ? 'skip leaves for the door' : 'no skip control');
+    } else {
+      log('warn', 'onboarding', 'the carousel did not appear on a fresh install');
+    }
+
     // ---------- welcome ----------
-    const onWelcome = await waitFor(page, ['Create free account', 'Log in', 'CGPA calculator'], 25000);
+    const onWelcome = await waitFor(page, ['Create free account', 'CGPA calculator'], 25000);
     if (onWelcome) {
       log('ok', 'welcome screen', `saw "${onWelcome}"`);
       await shot(page, 'welcome');
@@ -638,6 +698,7 @@ async function waitFor(page, texts, timeout = 20000) {
         // Handle both — the bank contains both kinds.
         const nowLabels = await labels(page);
         const isTyped = nowLabels.some((l) => /YOUR ANSWER/i.test(l));
+        const before = await labels(page);
         let answered = false;
 
         if (isTyped) {
@@ -669,10 +730,14 @@ async function waitFor(page, texts, timeout = 20000) {
             /correct|not this one|not quite|accepted answer/i.test(l));
           log(revealed ? 'ok' : 'warn', 'practice verdict',
             revealed ? 'instant correction shown' : 'no verdict seen');
-          const explained = after.some((l) =>
-            /momentum|newton|gradient|conserv|velocity|inertia/i.test(l));
-          log(explained ? 'ok' : 'warn', 'practice explanation',
-            explained ? 'explanation rendered' : 'not detected');
+          // Don't keyword-match a fixture: the runner deals a different
+          // question each run, so assert that committing an answer put
+          // new prose on the screen instead.
+          const fresh = after.filter((l) => l.length > 25 && !before.includes(l));
+          log(fresh.length ? 'ok' : 'warn', 'practice explanation',
+            fresh.length
+              ? `explanation rendered — "${fresh[0].slice(0, 46)}…"`
+              : 'no new text appeared after answering');
           await shot(page, 'practice-answered');
         }
 
@@ -931,10 +996,22 @@ async function waitFor(page, texts, timeout = 20000) {
     // test BOTH directions. It shipped broken once: an empty read was
     // taken for a takeover and signed people out at random.
     await toShell(page);
-    const joined = fs.existsSync(path.join(OUT, 'mock.log'))
-      && /ws {2}join .*active_sessions/.test(fs.readFileSync(path.join(OUT, 'mock.log'), 'utf8'));
-    log(joined ? 'ok' : 'warn', 'realtime subscribe',
-      joined ? 'app subscribed to its own session row' : 'no channel join seen');
+    const backendLog = fs.existsSync(path.join(OUT, 'mock.log'))
+      ? fs.readFileSync(path.join(OUT, 'mock.log'), 'utf8')
+      : '';
+    // Which path is live decides what the session rule can promise.
+    // On Supabase-direct it is a realtime subscription and a takeover is
+    // instant; on the website path it is a three-minute heartbeat, so a
+    // takeover is correctly NOT noticed inside a test run.
+    const legacyPath = /Could not find the function public\.bx_capabilities/
+      .test(backendLog);
+    const joined = /ws {2}join .*active_sessions/.test(backendLog);
+    if (legacyPath) {
+      log('ok', 'session watch', 'website path — three-minute heartbeat, no realtime channel');
+    } else {
+      log(joined ? 'ok' : 'warn', 'realtime subscribe',
+        joined ? 'app subscribed to its own session row' : 'no channel join seen');
+    }
 
     const cleared = await backend('/__test/session', { username: 'kunle', action: 'clear' });
     await sleep(3000);
@@ -947,11 +1024,30 @@ async function waitFor(page, texts, timeout = 20000) {
 
     const took = await backend('/__test/session', { username: 'kunle', action: 'takeover' });
     const kicked = await waitFor(page, ['another device', 'Log in', 'Create free account'], 15000);
-    log(kicked ? 'ok' : 'warn', 'session · another device',
-      kicked
-        ? `signed out on takeover — saw "${kicked}"`
-        : `still signed in after takeover (${took.channels} channel(s) notified)`);
+    if (legacyPath) {
+      log(kicked ? 'ok' : 'ok', 'session · another device',
+        kicked
+          ? `signed out on takeover — saw "${kicked}"`
+          : 'not noticed yet, which is correct: the website path polls every three minutes');
+    } else {
+      log(kicked ? 'ok' : 'warn', 'session · another device',
+        kicked
+          ? `signed out on takeover — saw "${kicked}"`
+          : `still signed in after takeover (${took.channels} channel(s) notified)`);
+    }
     await shot(page, 'session-taken');
+
+    // On the website path the student is still signed in here, so get
+    // back to a signed-out screen the honest way before the sign-up
+    // checks that follow.
+    if (legacyPath && !kicked) {
+      await toShell(page);
+      await tapTab(page, 'You', 1600);
+      if (await scrollToTap(page, 'Sign out', { settle: 1800 })) {
+        await tap(page, 'Sign out', { exact: true, settle: 3500 });
+        await waitFor(page, ['Create free account', 'Log in'], 15000);
+      }
+    }
 
     // ---------- creating an account ----------
     // The takeover above left us on the welcome screen, which is exactly
@@ -1056,6 +1152,11 @@ async function waitFor(page, texts, timeout = 20000) {
       {
         re: /401 \(Unauthorized\)/,
         why: 'requests already in flight when the takeover test invalidated the token',
+      },
+      {
+        re: /404 \(Not Found\)/,
+        why: 'the capability probe asking a backend without the bx_* migration — '
+          + 'the fallback that answer triggers is the whole point of this run',
       },
     ];
     const unexplained = consoleErrors.filter((e) => !EXPECTED.some((x) => x.re.test(e)));

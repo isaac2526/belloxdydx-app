@@ -363,6 +363,7 @@ abstract final class BxKeys {
   static const themeMode = 'bx_theme_mode';
   static const biometricOn = 'bx_biometric_on';
   static const introSeen = 'bx_intro_seen';
+  static const onboardingSeen = 'bx_onboarding_seen';
   static const lastLevel = 'bx_level';
   static const readerTheme = 'bx_reader_theme';
   static const readerFont = 'bx_reader_font';

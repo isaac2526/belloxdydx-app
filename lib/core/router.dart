@@ -8,6 +8,7 @@ import '../features/auth/activate_screen.dart';
 import '../features/auth/forgot_screen.dart';
 import '../features/auth/frozen_screen.dart';
 import '../features/auth/login_screen.dart';
+import '../features/auth/onboarding_screen.dart';
 import '../features/auth/register_screen.dart';
 import '../features/auth/reset_screen.dart';
 import '../features/auth/welcome_screen.dart';
@@ -31,6 +32,7 @@ import '../features/revision/revision_screen.dart';
 import '../features/shell/app_shell.dart';
 import '../features/splash/splash_screen.dart';
 import '../features/vault/vault_screen.dart';
+import '../data/local_store.dart';
 import 'providers.dart';
 
 /// ============================================================
@@ -46,6 +48,7 @@ import 'providers.dart';
 
 abstract final class Routes {
   static const splash = '/splash';
+  static const onboarding = '/onboarding';
   static const welcome = '/welcome';
   static const login = '/login';
   static const register = '/register';
@@ -102,6 +105,7 @@ final routerProvider = Provider<GoRouter>((ref) {
 
       const publicRoutes = {
         Routes.splash,
+        Routes.onboarding,
         Routes.welcome,
         Routes.login,
         Routes.register,
@@ -115,11 +119,20 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (!session.isReady) return loc == Routes.splash ? null : Routes.splash;
 
       if (!session.isSignedIn) {
+        // First run on this install goes through onboarding. The flag is
+        // read synchronously from local storage, so a returning student
+        // is never shown a card that is then snatched away.
+        final firstRun =
+            !ref.read(localStoreProvider).getBool(BxKeys.onboardingSeen);
+
         // The splash has done its job the moment the session resolves.
         // It is a "public" route so an unauthenticated visitor may sit
         // on it while we decide — but once we have decided, staying
         // there strands the student on a loading screen forever.
-        if (loc == Routes.splash) return Routes.welcome;
+        if (loc == Routes.splash) {
+          return firstRun ? Routes.onboarding : Routes.welcome;
+        }
+        if (loc == Routes.onboarding) return firstRun ? null : Routes.welcome;
         return isPublic ? null : Routes.welcome;
       }
 
@@ -130,6 +143,7 @@ final routerProvider = Provider<GoRouter>((ref) {
 
       // Signed in: the auth doors are closed behind them.
       if (loc == Routes.splash ||
+          loc == Routes.onboarding ||
           loc == Routes.welcome ||
           loc == Routes.login ||
           loc == Routes.register ||
@@ -145,6 +159,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.login, builder: (_, __) => const LoginScreen()),
       GoRoute(
           path: Routes.register, builder: (_, __) => const RegisterScreen()),
+      GoRoute(
+          path: Routes.onboarding,
+          builder: (_, __) => const OnboardingScreen()),
       GoRoute(path: Routes.forgot, builder: (_, __) => const ForgotScreen()),
       GoRoute(path: Routes.reset, builder: (_, __) => const ResetScreen()),
       GoRoute(path: Routes.frozen, builder: (_, __) => const FrozenScreen()),

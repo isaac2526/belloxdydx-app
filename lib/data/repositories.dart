@@ -73,17 +73,14 @@ class AuthRepository {
     final email = await _resolveEmail(login);
     try {
       await _b.auth.signInWithPassword(email: email, password: password);
-    } on AuthException catch (e) {
-      final m = e.message.toLowerCase();
-      throw BxError(
-        m.contains('invalid login') || m.contains('invalid credentials')
-            ? 'Wrong username or password. Check and try again.'
-            : m.contains('email not confirmed')
-                ? 'Your email is not confirmed yet. Chat Tutor Bello.'
-                : e.message,
-      );
     } catch (e) {
-      throw _b.isDirect ? BxError.offline : BxError.offline;
+      // Every failure here goes through the same door, auth and network
+      // alike. Supabase reports a lost connection as an AuthException
+      // whose message is the raw request — host, path and query — so a
+      // branch that trusted the auth message printed the Supabase URL
+      // to the student. classify() sorts transport before auth, and
+      // nothing it returns carries text from the exception.
+      throw _b.faultFor(e);
     }
 
     await _bindDevice();
@@ -204,18 +201,16 @@ class AuthRepository {
         email.trim().toLowerCase(),
         redirectTo: 'belloxdydx://reset-password',
       );
-    } on AuthException catch (e) {
-      throw BxError(e.message);
-    } catch (_) {
-      throw BxError.offline;
+    } catch (e) {
+      throw _b.faultFor(e);
     }
   }
 
   Future<void> updatePassword(String newPassword) async {
     try {
       await _b.auth.updateUser(UserAttributes(password: newPassword));
-    } on AuthException catch (e) {
-      throw BxError(e.message);
+    } catch (e) {
+      throw _b.faultFor(e);
     }
   }
 
@@ -364,7 +359,13 @@ class AuthRepository {
     // Legacy path keeps the poll, but at a calmer cadence: the audit
     // showed 45s buys nothing over 3 minutes for a rule that only has to
     // catch a second sign-in.
-    return Stream<bool>.periodic(const Duration(minutes: 3))
+    //
+    // The tick type must be nullable, or carry a computation. Stream
+    // .periodic has nothing to emit without one, so for a non-nullable
+    // element type it throws from the constructor rather than at the
+    // first tick — which is how `Stream<bool>.periodic(...)` here stopped
+    // every student on the legacy path from ever finishing a login.
+    return Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
         .asyncMap((_) => _heartbeat())
         .handleError((_) => true);
   }

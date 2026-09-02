@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/config.dart';
+import 'failures.dart';
 import 'models.dart';
 
 /// ============================================================
@@ -67,6 +69,32 @@ class Backend {
   /// The mobile session token the website issues for the single-session
   /// rule. Only used on the legacy path.
   String? mobileSessionToken;
+
+  // ------------------------------------------------------------
+  // Connectivity
+  //
+  // Only used to choose between two sentences: "no internet connection"
+  // and "we could not reach Belloxdydx". A student can act on the first
+  // and not the second, so telling them apart is worth a subscription.
+  // It is never used to block a request — the radio can be up while the
+  // network is useless, and the request itself is the real test.
+  // ------------------------------------------------------------
+
+  bool? _hasConnection;
+  StreamSubscription<List<ConnectivityResult>>? _connWatch;
+
+  bool? get hasConnection => _hasConnection;
+
+  void watchConnectivity() {
+    if (_connWatch != null) return;
+    final conn = Connectivity();
+    void apply(List<ConnectivityResult> r) {
+      _hasConnection = !(r.isEmpty || r.every((x) => x == ConnectivityResult.none));
+    }
+
+    unawaited(conn.checkConnectivity().then(apply).catchError((_) {}));
+    _connWatch = conn.onConnectivityChanged.listen(apply, onError: (_) {});
+  }
 
   // ------------------------------------------------------------
   // Capability probe
@@ -200,13 +228,27 @@ class Backend {
   }
 
   /// Walks a decoded payload and rewrites every storage URL it finds.
+  /// Rewrites every storage URL in a decoded payload.
+  ///
+  /// The map branch rebuilds a `Map<String, dynamic>` by hand rather
+  /// than using Map.map. Map.map infers its type arguments from the
+  /// closure, and with a dynamic key and a dynamic value that inference
+  /// lands on `Map<dynamic, dynamic>` — which is not a
+  /// `Map<String, dynamic>` and cannot be passed to any fromJson in this
+  /// app. On the web that failure is invisible, because dart2js drops
+  /// implicit downcast checks in release; on Android and iOS the runtime
+  /// is sound and every model built from a shielded payload throws.
+  /// So: browser tests cannot catch this, and `backend_test.dart` does.
   dynamic shieldDeep(dynamic node) {
     if (node is String) {
       return node.contains('/storage/v1/object/public/') ? fileUrl(node) : node;
     }
     if (node is List) return node.map(shieldDeep).toList();
     if (node is Map) {
-      return node.map((k, v) => MapEntry(k, shieldDeep(v)));
+      return <String, dynamic>{
+        for (final entry in node.entries)
+          entry.key.toString(): shieldDeep(entry.value),
+      };
     }
     return node;
   }
@@ -282,77 +324,39 @@ class Backend {
     if (r.statusCode >= 200 && r.statusCode < 300) return body;
 
     final code = body['error']?.toString();
-    throw switch (r.statusCode) {
-      401 => const BxError('Your session ended. Sign in again.',
-          code: 'unauthenticated'),
-      403 when code == 'not_activated' => BxError.notActivated,
-      423 => BxError(
-          body['reason']?.toString() ??
-              'Your account is frozen. Chat Tutor Bello.',
-          code: 'frozen'),
-      409 when code == 'device_locked' => const BxError(
-          'This account is locked to a different device.',
-          code: 'device_locked'),
-      409 when code == 'time_up' =>
-        const BxError('Time is up.', code: 'time_up'),
-      503 => const BxError(
-          'Belloxdydx is under maintenance. We dey come back soon.',
-          code: 'maintenance'),
-      _ => BxError(
-          _friendlyServerMessage(body) ?? 'Something went wrong. Try again.',
-          code: code),
-    };
-  }
+    final fault = faultForStatus(r.statusCode, errorCode: code);
 
-  String? _friendlyServerMessage(Map<String, dynamic> body) {
-    final m = body['message']?.toString();
-    if (m != null && m.isNotEmpty && !m.contains('http')) return m;
-    return null;
+    // A freeze reason is written by Tutor Bello for this student, so it
+    // is worth showing — but only after safeServerMessage has satisfied
+    // itself that it is a sentence and not machinery.
+    final reason = safeServerMessage(body['reason']) ??
+        safeServerMessage(body['message']);
+
+    throw BxError(
+      fault == BxFault.frozen && reason != null ? reason : fault.message,
+      code: fault.code ?? code,
+    );
   }
 
   // ------------------------------------------------------------
   // Error mapping — a student never sees a host name or a stack trace
   // ------------------------------------------------------------
 
-  BxError _mapPostgrest(PostgrestException e) {
-    final msg = e.message.toLowerCase();
-    if (msg.contains('not_activated')) return BxError.notActivated;
-    if (msg.contains('frozen')) {
-      return const BxError('Your account is frozen. Chat Tutor Bello.',
-          code: 'frozen');
-    }
-    if (msg.contains('time_up')) {
-      return const BxError('Time is up.', code: 'time_up');
-    }
-    if (e.code == 'PGRST202' || msg.contains('could not find the function')) {
-      return const BxError('That feature is not available yet.',
-          code: 'rpc_missing');
-    }
-    if (e.code == '42501' || msg.contains('permission denied')) {
-      return const BxError('You do not have access to that.',
-          code: 'forbidden');
-    }
-    return BxError(e.message.contains('http')
-        ? 'Something went wrong. Try again.'
-        : e.message);
-  }
+  BxError _mapPostgrest(PostgrestException e) => classify(
+        e,
+        hasConnection: _hasConnection,
+      ).error;
 
-  BxError _mapGeneric(Object e) {
-    if (e is BxError) return e;
-    if (e is AuthException) return BxError(e.message);
-    final s = e.toString().toLowerCase();
-    if (s.contains('socket') ||
-        s.contains('failed host lookup') ||
-        s.contains('network') ||
-        s.contains('connection') ||
-        s.contains('timeout') ||
-        s.contains('timed out') ||
-        s.contains('handshake') ||
-        s.contains('clientexception')) {
-      return BxError.offline;
-    }
-    return const BxError('Something went wrong. Try again.');
-  }
+  /// The one public door for turning a caught object into something a
+  /// student may read. Repositories call this rather than reading any
+  /// exception's own message.
+  BxError faultFor(Object e) => _mapGeneric(e);
 
-  void dispose() => _http.close();
+  BxError _mapGeneric(Object e) =>
+      e is BxError ? e : classify(e, hasConnection: _hasConnection).error;
+
+  void dispose() {
+    _connWatch?.cancel();
+    _http.close();
+  }
 }

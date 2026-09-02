@@ -981,6 +981,66 @@ const server = http.createServer(async (req, res) => {
     if (path === '/api/streak/touch') {
       return send(res, 200, { ok: true });
     }
+    if (path === '/api/auth/logout') return send(res, 200, { ok: true });
+    if (path === '/api/auth/check-username') {
+      const name = (url.searchParams.get('u') || '').toLowerCase();
+      return send(res, 200, { available: !byLogin(name) });
+    }
+    if (path.startsWith('/api/mobile/material/')) {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      const id = path.split('/').pop();
+      return send(res, 200, RPC.bx_material(u, { p_id: id }));
+    }
+    if (path === '/api/practice/start') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_start_attempt(u, {
+        p_course_id: body.courseId, p_mode: 'practice', p_count: body.count,
+      }));
+    }
+    if (path === '/api/cbt/start') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_start_attempt(u, { p_test_id: body.testId }));
+    }
+    if (path.startsWith('/api/practice/') || path.startsWith('/api/cbt/')) {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      const tail = path.split('/').pop();
+      if (tail === 'answer') {
+        return send(res, 200, RPC.bx_answer(u, {
+          p_attempt_id: body.attemptId, p_question_id: body.questionId,
+          p_choice: body.choice, p_answer_text: body.answerText,
+        }));
+      }
+      if (tail === 'submit') {
+        return send(res, 200, RPC.bx_submit_attempt(u, { p_attempt_id: body.attemptId }));
+      }
+      if (req.method === 'GET') {
+        return send(res, 200, RPC.bx_open_attempt(u, { p_attempt_id: tail }));
+      }
+      return send(res, 200, RPC.bx_submit_attempt(u, { p_attempt_id: tail }));
+    }
+    if (path === '/api/millionaire' && req.method !== 'GET') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      if (body.won !== undefined || body.crowned !== undefined) {
+        return send(res, 200, RPC.bx_millionaire_report(u, {
+          p_won: body.won, p_crowned: body.crowned,
+        }));
+      }
+      return send(res, 200, {
+        questions: RPC.bx_millionaire_deal(u, { p_course_ids: body.courseIds }),
+      });
+    }
+    if (path === '/api/millionaire/poll') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_millionaire_poll(u, {
+        p_question_id: url.searchParams.get('qid'),
+      }));
+    }
+    if (path.startsWith('/api/mobile/cbt-result/')) {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_attempt_result(u, {
+        p_attempt_id: path.split('/').pop(),
+      }));
+    }
   }
 
   if (path.startsWith('/rest/v1/rpc/')) {

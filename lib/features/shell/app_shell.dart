@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/providers.dart';
+import '../../data/models.dart';
 import '../../ui/ui.dart';
 
 /// ============================================================
@@ -41,7 +42,11 @@ class AppShell extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.bx;
-    final wide = context.isWide;
+    // Hold the phone layout until the window has actually been measured.
+    // Choosing the rail from an unmeasured first frame and the bar from
+    // the second shifts every pixel of content sideways by the rail's
+    // width, which is what a startup "drift" looks like.
+    final wide = !context.sizeUnknown && context.isWide;
 
     if (wide) {
       return Scaffold(
@@ -242,7 +247,13 @@ class _LiveTestEntryState extends ConsumerState<LiveTestEntry> {
       if (!mounted) return;
       context.pushReplacement('/cbt/$id');
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      // Never e.toString(): a PostgrestException prints its own schema
+      // detail and a ClientException prints the full request URL.
+      if (mounted) {
+        setState(() => _error = e is BxError
+            ? e.message
+            : ref.read(backendProvider).faultFor(e).message);
+      }
     }
   }
 

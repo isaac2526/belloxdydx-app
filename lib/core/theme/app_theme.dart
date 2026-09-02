@@ -1,4 +1,3 @@
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -255,12 +254,22 @@ ThemeData _build(Brightness brightness, BxColors c) {
       shape: const RoundedRectangleBorder(borderRadius: BxRadius.control),
     ),
 
+    // One transition on every platform.
+    //
+    // iOS and macOS used Cupertino's builder, which slides each screen
+    // in from the right — so on those platforms the whole interface
+    // drifted sideways on every push, splash to welcome to login
+    // included, while Android rose vertically. Belloxdydx is one app
+    // and should move one way. This also removes the parallax that
+    // Cupertino applies to the outgoing screen, which is the part that
+    // reads as drift rather than as a transition.
     pageTransitionsTheme: const PageTransitionsTheme(builders: {
       TargetPlatform.android: _BxPageTransition(),
-      TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-      TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.iOS: _BxPageTransition(),
+      TargetPlatform.macOS: _BxPageTransition(),
       TargetPlatform.linux: _BxPageTransition(),
       TargetPlatform.windows: _BxPageTransition(),
+      TargetPlatform.fuchsia: _BxPageTransition(),
     }),
   );
 }

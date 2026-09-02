@@ -307,8 +307,29 @@ extension BxThemeAccess on BuildContext {
   bool get isDark => Theme.of(this).brightness == Brightness.dark;
 
   /// True when the viewport is wide enough for the rail + content layout.
-  bool get isWide => MediaQuery.sizeOf(this).width >= 900;
+  ///
+  /// Deliberately reads zero as "not wide". A window can report no size
+  /// at all on the very first frame, before the platform has measured
+  /// it, and a breakpoint that answers from that measurement lays the
+  /// app out once for the wrong width and again a frame later — which a
+  /// student sees as the interface sliding sideways as the navigation
+  /// rail appears and then leaves.
+  bool get isWide {
+    final w = MediaQuery.sizeOf(this).width;
+    return w >= 900;
+  }
 
   /// True on tablets and small laptops — two-column grids.
-  bool get isMedium => MediaQuery.sizeOf(this).width >= 600;
+  bool get isMedium {
+    final w = MediaQuery.sizeOf(this).width;
+    return w >= 600;
+  }
+
+  /// True while the platform has not told us how big the window is.
+  /// Layouts that change shape across a breakpoint should hold their
+  /// narrow form until this is false rather than guess.
+  bool get sizeUnknown {
+    final s = MediaQuery.sizeOf(this);
+    return s.width <= 0 || s.height <= 0;
+  }
 }

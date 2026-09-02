@@ -59,6 +59,10 @@ class SessionNotifier extends StateNotifier<SessionState> {
   Backend get _backend => _ref.read(backendProvider);
 
   Future<void> _boot() async {
+    // Starts the radio watch before anything can fail, so the first
+    // error a student sees already knows whether their phone has a
+    // connection at all.
+    _backend.watchConnectivity();
     await _backend.probeCapabilities();
     if (!_backend.signedIn) {
       state = const SessionState.signedOut();
@@ -68,31 +72,51 @@ class SessionNotifier extends StateNotifier<SessionState> {
   }
 
   Future<void> refreshProfile() async {
+    final Profile p;
     try {
-      final p = await _auth.loadProfile(force: true);
-      if (p.isFrozen) {
-        state = SessionState.frozen(p);
-      } else {
-        state = SessionState.active(p);
-      }
-      _listenForSupersede();
+      p = await _auth.loadProfile(force: true);
     } catch (e) {
       // Signed in but the profile could not be read — treat as signed out
-      // rather than trapping the student on a blank screen.
+      // rather than trapping the student on a blank screen. ONLY the
+      // profile read may reach this: a fault anywhere else must not be
+      // reported to the student as a failed login.
       state = SessionState.signedOut(
           message: e is BxError ? e.message : null);
+      return;
     }
+
+    state = p.isFrozen ? SessionState.frozen(p) : SessionState.active(p);
+    _listenForSupersede();
   }
 
+  /// Watches for another device taking the session.
+  ///
+  /// Deliberately cannot fail the sign-in. This used to be attached
+  /// inside the same try as the profile read, so when the watcher threw,
+  /// the student was told their profile could not be read and the
+  /// session they had just established was thrown away — silently,
+  /// because both state writes happened in one synchronous block and the
+  /// router only ever saw the last one. Losing the watcher costs the
+  /// single-session rule until the next launch. Losing the session costs
+  /// the student the app.
   void _listenForSupersede() {
     _sessionWatch?.cancel();
-    _sessionWatch = _auth.watchSession().listen((stillMine) {
-      if (!stillMine) {
-        signOut(
-          reason: 'Signed in on another device. Only one login can be alive.',
-        );
-      }
-    });
+    _sessionWatch = null;
+    try {
+      _sessionWatch = _auth.watchSession().listen(
+        (stillMine) {
+          if (!stillMine) {
+            signOut(
+              reason:
+                  'Signed in on another device. Only one login can be alive.',
+            );
+          }
+        },
+        onError: (_) {},
+      );
+    } catch (e) {
+      debugPrint('[session] device watch unavailable: $e');
+    }
   }
 
   Future<void> onSignedIn() => refreshProfile();
