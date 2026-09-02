@@ -691,7 +691,10 @@ class _OptionRow extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (option.text.isNotEmpty)
-                  Text(option.text, style: BxType.body(c.ink)),
+                  // Options are stored as HTML like the question itself,
+                  // so a unit written &middot; must not reach the screen
+                  // spelled out.
+                  HtmlWidget(option.text, textStyle: BxType.body(c.ink)),
                 if (option.imageUrl != null) ...[
                   if (option.text.isNotEmpty) const SizedBox(height: BxSpace.xs),
                   _RemoteImage(option.imageUrl!, height: 120),

@@ -747,6 +747,46 @@ const RPC = {
          { username: 'kunle', won: 125000, crowned: false }],
   }),
 
+  // The hot seat needs fifteen playable multiple-choice questions, and
+  // it must never be handed the key: the board is scored server-side.
+  bx_millionaire_deal: (u, p) => {
+    if (!u.is_activated) return { error: 'not_activated' };
+    const wanted = (p.p_course_ids || []).length
+      ? QUESTIONS.filter((q) => p.p_course_ids.includes(q.course_id))
+      : QUESTIONS;
+    return wanted
+      .filter((q) => q.question_type === 'mcq' && q.options.length >= 2)
+      .slice(0, 15)
+      .map((q) => {
+        const { correct_key, answer_text, explanation_html, ...safe } = q;
+        return safe;
+      });
+  },
+
+  bx_millionaire_poll: (u, p) => {
+    const q = QUESTIONS.find((x) => x.id === p.p_question_id);
+    const keys = (q && q.options.length ? q.options : [{ key: 'A' }, { key: 'B' }])
+      .map((o) => o.key);
+    // The class leans the right way, but not unanimously.
+    const spread = {};
+    let left = 100;
+    keys.forEach((k, i) => {
+      const share = i === 0 ? 54 : Math.max(0, Math.round(left / (keys.length - i)));
+      spread[k] = i === keys.length - 1 ? left : share;
+      left -= spread[k];
+    });
+    return { sample: 128, spread };
+  },
+
+  bx_millionaire_report: (u, p) => {
+    state.plays.push({
+      username: u.username,
+      won: p.p_won || 0,
+      crowned: !!p.p_crowned,
+    });
+    return { ok: true };
+  },
+
   bx_daily: (u) => {
     if (!u.is_activated) return { error: 'not_activated' };
     const q = QUESTIONS.filter((x) => x.question_type === 'mcq')[new Date().getDate() % 20];

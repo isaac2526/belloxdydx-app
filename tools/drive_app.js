@@ -165,12 +165,32 @@ async function find(page, text, { exact = false } = {}) {
 // the pinned navigation by whether the node moves when the page does.
 const NAV_GUARD = 96;
 
+/**
+ * How much of the bottom edge is covered right now.
+ *
+ * Pushed routes — the exam, a game, the CGPA sheet — have no bottom bar
+ * at all, and reserving space for one there pushes clicks off the
+ * primary button that sits at the foot of the page.
+ */
+async function navGuard(page) {
+  const hasBar = await page.evaluate((guard) => {
+    const h = window.innerHeight;
+    return [...document.querySelectorAll('flt-semantics[role="tab"], flt-semantics[role="tablist"]')]
+      .some((el) => {
+        const r = el.getBoundingClientRect();
+        return r.height > 0 && r.y + r.height / 2 > h - guard;
+      });
+  }, NAV_GUARD);
+  return hasBar ? NAV_GUARD : 8;
+}
+
 async function tap(page, text, { exact = false, settle = 900 } = {}) {
   let n = await find(page, text, { exact });
   if (!n) return false;
 
   const vh = await page.evaluate(() => window.innerHeight);
-  const line = vh - NAV_GUARD;
+  const guard = await navGuard(page);
+  const line = vh - guard;
   const clear = (node) => node.y >= 8 && node.y <= line;
 
   // Pinned means the navigation bar: it sits in the strip AND does not
@@ -203,6 +223,20 @@ async function tap(page, text, { exact = false, settle = 900 } = {}) {
     else return false;
   }
 
+  // Wait for the target to stop moving. Content arriving, a staggered
+  // entry or a switcher transition all shift the layout under the
+  // pointer, and a click aimed at where a button WAS lands beside it —
+  // which looks exactly like a button that does nothing.
+  for (let i = 0; i < 6; i++) {
+    await sleep(220);
+    const again = await find(page, text, { exact });
+    if (!again) break;
+    const still = Math.abs(again.y - n.y) < 3 && Math.abs(again.x - n.x) < 3;
+    n = again;
+    if (still) break;
+    y = n.y;
+  }
+
   await page.mouse.click(n.x, Math.max(6, Math.min(y, vh - 6)));
   await sleep(settle);
   return true;
@@ -218,6 +252,7 @@ async function tap(page, text, { exact = false, settle = 900 } = {}) {
  */
 async function tapTab(page, name, settle = 1400) {
   const vh = await page.evaluate(() => window.innerHeight);
+  // Deliberately the fixed height: this is asking whether a bar is there.
   const hit = (await nodes(page))
     .filter((n) => n.y > vh - NAV_GUARD && n.label.toLowerCase() === name.toLowerCase())
     .sort((a, b) => a.w * a.h - b.w * b.h)[0];
@@ -840,15 +875,33 @@ async function waitFor(page, texts, timeout = 20000) {
     await toShell(page);
     await tapTab(page, 'You', 1600);
     if (await scrollToTap(page, 'Millionaire', { settle: 3000 })) {
-      const stage = await waitFor(page, ['Enter the hot seat', 'Fifteen questions', 'Hall of Winners'], 12000);
+      // The League tile is subtitled "…and the millionaire crown", so a
+      // search for Millionaire can land there instead. The League offers
+      // its own way in, so take it rather than reporting a failure.
+      let stage = await waitFor(page, ['Who Wants To Be'], 8000);
+      if (!stage && (await tap(page, 'Enter the hot seat', { settle: 3000 }))) {
+        stage = await waitFor(page, ['Who Wants To Be'], 10000);
+      }
       log(stage ? 'ok' : 'warn', 'millionaire',
-        stage ? `stage set — saw "${stage}"` : 'did not open');
+        stage ? 'the stage is set' : 'could not reach the millionaire lobby');
       await shot(page, 'millionaire');
-      if (await tap(page, 'Enter the hot seat', { settle: 4000 })) {
-        const playing = await waitFor(page, ['Ask the class', 'Question 1', '1 of 15'], 15000);
+      if (stage && (await tap(page, 'Enter the hot seat', { settle: 4000 }))) {
+        // "Ask the class" is printed in the house rules on the lobby, so
+        // asserting on it proves nothing. Look for the board instead.
+        const playing = await waitFor(page, ['playing for', 'of 15 ·'], 15000);
         log(playing ? 'ok' : 'warn', 'millionaire · play',
           playing ? `hot seat live — saw "${playing}"` : 'game did not start');
         await shot(page, 'millionaire-play');
+        if (!playing) await dumpTree(page, 'millionaire');
+        if (playing) {
+          // Three lifelines, one use each — the poll is the one that
+          // talks to the backend, so it is the one worth pressing.
+          const lifeline = await tap(page, 'Ask the class', { settle: 4000 });
+          const polled = lifeline && (await waitFor(page, ['%', 'of the class', 'sample'], 12000));
+          log(polled ? 'ok' : 'warn', 'millionaire · lifeline',
+            polled ? 'the class poll comes back' : 'lifeline did not report');
+          await shot(page, 'millionaire-lifeline');
+        }
       }
       await goBack(page);
     } else {

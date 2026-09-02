@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/html_text.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../core/theme/app_theme.dart';
@@ -165,16 +166,6 @@ class _HotSeatState extends ConsumerState<_HotSeat>
 
   /// Option text is short and lives inside a fixed hexagon, so it is
   /// flattened to plain text rather than rendered as a document.
-  String _plain(String html) => html
-      .replaceAll(RegExp(r'<[^>]*>'), '')
-      .replaceAll('&nbsp;', ' ')
-      .replaceAll('&amp;', '&')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&#39;', "'")
-      .trim();
-
   void _after(Duration d, VoidCallback fn) {
     _seq?.cancel();
     _seq = Timer(d, () {
@@ -329,7 +320,7 @@ class _HotSeatState extends ConsumerState<_HotSeat>
       final key = (q.correctKey ?? '').toUpperCase();
       if (key.isNotEmpty) {
         final opt = q.displayOptions.where((o) => o.key == key).firstOrNull;
-        final text = opt == null ? '' : _plain(opt.text);
+        final text = opt == null ? '' : htmlToPlain(opt.text);
         answer = text.isEmpty ? key : '$key · $text';
       }
     }
@@ -1209,7 +1200,7 @@ class _HotSeatState extends ConsumerState<_HotSeat>
 
     _Hexagon hex({double glow = 0, VoidCallback? onTap}) => _Hexagon(
           letter: o.key,
-          label: _plain(o.text),
+          label: htmlToPlain(o.text),
           imageUrl: o.imageUrl,
           fill: fill,
           stroke: stroke,
