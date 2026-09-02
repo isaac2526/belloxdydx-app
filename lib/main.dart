@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -35,7 +34,7 @@ Future<void> main() async {
   try {
     await Supabase.initialize(
       url: BxConfig.supabaseUrl,
-      anonKey: BxConfig.supabaseAnonKey,
+      anonKey: BxConfig.supabaseAnonKey, // ignore: deprecated_member_use
       authOptions: const FlutterAuthClientOptions(
         authFlowType: AuthFlowType.pkce,
       ),

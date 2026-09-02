@@ -240,8 +240,7 @@ class _Quad {
   final List<Vector3> pts;
   final Color color;
   final double depth;
-  final double alpha;
-  const _Quad(this.pts, this.color, this.depth, {this.alpha = 1});
+  const _Quad(this.pts, this.color, this.depth);
 }
 
 class _StagePainter extends CustomPainter {
@@ -356,59 +355,59 @@ class _StagePainter extends CustomPainter {
 
     // ---------- the scholar ----------
     final root = Matrix4.identity()
-      ..translate(studentX, 0.0, 0.0)
+      ..translateByDouble(studentX, 0.0, 0.0, 1.0)
       ..rotateY(bodyYaw);
     final hips = root.clone()
-      ..translate(0.0, hipY, 0.0)
+      ..translateByDouble(0.0, hipY, 0.0, 1.0)
       ..rotateZ(hipRoll);
 
     final torso = hips.clone()
-      ..translate(0.0, 0.34, 0.0)
+      ..translateByDouble(0.0, 0.34, 0.0, 1.0)
       ..rotateX(torsoPitch);
     _box(quads, torso, 0.5, 0.62, 0.3, blue, project, depthOf);
 
-    final head = hips.clone()..translate(0.0, 0.82, 0.0)..rotateY(headYaw);
+    final head = hips.clone()..translateByDouble(0.0, 0.82, 0.0, 1.0)..rotateY(headYaw);
     _box(quads, head, 0.38, 0.38, 0.36, skin, project, depthOf);
 
     // graduation cap
-    final cap = hips.clone()..translate(0.0, 1.0, 0.0)..rotateY(headYaw);
+    final cap = hips.clone()..translateByDouble(0.0, 1.0, 0.0, 1.0)..rotateY(headYaw);
     _box(quads, cap, 0.44, 0.07, 0.44, gold, project, depthOf);
     final brim = hips.clone()
-      ..translate(0.0, 0.955, 0.2)
+      ..translateByDouble(0.0, 0.955, 0.2, 1.0)
       ..rotateY(headYaw);
     _box(quads, brim, 0.3, 0.03, 0.2, gold, project, depthOf);
 
     // backpack
-    final bag = hips.clone()..translate(0.0, 0.36, -0.26);
+    final bag = hips.clone()..translateByDouble(0.0, 0.36, -0.26, 1.0);
     _box(quads, bag, 0.42, 0.5, 0.16, goldBright, project, depthOf);
 
     // limbs
     Matrix4 limb(double x, double y, double rot) => hips.clone()
-      ..translate(x, y, 0.0)
+      ..translateByDouble(x, y, 0.0, 1.0)
       ..rotateX(rot);
 
     void arm(double x, double a, double b, {Matrix4Callback? hand}) {
       final upper = limb(x, 0.58, a);
-      final upperBox = upper.clone()..translate(0.0, -0.17, 0.0);
+      final upperBox = upper.clone()..translateByDouble(0.0, -0.17, 0.0, 1.0);
       _box(quads, upperBox, 0.14, 0.34, 0.14, blue, project, depthOf);
       final joint = upper.clone()
-        ..translate(0.0, -0.34, 0.0)
+        ..translateByDouble(0.0, -0.34, 0.0, 1.0)
         ..rotateX(b);
-      final lowerBox = joint.clone()..translate(0.0, -0.15, 0.0);
+      final lowerBox = joint.clone()..translateByDouble(0.0, -0.15, 0.0, 1.0);
       _box(quads, lowerBox, 0.12, 0.3, 0.12, skin, project, depthOf);
-      if (hand != null) hand(joint.clone()..translate(0.0, -0.34, 0.0));
+      if (hand != null) hand(joint.clone()..translateByDouble(0.0, -0.34, 0.0, 1.0));
     }
 
     void leg(double x, double a, double b) {
       final upper = limb(x, 0.02, a);
-      final upperBox = upper.clone()..translate(0.0, -0.21, 0.0);
+      final upperBox = upper.clone()..translateByDouble(0.0, -0.21, 0.0, 1.0);
       _box(quads, upperBox, 0.14, 0.42, 0.14, navy, project, depthOf);
       final joint = upper.clone()
-        ..translate(0.0, -0.42, 0.0)
+        ..translateByDouble(0.0, -0.42, 0.0, 1.0)
         ..rotateX(b);
-      final lowerBox = joint.clone()..translate(0.0, -0.2, 0.0);
+      final lowerBox = joint.clone()..translateByDouble(0.0, -0.2, 0.0, 1.0);
       _box(quads, lowerBox, 0.12, 0.4, 0.12, navy, project, depthOf);
-      final foot = joint.clone()..translate(0.0, -0.42, 0.06);
+      final foot = joint.clone()..translateByDouble(0.0, -0.42, 0.06, 1.0);
       _box(quads, foot, 0.14, 0.08, 0.26, navy, project, depthOf);
     }
 
@@ -424,21 +423,23 @@ class _StagePainter extends CustomPainter {
     if (t < 2.86 && handWorld != null) {
       final hp = handWorld!.getTranslation();
       caseRoot = Matrix4.identity()
-        ..translate(hp.x + 0.1, math.max(hp.y - 0.55, 0.0), hp.z + 0.05);
+        ..translateByDouble(
+            hp.x + 0.1, math.max(hp.y - 0.55, 0.0), hp.z + 0.05, 1.0);
       if (walking) caseRoot.rotateZ(math.sin(t * 8.6) * 0.06);
     } else {
       final r = _clamp01((t - 2.86) / 0.36);
       final hp = handWorld?.getTranslation() ?? Vector3(studentX, 0.5, 0);
       final fromX = hp.x + 0.1, fromY = math.max(hp.y - 0.55, 0.0);
       caseRoot = Matrix4.identity()
-        ..translate(
+        ..translateByDouble(
           fromX + (caseX - fromX) * _ease(r),
           fromY + (0 - fromY) * _ease(r),
           0.2 * _ease(r),
+          1.0,
         );
     }
 
-    _box(quads, caseRoot.clone()..translate(0.0, 0.25, 0.0), 0.95, 0.5, 0.62,
+    _box(quads, caseRoot.clone()..translateByDouble(0.0, 0.25, 0.0, 1.0), 0.95, 0.5, 0.62,
         navy, project, depthOf);
 
     // latches
@@ -447,9 +448,9 @@ class _StagePainter extends CustomPainter {
     _box(
         quads,
         caseRoot.clone()
-          ..translate(-0.28, 0.5, 0.31)
+          ..translateByDouble(-0.28, 0.5, 0.31, 1.0)
           ..rotateX(laL)
-          ..translate(0.0, -0.02, 0.0),
+          ..translateByDouble(0.0, -0.02, 0.0, 1.0),
         0.1,
         0.09,
         0.05,
@@ -459,9 +460,9 @@ class _StagePainter extends CustomPainter {
     _box(
         quads,
         caseRoot.clone()
-          ..translate(0.28, 0.5, 0.31)
+          ..translateByDouble(0.28, 0.5, 0.31, 1.0)
           ..rotateX(laR)
-          ..translate(0.0, -0.02, 0.0),
+          ..translateByDouble(0.0, -0.02, 0.0, 1.0),
         0.1,
         0.09,
         0.05,
@@ -470,15 +471,15 @@ class _StagePainter extends CustomPainter {
         depthOf);
 
     // handle
-    _box(quads, caseRoot.clone()..translate(0.0, 0.62, 0.0), 0.34, 0.05, 0.06,
+    _box(quads, caseRoot.clone()..translateByDouble(0.0, 0.62, 0.0, 1.0), 0.34, 0.05, 0.06,
         goldBright, project, depthOf);
 
     // lid, hinged at the back
     final lidRot = t >= 3.62 ? spring('lid', -1.95, _dt, k: 150, d: 9.5) : 0.0;
     final lidHinge = caseRoot.clone()
-      ..translate(0.0, 0.5, -0.31)
+      ..translateByDouble(0.0, 0.5, -0.31, 1.0)
       ..rotateX(lidRot);
-    _box(quads, lidHinge.clone()..translate(0.0, 0.05, 0.31), 0.95, 0.1, 0.62,
+    _box(quads, lidHinge.clone()..translateByDouble(0.0, 0.05, 0.31, 1.0), 0.95, 0.1, 0.62,
         navy, project, depthOf);
 
     // four gold panels unfolding outward
@@ -493,14 +494,14 @@ class _StagePainter extends CustomPainter {
       final open = t >= 3.85 + i * 0.09
           ? spring('pn$i', d[5] * 1.35, _dt, k: 200, d: 10)
           : 0.0;
-      final m = caseRoot.clone()..translate(d[0], d[1], d[2]);
+      final m = caseRoot.clone()..translateByDouble(d[0], d[1], d[2], 1.0);
       if (d[4] == 0.0) {
         m.rotateZ(open);
-        m.translate(0.0, 0.01, 0.0);
+        m.translateByDouble(0.0, 0.01, 0.0, 1.0);
         _box(quads, m, 0.045, 0.02, d[3], gold, project, depthOf);
       } else {
         m.rotateX(open);
-        m.translate(0.0, 0.01, 0.0);
+        m.translateByDouble(0.0, 0.01, 0.0, 1.0);
         _box(quads, m, d[3], 0.02, 0.045, gold, project, depthOf);
       }
     }
@@ -535,7 +536,7 @@ class _StagePainter extends CustomPainter {
         path.lineTo(q.pts[i].x, q.pts[i].y);
       }
       path.close();
-      p.color = q.alpha >= 1 ? q.color : q.color.withValues(alpha: q.alpha);
+      p.color = q.color;
       canvas.drawPath(path, p);
     }
 

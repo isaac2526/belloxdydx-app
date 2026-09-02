@@ -115,6 +115,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (!session.isReady) return loc == Routes.splash ? null : Routes.splash;
 
       if (!session.isSignedIn) {
+        // The splash has done its job the moment the session resolves.
+        // It is a "public" route so an unauthenticated visitor may sit
+        // on it while we decide — but once we have decided, staying
+        // there strands the student on a loading screen forever.
+        if (loc == Routes.splash) return Routes.welcome;
         return isPublic ? null : Routes.welcome;
       }
 

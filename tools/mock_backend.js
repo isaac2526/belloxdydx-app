@@ -122,6 +122,9 @@ for (const c of COURSES) {
   mk('note', `${c.code} · Introduction and key laws`, { topic: 'Foundations' });
   mk('note', `${c.code} · Worked examples`, { topic: 'Practice' });
   mk('note', `${c.code} · Exam focus areas`, { topic: 'Revision' });
+  // A fourth note so the "search appears above three items" rule is
+  // actually exercised by the interaction test.
+  mk('note', `${c.code} · Common mistakes`, { topic: 'Revision' });
   mk('slide', `${c.code} · Lecture 1 slides`, {
     topic: 'Week 1',
     url: 'https://example.supabase.co/storage/v1/object/public/materials/lecture1.pdf',
@@ -241,6 +244,7 @@ const state = {
   streaks: {},        // user id -> {current, best}
   points: {},         // user id -> number
   plays: [],          // millionaire
+  devices: {},        // user id -> device id (the single-session rule)
 };
 
 for (const u of Object.values(USERS)) {
@@ -369,9 +373,12 @@ const RPC = {
 
   bx_username_available: (_u, p) => ({ available: !byLogin(p.p_username) }),
 
-  bx_bind_device: (u) => ({ ok: true, activated: u.is_activated, level: u.current_level }),
+  bx_bind_device: (u, p) => {
+    state.devices[u.id] = p.p_device_id || 'unknown-device';
+    return { ok: true, activated: u.is_activated, level: u.current_level };
+  },
 
-  bx_end_session: () => ({ ok: true }),
+  bx_end_session: (u) => { delete state.devices[u.id]; return { ok: true }; },
 
   bx_set_level: (u, p) => { u.current_level = p.p_level; return { ok: true, level: p.p_level }; },
 
@@ -801,8 +808,13 @@ const CORS = {
   'Access-Control-Max-Age': '86400',
 };
 
+let LOG_PATH = '';
 const send = (res, code, body) => {
   const payload = body === undefined ? '' : JSON.stringify(body);
+  if (LOG_PATH) {
+    const line = `${code} ${LOG_PATH}${code >= 400 ? '  <- ' + payload.slice(0, 160) : ''}\n`;
+    process.stdout.write(line);
+  }
   res.writeHead(code, { ...CORS, 'Content-Type': 'application/json' });
   res.end(payload);
 };
@@ -823,6 +835,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const path = url.pathname;
   const body = await readBody(req);
+  LOG_PATH = `${req.method} ${path}${url.search}`;
 
   // ---------- Supabase Auth ----------
   if (path === '/auth/v1/token') {
@@ -884,6 +897,19 @@ const server = http.createServer(async (req, res) => {
     const u = authUser(req);
     if (!u) return send(res, 401, { message: 'JWT expired' });
     return send(res, 200, [profileOf(u)]);
+  }
+
+  if (path === '/rest/v1/active_sessions') {
+    const u = authUser(req);
+    if (!u) return send(res, 401, { message: 'JWT expired' });
+    const device = state.devices[u.id];
+    if (!device) return send(res, 200, []);
+    return send(res, 200, [{
+      user_id: u.id,
+      device_id: device,
+      session_token: 'mock-session-token',
+      last_seen_at: new Date().toISOString(),
+    }]);
   }
 
   if (path.startsWith('/rest/v1/')) {

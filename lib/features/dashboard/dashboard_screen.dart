@@ -85,8 +85,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (data != null && data.rank > 0) ...[
+                  // On a phone the full "#2 · 1,840 pts" crowds the
+                  // greeting until it truncates to "Good afternoon, Ku…".
+                  // The rank is the part that matters at a glance; the
+                  // points ride along only when there is room for them.
                   BxChip(
-                    '#${data.rank} · ${data.points} pts',
+                    MediaQuery.sizeOf(context).width < 420
+                        ? '#${data.rank}'
+                        : '#${data.rank} · ${_thousands(data.points)}',
                     accent: BxAccent.gold,
                     dense: true,
                     onTap: () => context.go(Routes.ranks),
@@ -142,6 +148,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       ),
     );
   }
+}
+
+/// 1840 -> "1,840". Keeps the rank chip readable without pulling in a
+/// formatter just for one number.
+String _thousands(int n) {
+  final digits = n.abs().toString();
+  final out = StringBuffer(n < 0 ? '-' : '');
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
+    out.write(digits[i]);
+  }
+  return out.toString();
 }
 
 /// Greeting from the clock on the student's phone.

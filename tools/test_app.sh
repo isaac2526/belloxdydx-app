@@ -26,17 +26,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A stale server from a previous run would keep the port, silently serve
+# the old fixtures, and swallow this run's log. `ss` cannot see listeners
+# without privileges in some containers, so match on the command line —
+# both patterns are specific enough not to match this script.
+pkill -9 -f "tools/mock_backend.js" 2>/dev/null || true
+pkill -9 -f "bx-static-file-server" 2>/dev/null || true
+sleep 1
+
 echo "==> starting mock backend on :$MOCK_PORT"
 node tools/mock_backend.js "$MOCK_PORT" >"$OUT/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 1.5
 curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/rest/v1/rpc/bx_capabilities" \
   -H 'Content-Type: application/json' -d '{}' >/dev/null \
-  || { echo "mock backend failed to start"; cat "$OUT/mock.log"; exit 1; }
+  || { echo "FATAL: mock backend did not start"; cat "$OUT/mock.log"; exit 1; }
 
 if [[ "${1:-}" != "--no-build" ]]; then
   echo "==> building for web"
-  "$FLUTTER" build web --release \
+  "$FLUTTER" build web --release --no-web-resources-cdn \
     --dart-define=BX_SUPABASE_URL="http://127.0.0.1:$MOCK_PORT" \
     --dart-define=BX_SUPABASE_ANON_KEY=mock-anon-key \
     --dart-define=BX_SITE_URL="http://127.0.0.1:$MOCK_PORT" \
@@ -46,6 +54,7 @@ fi
 
 echo "==> serving build/web on :$WEB_PORT"
 node -e "
+/* bx-static-file-server */
 const http=require('http'),fs=require('fs'),p=require('path');
 const root=p.join(process.cwd(),'build','web');
 const mime={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript',

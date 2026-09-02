@@ -53,6 +53,9 @@ async function nodes(page) {
         label: label.trim(),
         role: el.getAttribute('role') || '',
         tappable: el.hasAttribute('flt-tappable') || el.getAttribute('role') === 'button',
+        // Flutter renders a button's label in a CHILD node, so the node
+        // carrying the text is usually not the one marked as a button.
+        inButton: !!el.closest('flt-semantics[role="button"]'),
         x: Math.round(r.x + r.width / 2),
         y: Math.round(r.y + r.height / 2),
         w: Math.round(r.width),
@@ -67,15 +70,46 @@ async function labels(page) {
   return (await nodes(page)).map((n) => n.label);
 }
 
-/** Finds a node whose label contains `text` (case-insensitive). */
+/**
+ * Finds the node a human would actually click.
+ *
+ * Flutter's semantics tree contains container nodes whose label is every
+ * descendant's text run together, so a naive "first node containing the
+ * word" match lands on a page-sized box and clicks its middle. Rank
+ * candidates instead: exact match first, then tappable, then the
+ * smallest box, and reject containers whose label dwarfs the needle.
+ */
 async function find(page, text, { exact = false } = {}) {
   const all = await nodes(page);
   const needle = text.toLowerCase();
-  return (
-    all.find((n) =>
-      exact ? n.label.toLowerCase() === needle : n.label.toLowerCase().includes(needle),
-    ) || null
+
+  let candidates = all.filter((n) =>
+    exact ? n.label.toLowerCase() === needle : n.label.toLowerCase().includes(needle),
   );
+  if (candidates.length === 0) return null;
+
+  const scored = candidates.map((n) => {
+    const label = n.label.toLowerCase();
+    const isExact = label === needle;
+    // A label far longer than what we asked for is an aggregate node.
+    const bloat = label.length / Math.max(needle.length, 1);
+    const area = n.w * n.h;
+    let score = 0;
+    if (isExact) score -= 1000;
+    if (n.tappable || n.inButton) score -= 600;
+    if (bloat > 4) score += 800;      // almost certainly a container
+    score += bloat * 10;
+    score += area / 4000;             // prefer the tighter box
+    return { n, score };
+  });
+
+  scored.sort((a, b) => a.score - b.score);
+  const best = scored[0];
+  // Reject a match that is only a fragment of a page-sized container.
+  if (!exact && best.n.label.length > needle.length * 8 && best.n.w * best.n.h > 200000) {
+    return null;
+  }
+  return best.n;
 }
 
 async function tap(page, text, { exact = false, settle = 900 } = {}) {
@@ -86,17 +120,74 @@ async function tap(page, text, { exact = false, settle = 900 } = {}) {
   return true;
 }
 
-async function typeInto(page, labelText, value) {
-  // Flutter web puts a real <input> in the DOM for the focused field.
-  const n = await find(page, labelText);
-  if (n) await page.mouse.click(n.x, n.y);
-  await sleep(300);
-  const input = await page.$('input:focus, textarea:focus');
-  if (!input) return false;
-  await input.fill('');
-  await input.type(value, { delay: 18 });
-  await sleep(200);
+/**
+ * Types into the field that sits under a given label.
+ *
+ * Flutter keeps its <input> elements out of the way of the painted UI,
+ * so their DOM position is not where the field appears and clicking
+ * them directly is a coin flip. The label, though, is a real semantics
+ * node at a known place, and the field is drawn just beneath it. Click
+ * there to move focus, then send real keystrokes — which is also the
+ * only thing Flutter's editing pipeline accepts; element.fill() is
+ * silently ignored.
+ */
+async function fillByLabel(page, labelText, value, dy = 40) {
+  const all = await nodes(page);
+  const needle = labelText.toLowerCase();
+  const label = all
+    .filter((n) => n.label.toLowerCase() === needle)
+    .sort((a, b) => a.w * a.h - b.w * b.h)[0];
+  if (!label) return false;
+
+  // Two attempts: Flutter's web editing pipeline drops keystrokes that
+  // arrive faster than it can process them, so type deliberately and
+  // check the result rather than assuming it landed.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.mouse.click(label.x, label.y + dy);
+    await sleep(600);
+    if (!(await page.$('input:focus, textarea:focus'))) continue;
+
+    await page.keyboard.press('Control+A').catch(() => {});
+    await page.keyboard.press('Backspace').catch(() => {});
+    await sleep(150);
+    for (const ch of value) {
+      await page.keyboard.type(ch);
+      await sleep(45);
+    }
+    await sleep(350);
+
+    // Re-query rather than reusing a handle: Flutter can swap the
+    // backing <input> mid-edit, leaving an old handle reading empty
+    // even though the field is correctly filled.
+    const after = await page.$('input:focus, textarea:focus');
+    if (after && (await after.inputValue()) === value) return true;
+  }
+  return false;
+}
+
+/** Focuses whatever field is on screen and types into it. */
+async function typeIntoFocused(page, value) {
+  const focused = await page.$('input:focus, textarea:focus');
+  if (!focused) return false;
+  await page.keyboard.press('Control+A').catch(() => {});
+  if (value === '') {
+    await page.keyboard.press('Backspace');
+  } else {
+    await page.keyboard.type(value, { delay: 20 });
+  }
+  await sleep(250);
   return true;
+}
+
+/** Waits until a form's inputs are actually in the DOM. */
+async function waitForForm(page, count = 1, timeout = 25000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const n = (await page.$$('input, textarea')).length;
+    if (n >= count) return n;
+    await sleep(500);
+  }
+  return 0;
 }
 
 /** Waits until any of `texts` appears in the semantics tree. */
@@ -132,20 +223,37 @@ async function waitFor(page, texts, timeout = 20000) {
   try {
     // ---------- boot ----------
     await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForSelector('flutter-view, flt-glass-pane, flt-scene-host', { timeout: 60000 });
+    await page.waitForSelector(
+      'flutter-view, flt-glass-pane, flt-scene-host, flt-semantics-placeholder, canvas',
+      { timeout: 90000 },
+    );
     await sleep(2500);
 
     // Turn on the semantics tree so everything becomes queryable.
-    const placeholder = await page.$('flt-semantics-placeholder');
-    if (placeholder) {
-      await placeholder.click({ force: true });
-    } else {
+    //
+    // Flutter parks this placeholder off-screen on purpose — it exists
+    // for screen readers — so a real mouse click is refused as "outside
+    // the viewport". A synthetic DOM click is what Flutter listens for
+    // anyway, and it is exactly what an assistive tool would send.
+    const enabled = await page.evaluate(() => {
+      const el = document.querySelector('flt-semantics-placeholder');
+      if (!el) return false;
+      el.click();
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return true;
+    });
+    await sleep(2000);
+
+    // Some builds only expose the placeholder after the first frame.
+    if (!enabled || (await labels(page)).length === 0) {
       await page.evaluate(() => {
-        const el = document.querySelector('flt-semantics-placeholder');
-        if (el) el.click();
+        document.querySelectorAll('flt-semantics-placeholder').forEach((el) => {
+          el.click();
+          el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
       });
+      await sleep(2000);
     }
-    await sleep(1500);
 
     const tree = await labels(page);
     if (tree.length === 0) {
@@ -169,25 +277,27 @@ async function waitFor(page, texts, timeout = 20000) {
       await sleep(1200);
       await shot(page, 'login');
 
-      // The 3D intro may still be playing — skip it.
-      if (await tap(page, 'Skip intro')) log('ok', '3D intro skip button', 'present and tappable');
-      await sleep(600);
-      await shot(page, 'login-form');
+      // The 3D intro plays for about five seconds and deliberately keeps
+      // the form out of the semantics tree until it has risen, so wait
+      // for the real inputs rather than racing the animation.
+      const introPresent = (await find(page, 'Skip intro')) !== null;
+      log(introPresent ? 'ok' : 'warn', '3D intro',
+        introPresent ? 'stage is playing over the form' : 'not detected');
 
-      const typedUser = await typeInto(page, 'Email or username', 'kunle');
-      const typedPass = await typeInto(page, 'Password', 'Password@1#');
-      if (!typedUser || !typedPass) {
-        // Fall back to raw inputs in DOM order.
-        const inputs = await page.$$('input');
-        if (inputs.length >= 2) {
-          await inputs[0].fill('kunle');
-          await inputs[1].fill('Password@1#');
-          log('warn', 'login fields', 'filled by DOM order, labels not matched');
-        } else {
-          log('fail', 'login fields', `found ${inputs.length} inputs`);
-        }
+      const fieldCount = await waitForForm(page, 2, 25000);
+      await shot(page, 'login-form');
+      if (fieldCount < 2) {
+        log('fail', 'login form', `only ${fieldCount} field(s) appeared`);
       } else {
-        log('ok', 'login fields', 'filled by label');
+        log('ok', 'login form', `${fieldCount} fields after the intro`);
+      }
+
+      const typedUser = await fillByLabel(page, 'EMAIL OR USERNAME', 'kunle');
+      const typedPass = await fillByLabel(page, 'PASSWORD', 'Password@1#');
+      if (typedUser && typedPass) {
+        log('ok', 'login fields', 'username and password entered');
+      } else {
+        log('fail', 'login fields', `user=${typedUser} pass=${typedPass}`);
       }
       await shot(page, 'login-filled');
 
@@ -261,13 +371,14 @@ async function waitFor(page, texts, timeout = 20000) {
 
         const inputs = await page.$$('input');
         if (inputs.length) {
-          await inputs[0].fill('Worked');
+          await inputs[0].click().catch(() => {});
+          await typeIntoFocused(page, 'Worked');
           await sleep(1000);
           const after = await labels(page);
           const filtered = after.some((l) => l.includes('Worked'));
           log(filtered ? 'ok' : 'warn', 'material search', filtered ? 'filtered to matches' : 'no visible filtering');
           await shot(page, 'section-search');
-          await inputs[0].fill('');
+          await typeIntoFocused(page, '');
           await sleep(700);
         } else {
           log('warn', 'material search', 'no search field rendered');
@@ -298,21 +409,46 @@ async function waitFor(page, texts, timeout = 20000) {
         log('ok', 'practice start', 'runner opened at question 1');
         await shot(page, 'practice-q1');
 
-        // answer the first question by tapping an option
-        const opts = (await nodes(page)).filter((n) =>
-          /^(A|B|C|D|True|False)\b/i.test(n.label) || /kg|Newton|Joule|Watt|Velocity/i.test(n.label));
-        if (opts.length) {
-          await page.mouse.click(opts[0].x, opts[0].y);
-          await sleep(1800);
-          const after = await labels(page);
-          const revealed = after.some((l) => /correct|not this one|not quite/i.test(l));
-          log(revealed ? 'ok' : 'warn', 'practice answer', revealed ? 'verdict revealed' : 'no verdict seen');
-          await shot(page, 'practice-answered');
+        // A question is either multiple choice / true-false, or typed.
+        // Handle both — the bank contains both kinds.
+        const nowLabels = await labels(page);
+        const isTyped = nowLabels.some((l) => /YOUR ANSWER/i.test(l));
+        let answered = false;
 
-          const explained = after.some((l) => /momentum|newton|gradient|conserv/i.test(l));
-          log(explained ? 'ok' : 'warn', 'practice explanation', explained ? 'explanation shown' : 'not detected');
+        if (isTyped) {
+          const typed = await fillByLabel(page, 'YOUR ANSWER', 'kgm/s');
+          const checked = await tap(page, 'Check', { settle: 2000 });
+          answered = typed && checked;
+          log(answered ? 'ok' : 'warn', 'practice answer (typed)',
+            answered ? 'answer submitted' : `typed=${typed} checked=${checked}`);
         } else {
-          log('fail', 'practice answer', 'no option rows found');
+          const opts = (await nodes(page)).filter(
+            (n) =>
+              n.inButton &&
+              /^(A|B|C|D|E|T|F|True|False)\b/i.test(n.label) &&
+              n.h < 140,
+          );
+          if (opts.length) {
+            await page.mouse.click(opts[0].x, opts[0].y);
+            await sleep(2000);
+            answered = true;
+            log('ok', 'practice answer (choice)', `${opts.length} option(s) offered`);
+          } else {
+            log('fail', 'practice answer', 'no option rows found');
+          }
+        }
+
+        if (answered) {
+          const after = await labels(page);
+          const revealed = after.some((l) =>
+            /correct|not this one|not quite|accepted answer/i.test(l));
+          log(revealed ? 'ok' : 'warn', 'practice verdict',
+            revealed ? 'instant correction shown' : 'no verdict seen');
+          const explained = after.some((l) =>
+            /momentum|newton|gradient|conserv|velocity|inertia/i.test(l));
+          log(explained ? 'ok' : 'warn', 'practice explanation',
+            explained ? 'explanation rendered' : 'not detected');
+          await shot(page, 'practice-answered');
         }
 
         // next question

@@ -344,11 +344,19 @@ class AuthRepository {
           .stream(primaryKey: ['user_id'])
           .eq('user_id', uid)
           .map((rows) {
-            if (rows.isEmpty) return false;
-            final token = rows.first['device_id']?.toString() ??
-                rows.first['session_token']?.toString();
-            // Still ours when the row names this device.
-            return token == null || token == mine;
+            // ONLY a row that explicitly names a different device means
+            // somebody else took the session.
+            //
+            // Anything else — no row yet, a row with no device recorded,
+            // the initial snapshot before the insert is visible, a
+            // transient read — is "unknown", and unknown must never sign
+            // a student out. Treating an empty result as superseded logs
+            // people out at random, which is exactly what it did the
+            // first time this ran.
+            if (rows.isEmpty) return true;
+            final device = rows.first['device_id']?.toString();
+            if (device == null || device.isEmpty) return true;
+            return device == mine;
           })
           .handleError((_) => true);
     }
