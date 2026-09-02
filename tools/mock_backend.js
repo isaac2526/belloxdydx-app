@@ -958,10 +958,235 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { email: u ? u.email : null });
   }
 
+  // ---------- Test hooks ----------
+  // The single-session rule is the one piece of this app that can throw a
+  // student out mid-revision, so the driver needs to provoke both cases:
+  // a change that is NOT a takeover (must be ignored) and one that is.
+  if (path === '/__test/session') {
+    const u = byLogin(body.username || 'kunle');
+    if (!u) return send(res, 404, { error: 'no_such_user' });
+    const before = state.devices[u.id] || null;
+
+    if (body.action === 'takeover') {
+      state.devices[u.id] = 'some-other-phone';
+    } else if (body.action === 'clear') {
+      delete state.devices[u.id];
+    }
+
+    const after = state.devices[u.id] || null;
+    const row = (d) => (d == null ? null : {
+      user_id: u.id, device_id: d,
+      session_token: 'mock-session-token',
+      last_seen_at: new Date().toISOString(),
+    });
+    const channels = broadcastChange(
+      'active_sessions',
+      after == null ? 'DELETE' : 'UPDATE',
+      row(after) || {},
+      row(before) || { user_id: u.id },
+    );
+    return send(res, 200, { ok: true, before, after, channels });
+  }
+
   if (path === '/api/ping') return send(res, 200, { ok: true, t: Date.now() });
 
   return send(res, 404, { error: 'not_found', path });
 });
+
+
+// ============================================================
+// REALTIME
+//
+// Not decoration. `supabase.from(...).stream()` only emits its first
+// snapshot once the channel reports SUBSCRIBED, so with no websocket
+// here the app's single-session watcher never runs at all — and that
+// watcher is the code that can sign a student out. Speaking enough of
+// Phoenix to get a real subscription is the only way to test it.
+// ============================================================
+const crypto = require('crypto');
+
+const sockets = new Set();
+
+function wsFrame(text) {
+  const data = Buffer.from(text, 'utf8');
+  const n = data.length;
+  let head;
+  if (n < 126) {
+    head = Buffer.alloc(2);
+    head[1] = n;
+  } else if (n < 65536) {
+    head = Buffer.alloc(4);
+    head[1] = 126;
+    head.writeUInt16BE(n, 2);
+  } else {
+    head = Buffer.alloc(10);
+    head[1] = 127;
+    head.writeUInt32BE(0, 2);
+    head.writeUInt32BE(n, 6);
+  }
+  head[0] = 0x81; // FIN + text
+  return Buffer.concat([head, data]);
+}
+
+/** Phoenix V2 puts the envelope in a positional array; V1 in an object. */
+function encode(v2, { joinRef, ref, topic, event, payload }) {
+  return v2
+    ? [joinRef ?? null, ref ?? null, topic, event, payload]
+    : { topic, event, payload, ref: ref ?? null };
+}
+
+/** Reads client frames, which are always masked. */
+function wsReader(onText, onClose, onPong) {
+  let buf = Buffer.alloc(0);
+  return (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    for (;;) {
+      if (buf.length < 2) return;
+      const fin = (buf[0] & 0x80) !== 0;
+      const opcode = buf[0] & 0x0f;
+      const masked = (buf[1] & 0x80) !== 0;
+      let len = buf[1] & 0x7f;
+      let off = 2;
+      if (len === 126) {
+        if (buf.length < 4) return;
+        len = buf.readUInt16BE(2); off = 4;
+      } else if (len === 127) {
+        if (buf.length < 10) return;
+        len = Number(buf.readBigUInt64BE(2)); off = 10;
+      }
+      let mask = null;
+      if (masked) {
+        if (buf.length < off + 4) return;
+        mask = buf.subarray(off, off + 4); off += 4;
+      }
+      if (buf.length < off + len) return;
+      const payload = Buffer.from(buf.subarray(off, off + len));
+      if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+      buf = buf.subarray(off + len);
+      if (process.env.WS_TRACE) {
+        process.stdout.write(`  ws  frame op=${opcode} fin=${fin} len=${len}\n`);
+      }
+      if (opcode === 0x8) return onClose();
+      if (opcode === 0x9) { // ping -> pong, or the client gives up on us
+        const pong = Buffer.concat([Buffer.from([0x8a, payload.length]), payload]);
+        return onPong(pong);
+      }
+      if (opcode === 0x1 && fin) onText(payload.toString('utf8'));
+    }
+  };
+}
+
+server.on('upgrade', (req, socket) => {
+  if (!req.url.startsWith('/realtime/v1/websocket')) {
+    socket.destroy();
+    return;
+  }
+  const key = req.headers['sec-websocket-key'] || '';
+  const accept = crypto
+    .createHash('sha1')
+    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+    .digest('base64');
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+  );
+  socket.setNoDelay(true);
+
+  // Phoenix has two wire formats. realtime-dart uses V2, which is a
+  // positional array — [join_ref, ref, topic, event, payload] — not the
+  // object form. Reply in whichever one the client is speaking.
+  const conn = { socket, topics: new Map(), v2: true };
+  sockets.add(conn);
+  process.stdout.write('  ws  connected\n');
+
+  const push = (msg) => {
+    try { socket.write(wsFrame(JSON.stringify(msg))); } catch (_) {}
+  };
+
+  const close = () => { sockets.delete(conn); socket.destroy(); };
+  socket.on('error', (e) => {
+    process.stdout.write(`  ws  socket error: ${e.message}\n`);
+    close();
+  });
+  socket.on('close', () => sockets.delete(conn));
+
+  socket.on('data', wsReader((text) => {
+    if (process.env.WS_TRACE) process.stdout.write(`  ws  <- ${text.slice(0, 200)}\n`);
+    let raw;
+    try { raw = JSON.parse(text); } catch (_) { return; }
+
+    let joinRef, ref, topic, event, payload;
+    if (Array.isArray(raw)) {
+      [joinRef, ref, topic, event, payload] = raw;
+      conn.v2 = true;
+    } else {
+      ({ topic, event, ref, payload } = raw);
+      joinRef = raw.join_ref;
+      conn.v2 = false;
+    }
+
+    const reply = (response, status = 'ok') => push(encode(conn.v2, {
+      joinRef, ref, topic, event: 'phx_reply', payload: { status, response },
+    }));
+
+    if (event === 'heartbeat') return reply({});
+
+    if (event === 'phx_join') {
+      // Echo the client's own postgres_changes config straight back.
+      // realtime-dart compares what it asked for against what it is
+      // given and errors the channel on any difference, so inventing a
+      // filter here would fail the subscription instead of testing it.
+      const asked = ((payload || {}).config || {}).postgres_changes || [];
+      const granted = asked.map((c, i) => ({ ...c, id: 90000 + i }));
+      conn.topics.set(topic, { joinRef, bindings: granted });
+      process.stdout.write(`  ws  join ${topic}\n`);
+      return reply({ postgres_changes: granted });
+    }
+
+    if (event === 'phx_leave') {
+      conn.topics.delete(topic);
+      return reply({});
+    }
+
+    if (event === 'access_token') return reply({});
+  }, close, (pong) => { try { socket.write(pong); } catch (_) {} }));
+});
+
+/** Pushes a row change to everyone subscribed to that table. */
+function broadcastChange(table, type, record, oldRecord) {
+  const shape = Object.keys(record || {}).length
+    ? record
+    : (oldRecord || {});
+  const columns = Object.keys(shape).map((name) => ({ name, type: 'text' }));
+  let sent = 0;
+  for (const conn of sockets) {
+    for (const [topic, sub] of conn.topics) {
+      const ids = sub.bindings.filter((b) => b.table === table).map((b) => b.id);
+      if (ids.length === 0) continue;
+      const msg = encode(conn.v2, {
+        joinRef: sub.joinRef, ref: null, topic, event: 'postgres_changes',
+        payload: {
+          ids,
+          data: {
+            schema: 'public', table, type, columns,
+            commit_timestamp: new Date().toISOString(),
+            record: record || {},
+            old_record: oldRecord || {},
+            errors: null,
+          },
+        },
+      });
+      try {
+        conn.socket.write(wsFrame(JSON.stringify(msg)));
+        sent++;
+      } catch (_) {}
+    }
+  }
+  process.stdout.write(`  ws  pushed ${type} on ${table} to ${sent} channel(s)\n`);
+  return sent;
+}
 
 server.listen(PORT, '127.0.0.1', () => {
   process.stdout.write(`mock backend listening on http://127.0.0.1:${PORT}\n`);

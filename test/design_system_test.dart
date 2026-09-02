@@ -228,6 +228,68 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a tappable card announces itself as a button', (tester) async {
+    // A bare GestureDetector paints a control a screen reader cannot
+    // find: TalkBack reads the text and gives no hint it can be pressed.
+    final handle = tester.ensureSemantics();
+    var pressed = false;
+    await tester.pumpWidget(host(
+      BxScaleTap(onTap: () => pressed = true, child: const Text('Open PHY 101')),
+      dark: false,
+    ));
+
+    expect(
+      tester.getSemantics(find.text('Open PHY 101')),
+      matchesSemantics(
+        label: 'Open PHY 101',
+        isButton: true,
+        isEnabled: true,
+        hasEnabledState: true,
+        hasTapAction: true,
+      ),
+    );
+
+    // And the announced action really is the one that fires.
+    await tester.tap(find.text('Open PHY 101'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(pressed, isTrue);
+    handle.dispose();
+  });
+
+  testWidgets('a switched page fills its box instead of floating', (tester) async {
+    // AnimatedSwitcher's default layout is a loose Stack, so a scrolling
+    // child shrank to its content and was then centred — leaving dead
+    // bands above and below every short page in the app.
+    await tester.pumpWidget(MaterialApp(
+      theme: bxLightTheme,
+      home: Scaffold(
+        body: Column(
+          children: [
+            Expanded(
+              child: BxSwitcher(
+                child: SingleChildScrollView(
+                  child: Container(
+                    key: const ValueKey('short'),
+                    height: 40,
+                    color: const Color(0xFF000000),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final scroller = tester.getRect(find.byType(SingleChildScrollView));
+    final available = tester.getRect(find.byType(Scaffold));
+    expect(scroller.height, closeTo(available.height, 1),
+        reason: 'the page must occupy the whole switcher, not shrink to 40px');
+    expect(scroller.top, closeTo(available.top, 1),
+        reason: 'and it must start at the top, not be centred');
+  });
+
   testWidgets('every accent resolves in both palettes', (tester) async {
     for (final a in BxAccent.values) {
       for (final palette in [BxColors.light, BxColors.dark]) {

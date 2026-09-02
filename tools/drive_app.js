@@ -20,6 +20,7 @@ const path = require('path');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8080';
 const OUT = process.argv[3] || '/tmp/shots';
+const MOCK = process.argv[4] || 'http://127.0.0.1:54321';
 fs.mkdirSync(OUT, { recursive: true });
 
 const results = [];
@@ -39,6 +40,16 @@ async function shot(page, name) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Reaches past the app to the backend, to make something change server-side. */
+async function backend(pathname, payload) {
+  const res = await fetch(MOCK + pathname, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
 
 /** Every semantics node currently in the tree, with its label and box. */
 async function nodes(page) {
@@ -112,12 +123,82 @@ async function find(page, text, { exact = false } = {}) {
   return best.n;
 }
 
+// Two things make a naive click miss.
+//
+// The course hub is not a lazy list, so EVERY widget has a semantics
+// node — including the ones below the fold, whose boxes sit outside the
+// viewport entirely. Clicking their centre clicks nothing.
+//
+// And the bottom navigation floats OVER the content, so a control near
+// the bottom edge has its middle underneath the bar. Clicking there
+// switches tab, and because re-tapping the current tab scrolls it back
+// to the top, the symptom reads as "the button did nothing".
+//
+// So: scroll the target into the clear band first, and tell content from
+// the pinned navigation by whether the node moves when the page does.
+const NAV_GUARD = 96;
+
 async function tap(page, text, { exact = false, settle = 900 } = {}) {
-  const n = await find(page, text, { exact });
+  let n = await find(page, text, { exact });
   if (!n) return false;
-  await page.mouse.click(n.x, n.y);
+
+  const vh = await page.evaluate(() => window.innerHeight);
+  const line = vh - NAV_GUARD;
+  const clear = (node) => node.y >= 8 && node.y <= line;
+
+  let pinned = false;
+  for (let i = 0; i < 4 && !clear(n) && !pinned; i++) {
+    const was = n.y;
+    await page.mouse.move(215, Math.min(400, line - 40));
+    await page.mouse.wheel(0, Math.round(n.y - vh * 0.45));
+    await sleep(420);
+    const again = await find(page, text, { exact });
+    if (!again) break;
+    pinned = Math.abs(again.y - was) < 4;   // it did not move: it is the nav bar
+    n = again;
+  }
+
+  // Last resort for something that cannot be scrolled clear: aim at the
+  // part of it that is still above the bar.
+  let y = n.y;
+  if (!pinned && y > line && n.y - n.h / 2 < line) y = line - 8;
+  y = Math.max(6, Math.min(y, vh - 6));
+
+  await page.mouse.click(n.x, y);
   await sleep(settle);
   return true;
+}
+
+/** Leaves a pushed route the way a student would: the app bar's back arrow. */
+async function goBack(page, settle = 1400) {
+  if (await tap(page, 'Back', { exact: true, settle })) return true;
+  await page.goBack().catch(() => {});
+  await sleep(settle);
+  return true;
+}
+
+/**
+ * Scrolls a screen until the wanted control is actually built, then taps it.
+ *
+ * Flutter's lazy lists do not build what is off screen, so an off-screen
+ * control has no semantics node at all — searching for it before
+ * scrolling finds nothing and says "missing" about something that is
+ * simply further down. Scroll in steps, re-reading the tree each time,
+ * and stop the moment it appears.
+ */
+async function scrollToTap(page, text, opts = {}) {
+  const { steps = 14, dy = 320, at = [215, 520], settle = 900, exact = false } = opts;
+  await page.mouse.move(at[0], at[1]);
+  for (let i = 0; i <= steps; i++) {
+    if (await find(page, text, { exact })) {
+      return tap(page, text, { exact, settle });
+    }
+    await page.mouse.wheel(0, dy);
+    await sleep(260);
+  }
+  // One last look after the final scroll settles.
+  await sleep(500);
+  return tap(page, text, { exact, settle });
 }
 
 /**
@@ -219,6 +300,12 @@ async function waitFor(page, texts, timeout = 20000) {
     if (m.type() === 'error') consoleErrors.push(m.text().slice(0, 300));
   });
   page.on('pageerror', (e) => consoleErrors.push('pageerror: ' + String(e).slice(0, 300)));
+  // "Failed to load resource" alone says nothing about WHICH resource,
+  // and a font or script the app fetches from the internet at runtime is
+  // a real problem on a phone with no data.
+  page.on('requestfailed', (r) => {
+    consoleErrors.push(`requestfailed ${r.failure()?.errorText || ''} ${r.url().slice(0, 160)}`);
+  });
 
   try {
     // ---------- boot ----------
@@ -467,6 +554,15 @@ async function waitFor(page, texts, timeout = 20000) {
           const onResult = await waitFor(page, ['%', 'correct', 'review'], 20000);
           log(onResult ? 'ok' : 'warn', 'practice finish', onResult ? 'landed on results' : 'result screen not detected');
           await shot(page, 'result');
+
+          // The result screen is pushed over the shell, so it has no
+          // bottom nav — leaving it is the student's only way back, and
+          // every later step depends on that button working.
+          const left = (await scrollToTap(page, 'Back to', { settle: 2500 }))
+            || (await tap(page, 'Home', { settle: 2000 }));
+          const backOnShell = await waitFor(page, ['Practice', 'Dashboard', 'Tests & exams'], 12000);
+          log(backOnShell ? 'ok' : 'warn', 'result · leave',
+            backOnShell ? `returned to the app — saw "${backOnShell}"` : 'stuck on the result screen');
         }
       } else {
         log('fail', 'practice start', 'runner did not open');
@@ -479,12 +575,20 @@ async function waitFor(page, texts, timeout = 20000) {
     // ---------- CBT ----------
     await tap(page, 'Courses', { settle: 1200 });
     await tap(page, 'PHY 101', { settle: 1600 });
-    await page.mouse.move(215, 600);
-    for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 400); await sleep(300); }
-    const cbtStarted = (await tap(page, 'Start', { settle: 4000 }));
+    // The tests panel sits below the four section cards, and the button
+    // reads Start, Continue or Retake depending on what the student has
+    // already done with the test.
+    let cbtStarted = '';
+    for (const label of ['Start', 'Continue', 'Retake']) {
+      if (await scrollToTap(page, label, { settle: 4000, at: [215, 600] })) {
+        cbtStarted = label;
+        break;
+      }
+    }
     if (cbtStarted) {
       const gate = await waitFor(page, ['I understand', 'Question 1', 'exam conditions'], 15000);
-      log(gate ? 'ok' : 'warn', 'cbt start', gate ? `saw "${gate}"` : 'no gate or runner');
+      log(gate ? 'ok' : 'warn', 'cbt start',
+        gate ? `pressed "${cbtStarted}", saw "${gate}"` : `pressed "${cbtStarted}" but no gate or runner`);
       await shot(page, 'cbt-gate');
       await tap(page, 'I understand', { settle: 2000 });
       const clockish = (await labels(page)).some((l) => /\d{1,2}:\d{2}/.test(l));
@@ -503,16 +607,28 @@ async function waitFor(page, texts, timeout = 20000) {
         await page.keyboard.press('Escape');
         await sleep(600);
       }
+
+      // A running exam has no bottom nav on purpose — submitting is the
+      // only way out, and that path has to work or a student is trapped.
+      await tap(page, 'Submit', { settle: 1500 });
+      await tap(page, 'Submit', { exact: true, settle: 5000 });
+      const out = await waitFor(page, ['%', 'Dashboard', 'Tests & exams', 'review'], 20000);
+      log(out ? 'ok' : 'warn', 'cbt submit',
+        out ? `submitted and left the exam — saw "${out}"` : 'still inside the exam');
+      await shot(page, 'cbt-submitted');
+      // Submitting lands on the result sheet, which is pushed over the
+      // shell. "You" appears in its body text, so ask for the tab itself.
+      if (!(await find(page, 'You', { exact: true }))) {
+        await scrollToTap(page, 'Back to', { settle: 2500 });
+      }
     } else {
       log('warn', 'cbt start', 'no Start button found on the tests panel');
     }
 
     // ---------- dropdowns (CGPA) ----------
     await tap(page, 'You', { settle: 1400 });
-    await page.mouse.move(215, 600);
-    for (let i = 0; i < 5; i++) { await page.mouse.wheel(0, 450); await sleep(300); }
     await shot(page, 'you-tab');
-    if (await tap(page, 'CGPA', { settle: 2000 })) {
+    if (await scrollToTap(page, 'CGPA', { settle: 2000, at: [215, 600] })) {
       log('ok', 'cgpa screen', 'opened from the You tab');
       await shot(page, 'cgpa');
       const opened = (await tap(page, 'Grade', { settle: 1200 })) || (await tap(page, 'Units', { settle: 1200 }));
@@ -520,16 +636,18 @@ async function waitFor(page, texts, timeout = 20000) {
         log('ok', 'dropdown', 'grade/units picker opens as a sheet');
         await shot(page, 'cgpa-dropdown');
         await page.keyboard.press('Escape');
+        await sleep(700);
       } else {
         log('warn', 'dropdown', 'no dropdown control found');
       }
+      await goBack(page);
     } else {
       log('warn', 'cgpa screen', 'not reachable from You');
     }
 
     // ---------- theme toggle ----------
     await tap(page, 'You', { settle: 1200 });
-    if ((await tap(page, 'Dark', { settle: 1500 }))) {
+    if (await scrollToTap(page, 'Dark', { exact: true, settle: 1500, at: [215, 600] })) {
       log('ok', 'dark theme', 'switched');
       await shot(page, 'dark-theme');
       await tap(page, 'Light', { settle: 1200 });
@@ -537,11 +655,55 @@ async function waitFor(page, texts, timeout = 20000) {
       log('warn', 'dark theme', 'appearance control not found');
     }
 
+    // ---------- the single-session rule ----------
+    // This is the one rule that can throw a student out mid-revision, so
+    // test BOTH directions. It shipped broken once: an empty read was
+    // taken for a takeover and signed people out at random.
+    await tap(page, 'Home', { settle: 1200 });
+    const joined = fs.existsSync(path.join(OUT, 'mock.log'))
+      && /ws {2}join .*active_sessions/.test(fs.readFileSync(path.join(OUT, 'mock.log'), 'utf8'));
+    log(joined ? 'ok' : 'warn', 'realtime subscribe',
+      joined ? 'app subscribed to its own session row' : 'no channel join seen');
+
+    const cleared = await backend('/__test/session', { username: 'kunle', action: 'clear' });
+    await sleep(3000);
+    const survived = !!(await find(page, 'Dashboard')) || !!(await find(page, 'Home'));
+    log(survived ? 'ok' : 'fail', 'session · row vanishes',
+      survived
+        ? `still signed in after the row was removed (${cleared.channels} channel(s) notified)`
+        : 'SIGNED OUT by a row that named no other device');
+    await shot(page, 'session-still-in');
+
+    const took = await backend('/__test/session', { username: 'kunle', action: 'takeover' });
+    const kicked = await waitFor(page, ['another device', 'Log in', 'Create free account'], 15000);
+    log(kicked ? 'ok' : 'warn', 'session · another device',
+      kicked
+        ? `signed out on takeover — saw "${kicked}"`
+        : `still signed in after takeover (${took.channels} channel(s) notified)`);
+    await shot(page, 'session-taken');
+
     // ---------- console health ----------
-    if (consoleErrors.length === 0) {
-      log('ok', 'console', 'no errors');
+    // Two kinds of noise are expected here and are NOT app faults, so
+    // account for them by name rather than letting them hide a real one.
+    const EXPECTED = [
+      {
+        re: /notocoloremoji|ERR_CONNECTION_RESET/i,
+        why: 'CanvasKit emoji fallback from fonts.gstatic.com — web only, and blocked in this sandbox. Android and iOS draw emoji with the system font.',
+      },
+      {
+        re: /401 \(Unauthorized\)/,
+        why: 'requests already in flight when the takeover test invalidated the token',
+      },
+    ];
+    const unexplained = consoleErrors.filter((e) => !EXPECTED.some((x) => x.re.test(e)));
+    for (const x of EXPECTED) {
+      const n = consoleErrors.filter((e) => x.re.test(e)).length;
+      if (n) log('ok', 'console · expected', `${n} × ${x.why}`);
+    }
+    if (unexplained.length === 0) {
+      log('ok', 'console', 'no unexplained errors');
     } else {
-      log('warn', 'console', `${consoleErrors.length} error(s): ${consoleErrors.slice(0, 3).join(' || ')}`);
+      log('warn', 'console', `${unexplained.length} error(s): ${unexplained.slice(0, 3).join(' || ')}`);
     }
   } catch (e) {
     log('fail', 'driver', String(e).slice(0, 400));

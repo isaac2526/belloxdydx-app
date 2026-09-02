@@ -193,12 +193,30 @@ class _BxFadeInState extends State<BxFadeIn>
 
 /// Press feedback: a small, quick scale-down. Applied to every tappable
 /// card so touch feels physical.
+///
+/// A bare GestureDetector gives a screen reader no way to know the thing
+/// under the finger can be activated — TalkBack and VoiceOver read the
+/// card's text and move on, so a blind student cannot find the control at
+/// all. Every tappable in this app goes through here, so declaring the
+/// button role once fixes the whole surface.
 class BxScaleTap extends StatefulWidget {
   final Widget child;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
   final double scale;
   final BorderRadius? borderRadius;
+
+  /// Read out instead of the child's own text. Leave it null when the
+  /// child already says what the control does.
+  final String? semanticLabel;
+
+  /// Set on things that live in a group where one is active — segmented
+  /// controls, filter chips, the question palette.
+  final bool? selected;
+
+  /// Clear when the child is decorative and the parent already carries
+  /// the button role, so the tree does not grow a duplicate node.
+  final bool button;
 
   const BxScaleTap({
     super.key,
@@ -207,6 +225,9 @@ class BxScaleTap extends StatefulWidget {
     this.onLongPress,
     this.scale = 0.975,
     this.borderRadius,
+    this.semanticLabel,
+    this.selected,
+    this.button = true,
   });
 
   @override
@@ -219,19 +240,38 @@ class _BxScaleTapState extends State<BxScaleTap> {
   @override
   Widget build(BuildContext context) {
     if (widget.onTap == null && widget.onLongPress == null) return widget.child;
-    return GestureDetector(
+
+    final tappable = GestureDetector(
       onTapDown: (_) => setState(() => _down = true),
       onTapUp: (_) => setState(() => _down = false),
       onTapCancel: () => setState(() => _down = false),
       onTap: widget.onTap,
       onLongPress: widget.onLongPress,
       behavior: HitTestBehavior.opaque,
+      // The Semantics wrapper below owns the announcement; letting the
+      // detector add its own would put two nodes over one control.
+      excludeFromSemantics: true,
       child: AnimatedScale(
         scale: _down && !reduceMotion(context) ? widget.scale : 1.0,
         duration: BxDuration.fast,
         curve: Curves.easeOut,
         child: widget.child,
       ),
+    );
+
+    if (!widget.button && widget.semanticLabel == null) return tappable;
+
+    return Semantics(
+      container: true,
+      button: widget.button,
+      enabled: true,
+      selected: widget.selected,
+      label: widget.semanticLabel,
+      // With an explicit label the child's own text would only repeat it.
+      excludeSemantics: widget.semanticLabel != null,
+      onTap: widget.onTap,
+      onLongPress: widget.onLongPress,
+      child: tappable,
     );
   }
 }
@@ -257,6 +297,18 @@ class BxSwitcher extends StatelessWidget {
               .animate(a),
           child: c,
         ),
+      ),
+      // AnimatedSwitcher's default layout is a LOOSE Stack, which lets a
+      // scrolling child shrink to its content and then centres it. A
+      // half-height page therefore floats in the middle of the screen
+      // with dead bands above and below — visible on the exam paper, and
+      // on every loading and empty state in the app. Passing our own
+      // constraints straight through makes the child fill the space it
+      // was given, exactly as it would without the switcher.
+      layoutBuilder: (current, previous) => Stack(
+        fit: StackFit.passthrough,
+        alignment: Alignment.topCenter,
+        children: [...previous, if (current != null) current],
       ),
       child: child,
     );

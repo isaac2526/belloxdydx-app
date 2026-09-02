@@ -576,6 +576,7 @@ class BxSegmented<T> extends StatelessWidget {
             child: BxScaleTap(
               onTap: () => onChanged(o.value),
               scale: 0.96,
+              selected: sel,
               child: AnimatedContainer(
                 duration: BxDuration.fast,
                 padding: const EdgeInsets.symmetric(

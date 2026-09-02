@@ -35,7 +35,7 @@ pkill -9 -f "bx-static-file-server" 2>/dev/null || true
 sleep 1
 
 echo "==> starting mock backend on :$MOCK_PORT"
-node tools/mock_backend.js "$MOCK_PORT" >"$OUT/mock.log" 2>&1 &
+WS_TRACE=1 node tools/mock_backend.js "$MOCK_PORT" >"$OUT/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 1.5
 curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/rest/v1/rpc/bx_capabilities" \
@@ -77,7 +77,7 @@ WEB_PID=$!
 sleep 1.5
 
 echo "==> driving the app"
-node tools/drive_app.js "http://127.0.0.1:$WEB_PORT" "$OUT"
+node tools/drive_app.js "http://127.0.0.1:$WEB_PORT" "$OUT" "http://127.0.0.1:$MOCK_PORT"
 STATUS=$?
 
 echo
