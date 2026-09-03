@@ -550,6 +550,11 @@ class AuthRepository {
     _b.mobileSessionToken = null;
     await _store.remove(BxKeys.mobileSession);
     await _store.remove(BxKeys.activated);
+    // The screen this phone was going to reopen on belonged to whoever
+    // just left. Restoring it for the next student would push them into
+    // somebody else's practice attempt — which the server refuses, so
+    // what they would actually see is an error page on launch.
+    await _store.remove(BxKeys.lastRoute);
     await _store.clearCache();
   }
 }

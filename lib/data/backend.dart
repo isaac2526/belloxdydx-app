@@ -121,10 +121,28 @@ class Backend {
 
   SupabaseClient get sb => Supabase.instance.client;
   GoTrueClient get auth => sb.auth;
-  User? get user => sb.auth.currentUser;
-  String? get userId => sb.auth.currentUser?.id;
-  bool get signedIn => sb.auth.currentSession != null;
-  String? get accessToken => sb.auth.currentSession?.accessToken;
+  User? get user => _session()?.user;
+
+  /// These four are read during boot and inside every request, and all
+  /// four go through `Supabase.instance`, which THROWS when initialize()
+  /// failed — which main() catches and carries on from. An unguarded
+  /// read therefore turns a failed Supabase init into an exception out
+  /// of the session boot, which leaves the router holding `unknown` and
+  /// the student looking at a splash screen with no way forward.
+  ///
+  /// Answering "no session" is the honest reply: there is no client to
+  /// have one on.
+  Session? _session() {
+    try {
+      return Supabase.instance.client.auth.currentSession;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? get userId => _session()?.user.id;
+  bool get signedIn => _session() != null;
+  String? get accessToken => _session()?.accessToken;
 
   /// The mobile session token the website issues for the single-session
   /// rule. Only used on the legacy path.

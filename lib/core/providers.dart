@@ -339,6 +339,21 @@ class SessionNotifier extends StateNotifier<SessionState>
   bool _live = false;
 
   Future<void> _boot() async {
+    try {
+      await _bootOrThrow();
+    } catch (e) {
+      // The router holds on the splash while the session is `unknown`,
+      // so an exception escaping boot is a student staring at a loading
+      // screen with no way forward. Whatever went wrong, they get a
+      // screen they can act on.
+      debugPrint('[boot] failed: $e');
+      if (mounted && !state.isReady) {
+        state = const SessionState.signedOut();
+      }
+    }
+  }
+
+  Future<void> _bootOrThrow() async {
     // Starts the radio watch before anything can fail, so the first
     // error a student sees already knows whether their phone has a
     // connection at all.
@@ -367,7 +382,14 @@ class SessionNotifier extends StateNotifier<SessionState>
     // student was shown a login screen for an account they had never
     // left. That is the bug: not a lost session, an impatient boot.
     final remembered = _auth.rememberedProfile();
-    if (remembered != null && _backend.signedIn) {
+    // The remembered student must be the one the session belongs to.
+    // Signing out clears both, so they can only disagree if a crash
+    // landed between the two writes — and opening one student's app on
+    // another student's name is not a mistake worth risking to save a
+    // comparison.
+    final mine = remembered != null &&
+        (_backend.userId == null || _backend.userId == remembered.id);
+    if (mine && _backend.signedIn) {
       _auth.adopt(remembered);
       _publish(remembered);
       unawaited(_catchUp());
