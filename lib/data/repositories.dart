@@ -790,18 +790,41 @@ class ContentRepository {
       }
       return m;
     } catch (e) {
-      if (savedHtml != null) {
-        final header = _materials.where((m) => m.id == id).firstOrNull;
-        final saved = offline?.item(id);
-        return StudyMaterial(
-          id: id,
-          courseId: header?.courseId ?? saved?.courseId ?? '',
-          kind: header?.kind ?? MaterialKind.note,
-          title: header?.title ?? saved?.title ?? 'Saved note',
-          contentHtml: savedHtml,
-        );
-      }
-      rethrow;
+      final header = _materials.where((m) => m.id == id).firstOrNull;
+      final saved = offline?.item(id);
+
+      // A saved DOCUMENT counts, not only a saved note.
+      //
+      // This is the whole of "when I downloaded some pdf, it showed in
+      // the offline vault that it's downloaded, when I put off my
+      // internet connection it was saying that internet connection
+      // issues". The reader asks for the material before it asks for
+      // the file, and this fallback only ever recognised a note body —
+      // so a slide or a past question sitting complete on the disk
+      // threw a network error before anything got as far as looking at
+      // the disk. The file was always there. Nothing ever opened it.
+      if (savedHtml == null && saved?.hasDoc != true) rethrow;
+
+      return StudyMaterial(
+        id: id,
+        courseId: header?.courseId ?? saved?.courseId ?? '',
+        kind: header?.kind ??
+            (saved != null
+                ? materialKindOf(saved.kind)
+                : MaterialKind.note),
+        title: header?.title ??
+            saved?.title ??
+            (savedHtml != null ? 'Saved note' : 'Saved document'),
+        topic: header?.topic ?? '',
+        // The URL is carried through so a student who comes back online
+        // can still refresh, and so the office branch has something to
+        // hand to the viewer.
+        url: header?.url ?? '',
+        contentHtml: savedHtml ?? '',
+        updatedAt: header?.updatedAt,
+        createdAt: header?.createdAt,
+        sortOrder: header?.sortOrder ?? 0,
+      );
     }
   }
 

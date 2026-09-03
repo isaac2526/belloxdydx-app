@@ -1,9 +1,11 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -66,6 +68,11 @@ _DocKind _sniffKind(Uint8List bytes) {
 
 /// Downloads a document. Returns null on any failure — the caller turns
 /// that into a sentence the student can act on.
+///
+/// Only for SAVING now. Reading goes through [fetchDocumentToFile]: a
+/// forty-megabyte past-question paper held in a Uint8List, and then
+/// decoded from that same Uint8List, is two copies of it in the heap of
+/// a phone that may only have a gigabyte.
 Future<Uint8List?> fetchDocumentBytes(String url) async {
   if (url.isEmpty) return null;
   try {
@@ -80,6 +87,67 @@ Future<Uint8List?> fetchDocumentBytes(String url) async {
   }
   return null;
 }
+
+/// Streams a document to a scratch file and hands back the path.
+///
+/// This is what lets a big document open on a cheap phone. pdfx maps a
+/// file rather than holding it, so the peak cost of reading a 40 MB
+/// paper becomes one 64 KB chunk instead of 40 MB of Uint8List plus
+/// whatever the decoder copies out of it. On a 1 GB Tecno that is the
+/// difference between a page and an out-of-memory kill.
+///
+/// The scratch copy lives in the cache directory, which the OS may
+/// reclaim whenever it likes — that is correct: the Offline Vault is
+/// where a document a student wants to KEEP goes, and that is a
+/// separate, deliberate act.
+Future<({String path, Uint8List head})?> fetchDocumentToFile(
+  String url,
+  String id,
+) async {
+  if (url.isEmpty) return null;
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final client = http.Client();
+  try {
+    final dir = Directory('${(await getTemporaryDirectory()).path}/bxdocs');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    final file = File('${dir.path}/${_safeFileName(id)}');
+
+    final res = await client.send(http.Request('GET', uri))
+        .timeout(const Duration(seconds: 120));
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+
+    final sink = file.openWrite();
+    final head = <int>[];
+    var total = 0;
+    try {
+      await for (final chunk in res.stream) {
+        if (head.length < 8) {
+          head.addAll(chunk.take(8 - head.length));
+        }
+        total += chunk.length;
+        sink.add(chunk);
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    if (total == 0) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      return null;
+    }
+    return (path: file.path, head: Uint8List.fromList(head));
+  } catch (_) {
+    return null;
+  } finally {
+    client.close();
+  }
+}
+
+String _safeFileName(String id) =>
+    id.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
 
 class ViewerScreen extends ConsumerStatefulWidget {
   final String id;
@@ -140,8 +208,19 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
     final saved = await store?.documentPath(widget.id);
     if (saved != null) {
-      final local = _kindFromExtension(documentExtension(saved));
-      if (local == _DocKind.pdf || (local == null && kind == _DocKind.pdf)) {
+      // The FILE decides, not its name.
+      //
+      // On the legacy path — the one production runs — every storage
+      // link is rewritten to `/api/file?u=<base64>`, so the URL carries
+      // no extension and the saved copy is written as `.bin`. Judging
+      // the vaulted copy by its name therefore came out "unknown" on
+      // both sides, the branch fell through, and a document sitting
+      // complete on the disk went to the network anyway — which is
+      // exactly what a student with their data off was seeing.
+      final local = _kindFromExtension(documentExtension(saved)) ??
+          await _sniffFile(saved);
+      if (local == _DocKind.pdf ||
+          (local == null && kind == _DocKind.pdf)) {
         path = saved;
         offline = true;
         kind = _DocKind.pdf;
@@ -152,13 +231,25 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       if (url.isEmpty) {
         error = _missing;
       } else if (kind != _DocKind.office) {
-        // A PDF has to be in memory to be drawn, and an unknown file has
-        // to be read before it can be named — one download serves both.
-        bytes = await fetchDocumentBytes(url);
-        if (bytes == null) {
+        // Streamed to a scratch file rather than into a Uint8List. An
+        // unknown file still has to be READ before it can be named, so
+        // the first eight bytes come back with the path and one
+        // download serves both jobs — without a forty-megabyte paper
+        // ever sitting in the heap of a phone that has a gigabyte.
+        final got = await fetchDocumentToFile(url, widget.id);
+        if (got == null) {
           error = _noDownload;
         } else {
-          kind ??= _sniffKind(bytes);
+          kind ??= _sniffKind(got.head);
+          if (kind == _DocKind.pdf) {
+            path = got.path;
+          } else {
+            // Not a PDF after all — the office branch takes it from
+            // here and the scratch copy is not needed.
+            try {
+              await File(got.path).delete();
+            } catch (_) {}
+          }
         }
       }
     }
@@ -176,6 +267,34 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     });
   }
 
+  /// Reads the first bytes of a file on disk and says what it is.
+  Future<_DocKind?> _sniffFile(String path) async {
+    try {
+      final f = File(path);
+      if (!await f.exists()) return null;
+      final head = await f.openRead(0, 8).expand((c) => c).toList();
+      if (head.isEmpty) return null;
+      return _sniffKind(Uint8List.fromList(head));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The bytes of whatever is currently on screen, if it came from a
+  /// file. Returns null when there is nothing prepared, or when the
+  /// prepared copy is the vault's own — saving that again is a no-op.
+  Future<Uint8List?> _readPrepared() async {
+    final path = _filePath;
+    if (path == null) return null;
+    try {
+      final f = File(path);
+      if (!await f.exists()) return null;
+      return await f.readAsBytes();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _save(StudyMaterial m, String code) async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -188,7 +307,11 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         return;
       }
       final url = _sourceUrl(m);
-      final bytes = _bytes ?? await fetchDocumentBytes(url);
+      // Read back from the scratch copy already on disk where there is
+      // one, so saving a document the student is looking at costs no
+      // second download.
+      final bytes = _bytes ?? await _readPrepared() ??
+          await fetchDocumentBytes(url);
       if (bytes == null) {
         if (!mounted) return;
         bxToast(context,

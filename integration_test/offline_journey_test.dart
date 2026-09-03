@@ -676,6 +676,38 @@ void main() {
       debugPrint('[journey] note opened offline: '
           '${offlineNote.contentHtml.length} chars');
 
+      // A DOWNLOADED PDF OPENS WITH THE SERVER GONE.
+      //
+      // "when I downloaded some pdf, it showed in the offline vault
+      //  that it's downloaded, when I put off my internet connection it
+      //  was saying that internet connection issues"
+      //
+      // The reader asks for the material before it asks for the file,
+      // and that lookup's offline fallback only ever recognised a saved
+      // NOTE — so a slide sitting complete on the disk threw a network
+      // error before anything got as far as looking at the disk.
+      final savedDoc = store.readable
+          .where((i) => i.hasDoc && i.courseId == course.id)
+          .firstOrNull;
+      expect(savedDoc, isNotNull,
+          reason: 'the course download must have put a document on the '
+              'disk. Held: ${store.readable.map((i) => i.kind).toSet()}');
+      final docMaterial = await tester.runAsync(
+          () => container.read(contentRepoProvider).material(savedDoc!.id));
+      expect(docMaterial, isNotNull,
+          reason: 'A SAVED PDF MUST NOT REPORT A CONNECTION PROBLEM');
+      final docPath =
+          await tester.runAsync(() => store.documentPath(savedDoc!.id));
+      expect(docPath, isNotNull);
+      final onDisk =
+          await tester.runAsync(() => File(docPath!).readAsBytes());
+      expect(onDisk!.length, greaterThan(4));
+      expect(String.fromCharCodes(onDisk.take(4)), '%PDF',
+          reason: 'the vaulted copy must be the real document, not a '
+              'placeholder the reader will refuse to draw');
+      debugPrint('[journey] saved PDF opened offline: '
+          '${docMaterial!.title} · ${onDisk.length} bytes');
+
       // And its pictures are still found on disk.
       for (final url in embedded) {
         expect(store.assetPath(url), isNotNull,
