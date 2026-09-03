@@ -247,6 +247,7 @@ class Backend {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 25),
   }) async {
+    await ensureFreshToken();
     try {
       final res = await sb.rpc(fn, params: params).timeout(timeout);
       if (res == null) return const {};
@@ -267,6 +268,7 @@ class Backend {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 25),
   }) async {
+    await ensureFreshToken();
     try {
       final res = await sb.rpc(fn, params: params).timeout(timeout);
       if (res is List) {
@@ -301,6 +303,7 @@ class Backend {
     bool ascending = true,
     int? limit,
   }) async {
+    await ensureFreshToken();
     try {
       dynamic q = sb.from(table).select(columns);
       eq.forEach((k, v) => q = q.eq(k, v));
@@ -403,11 +406,69 @@ class Backend {
 
   Uri _uri(String path) => Uri.parse('${BxConfig.siteUrl}$path');
 
+  /// Makes sure the bearer token about to be sent is still valid.
+  ///
+  /// [accessToken] reads `currentSession.accessToken` and nothing else,
+  /// so it hands over whatever is in memory — expired or not. Supabase
+  /// access tokens last an hour and the auto-refresh only runs while
+  /// the app is in the FOREGROUND, so a phone that sat in a pocket all
+  /// afternoon wakes up holding a dead token and puts it in the header
+  /// of every website request. The website answers 401, and a 401 is
+  /// how the app decides a student is not signed in.
+  ///
+  /// So: refreshed here, once, before the request rather than after the
+  /// failure. De-duplicated, because three sync workers and a heartbeat
+  /// all arriving at an expired token would otherwise fire four
+  /// refreshes and let three of them invalidate the one that won.
+  Future<void>? _refreshing;
+
+  Future<void> ensureFreshToken() {
+    final running = _refreshing;
+    if (running != null) return running;
+
+    final session = sb.auth.currentSession;
+    if (session == null) return Future<void>.value();
+
+    // With the radio off there is nothing to refresh against, and
+    // waiting to find that out would put a timeout in front of a
+    // request that was going to fall back to the disk anyway.
+    if (_hasConnection == false) return Future<void>.value();
+
+    // A minute of headroom: a token that expires while the request is
+    // in flight is the same problem arriving slightly later.
+    final expiresAt = session.expiresAt;
+    if (expiresAt != null) {
+      final secondsLeft =
+          expiresAt - DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (secondsLeft > 60) return Future<void>.value();
+    } else if (!session.isExpired) {
+      return Future<void>.value();
+    }
+
+    final f = () async {
+      try {
+        await sb.auth
+            .refreshSession()
+            .timeout(const Duration(seconds: 8));
+      } catch (e) {
+        // A refresh that could not be made is not a reason to refuse
+        // the request. Send what we have and let the server decide —
+        // offline, that request was going to fail anyway; online with a
+        // genuinely dead token, the 401 handling takes it from here.
+        debugPrint('[auth] token refresh skipped: $e');
+      }
+    }()
+        .whenComplete(() => _refreshing = null);
+    _refreshing = f;
+    return f;
+  }
+
   Future<Map<String, dynamic>> apiGet(
     String path, {
     Duration timeout = const Duration(seconds: 25),
     int retries = 2,
   }) async {
+    await ensureFreshToken();
     Object? last;
     for (var attempt = 0; attempt <= retries; attempt++) {
       try {
@@ -433,6 +494,7 @@ class Backend {
     Map<String, dynamic>? body,
     Duration timeout = const Duration(seconds: 30),
   }) async {
+    await ensureFreshToken();
     try {
       final uri = _uri(path);
       final payload = body == null ? null : jsonEncode(body);

@@ -333,9 +333,21 @@ class OfflineStore {
 
   /// Writes the catalogue. Coalesced, because a sync touches it once per
   /// file and the catalogue is written whole.
+  ///
+  /// The window used to be 600 ms, and that was too eager. The
+  /// catalogue is one JSON object holding every item and every asset —
+  /// thousands of entries on a phone with four courses downloaded — and
+  /// encoding it happens on the UI isolate. Doing that twice a second
+  /// for the length of a course download is a jank source measured in
+  /// seconds, for a file nothing reads until the next launch.
+  ///
+  /// Two and a half seconds instead, and every path that MUST have it
+  /// on disk — the end of a sync, the end of a download, a sign-out,
+  /// putCourseRecord — already calls flush() directly rather than
+  /// waiting for this.
   void _touch() {
     _dirty = true;
-    _flush ??= Timer(const Duration(milliseconds: 600), () {
+    _flush ??= Timer(const Duration(milliseconds: 2500), () {
       _flush = null;
       unawaited(flush());
     });
