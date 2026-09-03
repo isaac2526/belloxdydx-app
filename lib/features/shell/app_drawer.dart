@@ -361,22 +361,33 @@ class _CoursePickerState extends ConsumerState<_CoursePicker> {
       Navigator.of(context).pop();
       context.push(Routes.practice(id));
     } catch (e) {
-      // No signal is not the end of the round. Whatever is already on
+      // No signal is not the end of the round: whatever is already on
       // the phone can still be practised.
-      try {
-        final id = await assessment.startOfflinePractice(courseId: course.id);
-        if (!mounted) return;
-        Navigator.of(context).pop();
-        context.push(Routes.practice(id));
-        return;
-      } catch (_) {
-        if (!mounted) return;
-        bxToast(
-          context,
-          e is BxError ? e.message : 'Could not start that. Try again.',
-          error: true,
-        );
+      //
+      // Only for a TRANSPORT failure, though. "This course has no
+      // questions loaded yet" is a real answer from a reachable server
+      // and a student needs to read it — quietly substituting a
+      // different round would hide the thing they should tell Tutor
+      // Bello about.
+      final code = e is BxError ? e.code : null;
+      final offline = code == 'offline' || code == 'timeout';
+      if (offline) {
+        try {
+          final id = await assessment.startOfflinePractice(courseId: course.id);
+          if (!mounted) return;
+          Navigator.of(context).pop();
+          context.push(Routes.practice(id));
+          return;
+        } catch (_) {
+          // Fall through to the real message below.
+        }
       }
+      if (!mounted) return;
+      bxToast(
+        context,
+        e is BxError ? e.message : 'Could not start that. Try again.',
+        error: true,
+      );
     } finally {
       if (mounted) setState(() => _busy = null);
     }

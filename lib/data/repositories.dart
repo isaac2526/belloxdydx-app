@@ -1389,6 +1389,13 @@ class AssessmentRepository {
         }
       });
     }
+    // The course comes off the questions themselves. Without it the
+    // header reads as a blank strip and an offline round looks like a
+    // broken one.
+    final code = questions
+        .map((q) => q.courseCode)
+        .firstWhere((c) => c.isNotEmpty, orElse: () => '');
+
     return AttemptSession(
       id: id,
       mode: AttemptMode.practice,
@@ -1396,6 +1403,8 @@ class AssessmentRepository {
       questions: questions,
       answers: answers,
       title: 'Offline practice',
+      courseCode: code,
+      courseTitle: 'Saved on this phone',
       courseId: '${raw['course_id'] ?? ''}',
     );
   }
