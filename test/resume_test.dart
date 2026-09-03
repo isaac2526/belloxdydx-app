@@ -1,4 +1,5 @@
 import 'package:belloxdydx/data/models.dart';
+import 'package:belloxdydx/core/router.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// "I left a practice question, I am supposed to meet it back."
@@ -20,6 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// directly, and /api/practice/[id] returns it. The app never read it
 /// and never sent it.
 void main() {
+  routeMemory();
   Question q(String id) => Question(id: id, questionHtml: '<p>$id</p>');
 
   AttemptSession round({
@@ -151,6 +153,72 @@ void main() {
       });
       expect(s.currentIndex, isNull);
       expect(s.startIndexFor(), 1, reason: 'falls back to the guess');
+    });
+  });
+}
+
+/// ============================================================
+/// COMING BACK TO THE SCREEN, NOT JUST THE ANSWERS
+///
+/// "if I'm offline or online and I left a practice questions I suppose
+///  to meet it back, if just for a second for 16 GB RAM phone the app
+///  has already refreshed"
+///
+/// Three pieces make that true and each is tested where it lives: the
+/// answers survive (offline_test), the position survives (above), and
+/// the SCREEN is remembered. This is the rule that decides which
+/// screens — get it too wide and the app reopens on something a student
+/// walked away from on purpose.
+/// ============================================================
+void routeMemory() {
+  group('which screens are worth coming back to', () {
+    test('a round in progress is', () {
+      expect(bxIsResumableRoute('/practice/abc-123'), isTrue);
+      expect(bxIsResumableRoute('/cbt/abc-123'), isTrue);
+    });
+
+    test('so is something being read', () {
+      expect(bxIsResumableRoute('/notes/abc'), isTrue);
+      expect(bxIsResumableRoute('/view/abc'), isTrue);
+      expect(bxIsResumableRoute('/watch/abc'), isTrue);
+      expect(bxIsResumableRoute('/results/abc'), isTrue);
+    });
+
+    test('a tab is not', () {
+      // A student who was on the dashboard is not mid-anything.
+      // Reopening there is what the app does anyway.
+      for (final tab in const ['/', '/courses', '/revision', '/ai',
+        '/ranks', '/you']) {
+        expect(bxIsResumableRoute(tab), isFalse, reason: tab);
+      }
+    });
+
+    test('an auth screen is never restored', () {
+      // Reopening the app on a login form for an account that is
+      // already signed in would be the bug this whole area exists to
+      // fix, arriving by a different door.
+      for (final loc in const ['/splash', '/welcome', '/login',
+        '/register', '/onboarding', '/frozen', '/new-device',
+        '/reset-password', '/forgot-password']) {
+        expect(bxIsResumableRoute(loc), isFalse, reason: loc);
+      }
+    });
+
+    test('a bare prefix without an id is not a screen', () {
+      // '/practice' with no attempt id routes nowhere. Restoring it
+      // would drop the student on the error page.
+      expect(bxIsResumableRoute('/practice'), isFalse);
+      expect(bxIsResumableRoute('/notes'), isFalse);
+    });
+
+    test('the window is long enough for an interruption and short '
+        'enough for a night', () {
+      expect(bxRouteMemoryLifetime.inHours, greaterThanOrEqualTo(2),
+          reason: 'a lecture, a bus ride and a flat battery all fit '
+              'inside an interruption');
+      expect(bxRouteMemoryLifetime.inHours, lessThanOrEqualTo(24),
+          reason: 'coming back the next morning should open the app, '
+              "not last night's question");
     });
   });
 }

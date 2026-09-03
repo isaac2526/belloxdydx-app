@@ -93,11 +93,184 @@ class _SessionRefresh extends ChangeNotifier {
   final Ref _ref;
 }
 
+/// Screens worth coming back to after the phone killed the app.
+///
+/// A tab root is not one of them: a student who was on the dashboard is
+/// not in the middle of anything, and reopening the app on a screen
+/// they merely passed through would be surprising rather than helpful.
+const bxResumableRoutes = <String>[
+  '/practice/',
+  '/cbt/',
+  '/notes/',
+  '/view/',
+  '/watch/',
+  '/results/',
+];
+
+/// After this long it is a new session, not an interruption. Coming
+/// back the next morning should open the app, not last night's
+/// question.
+const bxRouteMemoryLifetime = Duration(hours: 12);
+
+bool bxIsResumableRoute(String location) =>
+    bxResumableRoutes.any(location.startsWith);
+
+/// ============================================================
+/// COMING BACK TO WHERE YOU WERE
+///
+/// "if I'm offline or online and I left a practice questions I suppose
+///  to meet it back, if just for a second for 16 GB RAM phone the app
+///  has already refreshed"
+///
+/// A phone reclaims memory by killing whatever is in the background,
+/// and the phones this app runs on do it within minutes. Flutter's own
+/// state does not survive that — the process is gone — so "meet it
+/// back" has to be rebuilt from something on disk.
+///
+/// Three pieces do it together, and this is the third:
+///
+///   1. The ANSWERS are written to the offline store as they are
+///      committed, so the round itself survives (repositories.dart).
+///   2. The POSITION is recorded, so it comes back to the question the
+///      student was looking at rather than the next unanswered one
+///      (models.dart, startIndexFor).
+///   3. The SCREEN is remembered here, so the app reopens on it.
+///
+/// Deliberately narrow. Only screens a student can be interrupted in
+/// the middle of are remembered — a round, a note, a document, a
+/// result. Reopening on a tab they merely visited would be surprising,
+/// and reopening on a login screen would be a bug.
+class _RouteMemory {
+  _RouteMemory(this._ref, this._router) {
+    // Read FIRST, before anything can overwrite it.
+    //
+    // The router settles on the splash and then on the dashboard within
+    // the first frames, and _remember() clears the memory the moment it
+    // sees a screen that is not resumable. So the stored value has to be
+    // taken now, into a local, or the app would erase the thing it is
+    // about to restore.
+    _target = _readTarget();
+    _router.routerDelegate.addListener(_remember);
+    _ref.listen<SessionState>(
+      sessionProvider,
+      (_, next) {
+        if (next.status == SessionStatus.active) _restore();
+      },
+      fireImmediately: true,
+    );
+  }
+
+  final Ref _ref;
+  final GoRouter _router;
+  String? _target;
+  bool _done = false;
+
+  void dispose() => _router.routerDelegate.removeListener(_remember);
+
+  void _remember() {
+    try {
+      final loc = _router.state.matchedLocation;
+      final uri = _router.state.uri.toString();
+      final store = _ref.read(localStoreProvider);
+      if (bxIsResumableRoute(loc)) {
+        store.setString(BxKeys.lastRoute, uri);
+        store.setInt(
+          BxKeys.lastRouteAt,
+          DateTime.now().millisecondsSinceEpoch,
+        );
+      } else if (store.getString(BxKeys.lastRoute) != null) {
+        // Leaving the round is the student closing it. Forgetting here
+        // is what stops the app reopening on a screen they walked away
+        // from on purpose.
+        store.remove(BxKeys.lastRoute);
+      }
+    } catch (_) {
+      // Remembering is a convenience. It may never be the reason a
+      // navigation fails.
+    }
+  }
+
+  String? _readTarget() {
+    try {
+      final store = _ref.read(localStoreProvider);
+      final target = store.getString(BxKeys.lastRoute);
+      if (target == null || target.isEmpty) return null;
+
+      final at = store.getInt(BxKeys.lastRouteAt);
+      if (at <= 0 ||
+          DateTime.now().millisecondsSinceEpoch - at >
+              bxRouteMemoryLifetime.inMilliseconds) {
+        store.remove(BxKeys.lastRoute);
+        return null;
+      }
+      if (!bxIsResumableRoute(Uri.tryParse(target)?.path ?? '')) return null;
+      return target;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _restore() {
+    if (_done) return;
+    final target = _target;
+    if (target == null) {
+      _done = true;
+      return;
+    }
+    _push(target, 0);
+  }
+
+  /// Waits for the router to settle on the dashboard, then pushes on
+  /// top of it — rather than instead of it, so Back goes where a
+  /// student expects instead of out of the app.
+  ///
+  /// Retried rather than fired once: the session can go active in the
+  /// same frame the app starts now, and at that moment the router is
+  /// still on the splash. A single post-frame callback would look, find
+  /// the splash, and give up on a round the student was in the middle
+  /// of.
+  void _push(String target, int attempt) {
+    if (_done || attempt > 20) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_done) return;
+      String loc;
+      try {
+        loc = _router.state.matchedLocation;
+      } catch (_) {
+        loc = '';
+      }
+      if (loc == Routes.home) {
+        _done = true;
+        try {
+          _router.push(target);
+        } catch (_) {}
+        return;
+      }
+      // Signed out, frozen, or a device check in the way: nothing to
+      // come back to.
+      if (loc == Routes.welcome ||
+          loc == Routes.frozen ||
+          loc == Routes.deviceCheck) {
+        _done = true;
+        return;
+      }
+      Future<void>.delayed(
+        const Duration(milliseconds: 120),
+        () => _push(target, attempt + 1),
+      );
+    });
+  }
+}
+
 final routerProvider = Provider<GoRouter>((ref) {
   final refresh = _SessionRefresh(ref);
   ref.onDispose(refresh.dispose);
 
-  return GoRouter(
+  late final GoRouter router;
+  _RouteMemory? memory;
+  ref.onDispose(() => memory?.dispose());
+
+  router = GoRouter(
     initialLocation: Routes.splash,
     refreshListenable: refresh,
     debugLogDiagnostics: false,
@@ -296,4 +469,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
     ),
   );
+
+  // Attached after the router exists, because it listens to it.
+  memory = _RouteMemory(ref, router);
+  return router;
 });

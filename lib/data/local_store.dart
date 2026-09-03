@@ -177,6 +177,8 @@ abstract final class BxKeys {
   static const deviceTrusted = 'bx_device_trusted';
   static const lockAfterMs = 'bx_lock_after';
   static const lockEnrolled = 'bx_lock_enrolled';
+  static const lastRoute = 'bx_last_route';
+  static const lastRouteAt = 'bx_last_route_at';
   static const cachedProfile = 'profile';
   static const backendMode = 'bx_backend_mode';
   static const cachedContent = 'content';
