@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:belloxdydx/data/backend.dart';
 import 'package:belloxdydx/core/providers.dart';
+import 'package:belloxdydx/features/auth/auth_brand.dart';
 import 'package:belloxdydx/data/models.dart';
 import 'package:belloxdydx/data/offline/offline_store.dart';
 import 'package:belloxdydx/features/shell/app_drawer.dart';
@@ -77,6 +78,99 @@ void main() {
     await tester.tap(f.first, warnIfMissed: false);
     await tester.pump(const Duration(milliseconds: 600));
   }
+
+  testWidgets('the signed-out screens still work, and carry the brand',
+      (tester) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 2.625;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    app.main();
+    await tester.pump(const Duration(seconds: 2));
+
+    // This test may be the one that meets the onboarding carousel, so
+    // it walks it rather than assuming a particular starting screen.
+    await until(
+      tester,
+      () =>
+          find.text('Log in').evaluate().isNotEmpty ||
+          find.text('Skip').evaluate().isNotEmpty,
+      budget: const Duration(seconds: 30),
+    );
+    final createFinder =
+        find.textContaining(RegExp('Create free account|Create your account'));
+    for (var i = 0; i < 6 && createFinder.evaluate().isEmpty; i++) {
+      for (final label in const ['I already have an account', 'Skip']) {
+        final f = find.text(label);
+        if (f.evaluate().isEmpty) continue;
+        await tap(tester, f.last);
+        break;
+      }
+      await tester.pump(const Duration(milliseconds: 700));
+    }
+
+    // Reached the way a student reaches it — not by pushing a route a
+    // phone has no address bar for.
+    final create = createFinder;
+    expect(create.evaluate(), isNotEmpty,
+        reason: 'Create Account must be reachable. On screen: ${visible()}');
+
+    // If the login screen is the way through, its form sits inside the
+    // 3D intro's IgnorePointer until the case has opened — a tap before
+    // then lands on nothing at all.
+    final skipIntro = find.text('Skip intro');
+    if (skipIntro.evaluate().isNotEmpty) {
+      await tap(tester, skipIntro);
+      await until(
+        tester,
+        () => find.text('Replay intro').evaluate().isNotEmpty,
+        budget: const Duration(seconds: 15),
+      );
+    }
+
+    await tap(tester, create.first);
+    await until(
+      tester,
+      () => find.textContaining('Step 1 of 3').evaluate().isNotEmpty,
+      budget: const Duration(seconds: 15),
+    );
+    debugPrint('[auth] create account: ${visible()}');
+
+    // The redesign's shape: the mark is on the page, progress is in the
+    // chrome, and only the first step's fields are asked for. This is
+    // the screen the complaint was about — "too many words competing
+    // for attention and I can barely see our logo".
+    expect(find.byType(BxAuthBrand), findsOneWidget,
+        reason: 'the logo must be on the first screen of the product');
+    expect(find.byType(BxStepBar), findsOneWidget,
+        reason: 'progress belongs in the chrome, once');
+    expect(find.textContaining('Step 1 of 3'), findsOneWidget);
+
+    final fields = find.byType(TextField);
+    expect(fields.evaluate().length, lessThanOrEqualTo(3),
+        reason: 'a step asks for two or three fields, not eight');
+
+    // It advances, and it validates the step it is on rather than
+    // reporting a mistake eight fields further down.
+    await tester.enterText(fields.at(0), 'Bello');
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.enterText(fields.at(1), 'Ayomide');
+    await tester.pump(const Duration(milliseconds: 200));
+    final next = find.text('Continue');
+    if (next.evaluate().isNotEmpty) {
+      await tap(tester, next.first);
+      await tester.pump(const Duration(seconds: 1));
+      debugPrint('[auth] step two: ${visible()}');
+      expect(find.textContaining('Step 2 of 3'), findsOneWidget,
+          reason: 'the wizard must advance');
+    }
+
+    // And back out to the login screen, which also carries the mark now.
+    await tester.pageBack();
+    await tester.pump(const Duration(seconds: 1));
+    debugPrint('[auth] back: ${visible()}');
+  });
 
   testWidgets('a student signs in, the app fills itself, and it survives '
       'the server going away', (tester) async {
@@ -475,12 +569,40 @@ void main() {
         expect(session!.questions, isNotEmpty,
             reason: 'AN OFFLINE ROUND MUST HAVE QUESTIONS IN IT');
 
+        // Answered the way the question actually asks. The pool is
+        // shuffled and contains short-answer questions, which have no
+        // key at all — sending a choice to one of those is wrong and
+        // was making this assertion pass or fail on the shuffle.
         final q = session.questions.first;
-        final verdict = await tester.runAsync(() => container
-            .read(assessmentRepoProvider)
-            .answerPractice(id, q.id, choice: q.correctKey ?? ''));
+        final isTyped = q.type == QuestionType.shortAnswer;
+        final verdict = await tester.runAsync(() =>
+            container.read(assessmentRepoProvider).answerPractice(
+                  id,
+                  q.id,
+                  choice: isTyped ? '' : (q.correctKey ?? ''),
+                  answerText: isTyped ? q.acceptedAnswer : '',
+                ));
         expect(verdict!.correct, isTrue,
-            reason: 'an offline round must mark the right answer right');
+            reason: 'an offline round must mark the right answer right, '
+                'whatever kind of question it is (this one is '
+                '${q.type.name})');
+
+        // And a wrong one wrong, which is the half that proves it is
+        // marking rather than agreeing.
+        final second = session.questions.length > 1
+            ? session.questions[1]
+            : session.questions.first;
+        final wrongTyped = second.type == QuestionType.shortAnswer;
+        final wrong = await tester.runAsync(() =>
+            container.read(assessmentRepoProvider).answerPractice(
+                  id,
+                  second.id,
+                  choice: wrongTyped ? '' : 'ZZ',
+                  answerText: wrongTyped ? 'definitely not the answer' : '',
+                ));
+        expect(wrong!.correct, isFalse,
+            reason: 'an offline round that marks everything right is not '
+                'marking');
         debugPrint('[journey] offline round: ${session.questions.length} '
             'questions, marked on the device');
       }
