@@ -6,6 +6,7 @@ import '../../data/models.dart';
 import '../../data/offline/course_downloader.dart';
 import '../../data/offline/offline_store.dart';
 import '../../ui/ui.dart';
+import '../shell/net_chip.dart';
 
 /// ============================================================
 /// THE DOWNLOAD BUTTON
@@ -72,12 +73,22 @@ class CourseDownloadCard extends ConsumerWidget {
             const SizedBox(height: BxSpace.md),
             BxProgressBar(state.progress),
             const SizedBox(height: BxSpace.xxs),
-            Text(
-              state.total > 0
-                  ? '${state.done} of ${state.total} · '
-                      '${formatBytes(state.bytes)}'
-                  : 'Working out what to fetch…',
-              style: BxType.tiny(c.muted),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    state.total > 0
+                        ? '${state.done} of ${state.total} · '
+                            '${formatBytes(state.bytes)}'
+                        : 'Working out what to fetch…',
+                    style: BxType.tiny(c.muted),
+                  ),
+                ),
+                // Here the reading is always worth showing: a student
+                // watching a bar crawl deserves to know whether it is
+                // the app or the line.
+                const BxNetLine(),
+              ],
             ),
           ],
           if (!running && state.held) ...[

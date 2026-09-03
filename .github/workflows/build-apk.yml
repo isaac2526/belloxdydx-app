@@ -153,14 +153,29 @@ jobs:
 
       - name: Capture handling for iOS
         run: |
-          # iOS cannot refuse a screenshot -- no API exists. What this
-          # AppDelegate does is what Apple actually allows: cover the
+          # iOS cannot refuse a screenshot -- no API exists. What these
+          # delegates do is what Apple actually allows: cover the
           # content while the screen is being RECORDED or mirrored, and
           # tell Dart after a still shot was taken so it can be
           # reported. native/ios is the source of truth; the generated
-          # shell's own file is replaced each build.
+          # shell's own files are replaced each build.
+          #
+          # BOTH files, and the scene delegate is the one that matters.
+          # The project declares UIApplicationSceneManifest, so the
+          # window belongs to the scene and the application delegate's
+          # `window` is nil -- which is why the method channel was never
+          # created on any iPhone. Copying only AppDelegate.swift, as
+          # this step used to, shipped that bug every build.
           cp native/ios/AppDelegate.swift ios/Runner/AppDelegate.swift
+          cp native/ios/SceneDelegate.swift ios/Runner/SceneDelegate.swift
           test -s ios/Runner/AppDelegate.swift
+          test -s ios/Runner/SceneDelegate.swift
+          # The scene delegate is only ever reached through this key, so
+          # a build whose Info.plist lost it would silently go back to
+          # having no native channel at all.
+          /usr/libexec/PlistBuddy -c \
+            "Print :UIApplicationSceneManifest:UISceneConfigurations" \
+            ios/Runner/Info.plist > /dev/null
 
       - run: flutter pub get
 

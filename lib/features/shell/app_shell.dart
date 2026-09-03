@@ -6,6 +6,7 @@ import '../../core/providers.dart';
 import '../../data/models.dart';
 import '../../ui/ui.dart';
 import 'app_drawer.dart';
+import 'net_chip.dart';
 
 /// ============================================================
 /// THE SHELL
@@ -176,7 +177,18 @@ class BxAppBar extends ConsumerWidget implements PreferredSizeWidget {
                 overflow: TextOverflow.ellipsis),
         ],
       ),
-      actions: [...actions, const SizedBox(width: BxSpace.xs)],
+      actions: [
+        // Only when there is something a student would want to know.
+        // "Wi-Fi · 4.1 MB/s" sitting in the chrome all day is clutter;
+        // "Mobile data · slow" the moment the line goes bad is the
+        // difference between "this app is broken" and "my network is".
+        const Padding(
+          padding: EdgeInsets.only(right: BxSpace.xxs),
+          child: BxNetChip(),
+        ),
+        ...actions,
+        const SizedBox(width: BxSpace.xs),
+      ],
       bottom: bottom == null
           ? null
           : PreferredSize(

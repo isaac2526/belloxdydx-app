@@ -102,6 +102,33 @@ abstract final class NativeBridge {
     }
   }
 
+  /// Keeps a downloaded library out of the student's iCloud backup.
+  ///
+  /// iOS only, and it matters there. `getApplicationDocumentsDirectory`
+  /// is inside the backed-up container, so a student who downloads four
+  /// courses has four hundred megabytes of lecture slides pushed into
+  /// an iCloud quota that is five gigabytes free — for files the app can
+  /// fetch again in a minute. Apple's own guidance is explicit that
+  /// re-downloadable content must carry this flag, and a review will
+  /// reject an app that does not.
+  ///
+  /// Returns false everywhere else, honestly: Android has no equivalent
+  /// and needs none.
+  static Future<bool> excludeFromBackup(String path) async {
+    if (!_hasNative || defaultTargetPlatform != TargetPlatform.iOS) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('excludeFromBackup', path) ??
+          false;
+    } on PlatformException catch (e) {
+      debugPrint('[native] backup exclusion refused: ${e.code}');
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// What this device can actually do about screen capture.
   static Future<ScreenshotPolicy> screenshotPolicy() async {
     if (!_hasNative) return ScreenshotPolicy.unsupported;

@@ -10,6 +10,7 @@ import 'security.dart';
 import '../data/backend.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
+import '../data/net_speed.dart';
 import '../data/offline/course_downloader.dart';
 import '../data/offline/offline_store.dart';
 import '../data/offline/sync_engine.dart';
@@ -114,6 +115,32 @@ class SyncStatusNotifier extends StateNotifier<SyncStatus> {
   @override
   void dispose() {
     _sub?.cancel();
+    super.dispose();
+  }
+}
+
+/// How fast the connection is right now, measured from the traffic the
+/// app is already making. Never a synthetic speed test: spending a
+/// student's airtime to tell them their airtime is slow is not a
+/// feature.
+final netSpeedProvider = StateNotifierProvider<NetSpeedNotifier, BxNetSpeed>(
+  (ref) => NetSpeedNotifier(ref.watch(backendProvider).speed),
+);
+
+class NetSpeedNotifier extends StateNotifier<BxNetSpeed> {
+  NetSpeedNotifier(this._meter) : super(_meter.value) {
+    _meter.addListener(_onChange);
+  }
+
+  final NetSpeedMeter _meter;
+
+  void _onChange() {
+    if (mounted) state = _meter.value;
+  }
+
+  @override
+  void dispose() {
+    _meter.removeListener(_onChange);
     super.dispose();
   }
 }

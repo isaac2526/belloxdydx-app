@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -130,6 +131,47 @@ class BxHtml extends StatelessWidget {
   }
 }
 
+/// How many pixels wide a picture is worth decoding to.
+///
+/// This is the single biggest thing standing between this app and a
+/// cheap phone. Flutter decodes an image at its FULL resolution unless
+/// it is told otherwise, and holds the result as raw RGBA — so one
+/// 3000x2000 photograph out of a lecture slide costs 24 MB of heap, and
+/// a note with six diagrams in it costs 144 MB. On a 1 GB Tecno that is
+/// not slow, it is a kill.
+///
+/// Capped at the screen's own pixel width: nothing can be drawn larger
+/// than that, so decoding larger is spending a student's memory on
+/// detail their screen cannot show. The 2048 ceiling covers a tablet
+/// without letting a mis-tagged panorama through.
+int bxDecodeWidth(BuildContext context, [double? logicalWidth]) {
+  final mq = MediaQuery.maybeOf(context);
+  final dpr = (mq?.devicePixelRatio ?? 1.0).clamp(1.0, 3.0);
+  final screen = mq?.size.width ?? 400;
+  final want = (logicalWidth != null &&
+          logicalWidth.isFinite &&
+          logicalWidth > 0 &&
+          logicalWidth < screen)
+      ? logicalWidth
+      : screen;
+  return (want * dpr).round().clamp(64, 2048);
+}
+
+/// The same ceiling for a picture drawn with no context to measure —
+/// the HTML factory's synchronous hook. It has no BuildContext at all,
+/// so it reads the platform view directly.
+int bxDecodeWidthForPlatform() {
+  try {
+    final view = PlatformDispatcher.instance.implicitView;
+    if (view == null) return 1080;
+    final px = view.physicalSize.width;
+    if (!px.isFinite || px <= 0) return 1080;
+    return px.round().clamp(64, 2048);
+  } catch (_) {
+    return 1080;
+  }
+}
+
 /// The hook that makes offline pictures possible.
 ///
 /// `imageProviderFromNetwork` is called synchronously while the tree is
@@ -140,14 +182,22 @@ class _BxWidgetFactory extends WidgetFactory {
   @override
   ImageProvider? imageProviderFromNetwork(String url) {
     if (url.isEmpty) return null;
+    final width = bxDecodeWidthForPlatform();
     final local = Offline.pathFor(url);
     if (local != null) {
       final f = File(local);
       // existsSync is a stat on a path we wrote ourselves; it is cheap
       // and it is the difference between a picture and a grey box.
-      if (f.existsSync()) return FileImage(f);
+      if (f.existsSync()) {
+        // Wrapped, so a full-page diagram out of a lecture slide is
+        // decoded at the width of the phone rather than at whatever the
+        // scanner produced.
+        return ResizeImage(FileImage(f), width: width, allowUpscaling: false);
+      }
     }
-    return super.imageProviderFromNetwork(url);
+    final network = super.imageProviderFromNetwork(url);
+    if (network == null) return null;
+    return ResizeImage(network, width: width, allowUpscaling: false);
   }
 }
 
@@ -235,6 +285,10 @@ class BxNetworkImage extends StatelessWidget {
     if (raw.isEmpty) return empty ?? const SizedBox.shrink();
 
     final local = Offline.pathFor(raw);
+    // Decoded at the size it will be DRAWN, never at the size it was
+    // uploaded. See bxDecodeWidth: this is what keeps a note full of
+    // lecture-slide diagrams inside the heap of a cheap phone.
+    final cacheWidth = bxDecodeWidth(context, width);
     Widget image;
     if (local != null && File(local).existsSync()) {
       image = Image.file(
@@ -242,6 +296,7 @@ class BxNetworkImage extends StatelessWidget {
         width: width,
         height: height,
         fit: fit,
+        cacheWidth: cacheWidth,
         errorBuilder: (_, __, ___) => _broken(c),
       );
     } else {
@@ -250,6 +305,7 @@ class BxNetworkImage extends StatelessWidget {
         width: width,
         height: height,
         fit: fit,
+        cacheWidth: cacheWidth,
         loadingBuilder: (_, child, progress) =>
             progress == null ? child : _loading(c),
         errorBuilder: (_, __, ___) => _broken(c),
@@ -321,6 +377,7 @@ class BxImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cacheWidth = bxDecodeWidth(context, width);
     final local = Offline.pathFor(imageUrl);
     if (local != null) {
       final file = File(local);
@@ -331,6 +388,7 @@ class BxImage extends StatelessWidget {
           height: height,
           fit: fit,
           alignment: alignment,
+          cacheWidth: cacheWidth,
           errorBuilder: (ctx, e, __) =>
               errorWidget?.call(ctx, imageUrl, e) ?? const SizedBox.shrink(),
         );
@@ -342,6 +400,7 @@ class BxImage extends StatelessWidget {
       height: height,
       fit: fit,
       alignment: alignment,
+      memCacheWidth: cacheWidth,
       placeholder: placeholder,
       errorWidget: errorWidget,
     );

@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../../core/native_bridge.dart';
 import '../local_store.dart';
 import 'offline_store.dart';
 
@@ -43,7 +44,14 @@ Future<OfflineStore?> openOfflineStore(LocalStore prefs) async {
     // white screen for housekeeping no student asked for. It runs behind
     // the first frame instead; the worst a moment's delay can cost is an
     // image that fails to draw once.
-    if (store != null) unawaited(store.reconcile());
+    if (store != null) {
+      unawaited(store.reconcile());
+      // iOS only, and not awaited: a student's downloaded library must
+      // not be pushed into their iCloud quota. Everything in the offline
+      // root can be fetched again, which is exactly the case Apple says
+      // must carry this flag.
+      unawaited(NativeBridge.excludeFromBackup(store.rootPath));
+    }
     return store;
   } on TimeoutException {
     debugPrint('[offline] store took too long to open; carrying on without '

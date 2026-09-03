@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/config.dart';
 import 'failures.dart';
+import 'net_speed.dart';
 import 'offline/offline_store.dart';
 import 'models.dart';
 
@@ -87,6 +88,11 @@ class Backend {
       : _http = httpClient ?? http.Client();
 
   final http.Client _http;
+
+  /// How fast the connection actually is, measured from the traffic the
+  /// app is already making rather than from a test file nobody asked
+  /// to pay for.
+  final NetSpeedMeter speed = NetSpeedMeter();
 
   BackendMode _mode = BackendMode.legacy;
   BackendMode get mode => _mode;
@@ -173,6 +179,8 @@ class Backend {
           !(r.isEmpty || r.every((x) => x == ConnectivityResult.none));
       _unmetered = r.contains(ConnectivityResult.wifi) ||
           r.contains(ConnectivityResult.ethernet);
+      speed.setUnmetered(_unmetered);
+      speed.setReachable(_hasConnection ?? true);
     }
 
     // Wrapped whole, and each call wrapped again inside.
@@ -403,8 +411,10 @@ class Backend {
     Object? last;
     for (var attempt = 0; attempt <= retries; attempt++) {
       try {
+        final started = DateTime.now();
         final r =
             await _http.get(_uri(path), headers: _headers).timeout(timeout);
+        _timed(started, r);
         return _decode(r);
       } catch (e) {
         last = e;
@@ -426,6 +436,7 @@ class Backend {
     try {
       final uri = _uri(path);
       final payload = body == null ? null : jsonEncode(body);
+      final started = DateTime.now();
       final r = await switch (method) {
         'PUT' => _http.put(uri, headers: _headers, body: payload),
         'PATCH' => _http.patch(uri, headers: _headers, body: payload),
@@ -433,10 +444,32 @@ class Backend {
         _ => _http.post(uri, headers: _headers, body: payload),
       }
           .timeout(timeout);
+      _timed(started, r);
       return _decode(r);
     } catch (e) {
       throw _mapGeneric(e);
     }
+  }
+
+  /// Files one completed response with the speed meter. Cannot throw and
+  /// cannot slow anything down — it is arithmetic on two numbers the
+  /// request already produced.
+  void _timed(DateTime started, http.Response r) {
+    try {
+      speed.sample(
+        bytes: r.bodyBytes.length,
+        millis: DateTime.now().difference(started).inMilliseconds,
+      );
+    } catch (_) {}
+  }
+
+  /// The same, for a transfer this class did not make — the sync engine
+  /// and the course downloader move far more bytes than the API does,
+  /// and they are where a real throughput number comes from.
+  void reportTransfer({required int bytes, required int millis}) {
+    try {
+      speed.sample(bytes: bytes, millis: millis);
+    } catch (_) {}
   }
 
   Map<String, dynamic> _decode(http.Response r) {
@@ -485,6 +518,7 @@ class Backend {
 
   void dispose() {
     _connWatch?.cancel();
+    speed.dispose();
     _http.close();
   }
 }

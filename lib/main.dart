@@ -26,6 +26,19 @@ import 'features/security/lock_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Flutter's image cache holds 100 MB of decoded RGBA by default, and
+  // that default was written for a phone with headroom. This app runs
+  // on 1 GB Android devices where 100 MB of pictures is a third of what
+  // the whole process is allowed before the OS starts killing things.
+  //
+  // 40 MB is not a small budget once every picture is decoded at screen
+  // width rather than at upload resolution — see bxDecodeWidth. A
+  // full-width diagram costs about 3 MB, so this still holds a dozen of
+  // them, which is more than any one screen shows.
+  PaintingBinding.instance.imageCache
+    ..maximumSizeBytes = 40 * 1024 * 1024
+    ..maximumSize = 120;
+
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,

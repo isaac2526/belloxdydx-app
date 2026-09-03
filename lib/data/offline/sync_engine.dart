@@ -604,11 +604,18 @@ class SyncEngine {
       final declared = int.tryParse(head.headers['content-length'] ?? '');
       if (declared != null && declared > cap) return null;
 
+      final started = DateTime.now();
       final res =
           await http.get(uri).timeout(const Duration(seconds: 90));
       if (res.statusCode != 200) return null;
       if (res.bodyBytes.length > cap) return null;
       if (res.bodyBytes.isEmpty) return null;
+      // The sync moves far more bytes than the API does, so this is
+      // where a throughput number that means anything comes from.
+      _b.reportTransfer(
+        bytes: res.bodyBytes.length,
+        millis: DateTime.now().difference(started).inMilliseconds,
+      );
       return res.bodyBytes;
     } catch (_) {
       return null;

@@ -732,11 +732,16 @@ class CourseDownloader {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
     try {
+      final started = DateTime.now();
       final res =
           await _http.get(uri).timeout(const Duration(seconds: 120));
       if (res.statusCode != 200) return null;
       if (res.bodyBytes.isEmpty) return null;
       if (res.bodyBytes.length > cap) return null;
+      _b.reportTransfer(
+        bytes: res.bodyBytes.length,
+        millis: DateTime.now().difference(started).inMilliseconds,
+      );
       return res.bodyBytes;
     } catch (_) {
       return null;
