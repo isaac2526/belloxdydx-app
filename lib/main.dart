@@ -1,23 +1,92 @@
 import 'package:flutter/material.dart';
-import 'clone_shell.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-// Belloxdydx v4 — the exact-clone era. The website is the app; this
-// shell adds the native powers (secure screen, persistent session,
-// branded offline, deep links) and nothing else stands between the
-// student and the real platform.
-void main() {
+import 'core/config.dart';
+import 'core/providers.dart';
+import 'core/router.dart';
+import 'core/theme/app_theme.dart';
+import 'data/local_store.dart';
+import 'data/offline/bootstrap.dart';
+import 'features/security/lock_screen.dart';
+
+/// ============================================================
+/// BELLOXDYDX
+///
+/// A real Flutter application. There is no WebView here, no PWA
+/// wrapper and no embedded website — every screen is built natively
+/// against the same backend the website uses.
+///
+/// The previous release shipped a WebView pointed at belloxdydx.org
+/// while 24 finished native screens sat unreachable in this repo. That
+/// shell is gone; the native app is the app.
+/// ============================================================
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const BelloxdydxApp());
+
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+
+  final prefs = await LocalStore.init();
+
+  // Opened before the first frame on purpose: the hook that lets a
+  // picture inside a note body be drawn from disk is synchronous, so the
+  // catalogue has to already be in memory when the first widget builds.
+  await openOfflineStore(prefs);
+
+  try {
+    await Supabase.initialize(
+      url: BxConfig.supabaseUrl,
+      anonKey: BxConfig.supabaseAnonKey, // ignore: deprecated_member_use
+      authOptions: const FlutterAuthClientOptions(
+        authFlowType: AuthFlowType.pkce,
+      ),
+    );
+  } catch (e) {
+    debugPrint('[boot] Supabase init failed: $e');
+  }
+
+  runApp(const ProviderScope(child: BelloxdydxApp()));
 }
 
-class BelloxdydxApp extends StatelessWidget {
+class BelloxdydxApp extends ConsumerWidget {
   const BelloxdydxApp({super.key});
+
   @override
-  Widget build(BuildContext context) {
-    return const MaterialApp(
-      title: "Belloxdydx",
+  Widget build(BuildContext context, WidgetRef ref) {
+    final router = ref.watch(routerProvider);
+    final themeMode = ref.watch(themeProvider);
+
+    return MaterialApp.router(
+      title: 'Belloxdydx',
       debugShowCheckedModeBanner: false,
-      home: CloneShell(),
+      routerConfig: router,
+      theme: bxLightTheme,
+      darkTheme: bxDarkTheme,
+      themeMode: themeMode,
+      builder: (context, child) {
+        // Text never scales past a readable ceiling — an exam timer and
+        // a question navigator must not be pushed off screen by a
+        // system font setting.
+        final mq = MediaQuery.of(context);
+        return MediaQuery(
+          data: mq.copyWith(
+            textScaler: mq.textScaler.clamp(
+              minScaleFactor: 0.85,
+              maxScaleFactor: 1.35,
+            ),
+          ),
+          // Wraps the router rather than sitting inside it, so nothing
+          // can navigate around the lock and the screen underneath
+          // keeps its state — a student who steps away mid-question
+          // comes back to the same question.
+          child: LockOverlay(child: child ?? const SizedBox.shrink()),
+        );
+      },
     );
   }
 }

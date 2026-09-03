@@ -1,53 +1,159 @@
-BELLOXDYDX · THE REAL APP · how to get your APK
-GitHub is your builder. No Android Studio. No laptop tools.
+# Belloxdydx — the student app
 
-ONE-TIME SETUP (10 minutes)
-..............................................
-1. Supabase -> Settings -> API. Copy two things:
-   Project URL and the anon public key.
-2. Open lib/config.dart in this folder (any text editor,
-   or edit later on GitHub with the pencil) and paste them
-   into the two PASTE_YOUR lines. Save.
-3. GitHub -> New repository -> name: belloxdydx-app ->
-   set it PRIVATE -> Create.
-4. Upload EVERYTHING in this folder to that repo
-   (drag all files and folders together; make sure the
-   .github folder goes in too, it is the builder).
-5. The moment you commit, GitHub starts building. Watch:
-   repo -> Actions tab -> the running job.
-6. When it turns green (first run takes ~10 minutes):
-   open the run -> Artifacts -> download belloxdydx-apk ->
-   inside is app-release.apk. THAT is your real app.
-7. Share the APK anywhere: WhatsApp, Drive, your website.
-   Installing asks "allow unknown apps" once. Normal.
+A **real Flutter application**. Not a WebView, not a PWA wrapper, not the
+website embedded in a shell. Every screen is built natively against the same
+backend the website uses.
 
-IF THE BUILD IS RED: open the failed step, copy the log,
-send it to Isaac's assistant. Same dance as Vercel.
+> The previous release shipped `CloneShell` — a WebView pointed at
+> belloxdydx.org — while 24 finished native screens sat unreachable in this
+> repo. That shell has been deleted. The native app is the app.
 
-EVERY FUTURE UPDATE: change files on GitHub -> commit ->
-Actions builds a fresh APK automatically.
+---
 
-PLAY STORE (whenever you're ready): the same green run also
-produces belloxdydx-playstore-aab. Create a Google Play
-developer account (one-time 25 dollars), upload that .aab,
-fill the store listing, submit. Done.
+## What is inside
 
-WHAT THIS APP DOES
-..............................................
-Screenshots and screen recordings ... BLACK, app-wide,
-  enforced by Android itself (FLAG_SECURE). The wise guys
-  in Faculty of Education just met their match.
-Offline vault ....................... students tap the
-  download icon on any note or slide; it saves INSIDE the
-  app only, readable with zero network, invisible to file
-  managers, never in Downloads, never shareable.
-Same account, same laws ............. login, merciful
-  device lock, one live session with instant judgement on
-  reconnect, activation with keys, streaks, referral code,
-  leaderboard, announcements, practice questions.
-0 to 100 loader ..................... tied to real loading.
-Timed CBT exams ..................... on the website for
-  v1; app v1.1 brings them in.
-iPhone .............................. same code builds for
-  iOS later; needs Apple's 99 dollars/year and their
-  review. Android conquers first.
+| Area | Screens |
+| --- | --- |
+| Auth | welcome, login (with the 3D intro), register, forgot password, reset, activate, frozen |
+| Study | dashboard, courses, course hub, section lists, note reader, document viewer, video |
+| Assessment | practice runner, CBT/exam runner, question navigator, calculator, results review |
+| Revision | revision hub, weakness radar, saved questions, My Mistakes deck |
+| Competition | leaderboard, The League, Millionaire |
+| Other | Bello AI, announcements, offline vault, CGPA calculator, profile & settings |
+
+Native capabilities the website cannot offer: real screenshot blocking
+(`FLAG_SECURE`), an offline vault of actual files on disk, OS-enforced exam
+lockdown, reliable violation detection through app lifecycle, swipe gestures,
+haptics, and push-ready deep links.
+
+---
+
+## Architecture
+
+```
+Flutter app
+   │
+   ├─ DIRECT path  ──►  Supabase  (Postgres RPC + RLS + Storage + Realtime)
+   │                    grading happens inside the database
+   │
+   └─ LEGACY path  ──►  Vercel / Next.js API  ──►  Supabase
+                        the path the app used before; kept as a fallback
+```
+
+`lib/data/backend.dart` probes `bx_capabilities()` once at launch. If the SQL
+migration `supabase/migrations/0010_app_direct.sql` (in the **belloxdydxui**
+repo) has been applied, the app switches to the direct path and **Vercel leaves
+the student hot path entirely**. If it has not, the app works exactly as before.
+Nothing breaks either way, and the Profile screen shows which path is live.
+
+Why it matters: the audit found every student action — every page, every
+question, every answer, every file byte — passing through a Vercel function,
+because RLS was enabled with almost no policies. The migration adds the missing
+policies, a `public_questions` view that does not contain the answer key, and
+`SECURITY DEFINER` functions that grade answers in Postgres. The answer key
+never reaches the device before the student commits.
+
+Two things deliberately stay on the website:
+- **Registration** — creates the auth user, profile and activation key in one
+  service-role transaction. Trust-critical, belongs server-side.
+- **Bello AI** — the Gemini key must not ship inside an app binary.
+
+### Layout
+
+```
+lib/
+  core/
+    config.dart          endpoints, business constants, dart-define overrides
+    providers.dart       riverpod wiring, session state
+    router.dart          go_router + deep links
+    theme/               tokens, typography, ThemeData
+  data/
+    backend.dart         the dual-path gateway
+    models.dart          domain models (parse both wire shapes)
+    repositories.dart    auth / content / assessment / engagement
+    local_store.dart     JSON cache + the offline vault
+  ui/                    the design system (BxCard, BxButton, charts, motion…)
+  features/<area>/       one folder per feature
+```
+
+Every colour comes from `context.bx`, every text style from `BxType`, every gap
+from `BxSpace`. There are no literal hex values in feature code.
+
+---
+
+## Running it
+
+```bash
+flutter pub get
+flutter run
+```
+
+### Against the local mock backend
+
+No Supabase project needed. The mock speaks the real Supabase auth/REST/RPC wire
+format, so the app runs its actual code paths:
+
+```bash
+node tools/mock_backend.js 54321 &
+
+flutter run \
+  --dart-define=BX_SUPABASE_URL=http://127.0.0.1:54321 \
+  --dart-define=BX_SUPABASE_ANON_KEY=mock \
+  --dart-define=BX_SITE_URL=http://127.0.0.1:54321
+```
+
+Seeded students (password `Password@1#`): `kunle` and `amaka` are activated,
+`preview` is not — use it to exercise the activation gates.
+
+### Driving it in a browser
+
+```bash
+./tools/test_app.sh
+```
+
+Builds for web, serves it, and drives it through Chromium with Playwright:
+signs in, walks every tab, opens a course, searches materials, reads a note,
+runs a practice round, starts a CBT, opens the navigator and calculator, uses a
+dropdown, toggles the theme. Screenshots and a pass/fail report land in
+`build/uitest/`.
+
+---
+
+## Builds
+
+`dl.google.com` is blocked on some managed networks, and an iOS `.ipa` needs
+Xcode, so releases are produced by CI rather than locally:
+
+| Artefact | Job | Runner |
+| --- | --- | --- |
+| `app-release.apk` | `android` | ubuntu |
+| `app-release.aab` (Play Store) | `android` | ubuntu |
+| `belloxdydx-unsigned.ipa` | `ios` | macos-14 |
+
+Push to any branch, or run **Build Belloxdydx** manually from the Actions tab.
+`analyze` (flutter analyze + tests) gates both build jobs, so a broken commit
+fails in about two minutes instead of after a full toolchain download.
+
+The iOS IPA is intentionally **unsigned** — for testing. Signing it for the App
+Store needs an Apple developer account.
+
+### Configuration at build time
+
+```bash
+flutter build apk --release \
+  --dart-define=BX_SUPABASE_URL=https://<project>.supabase.co \
+  --dart-define=BX_SUPABASE_ANON_KEY=<anon key> \
+  --dart-define=BX_SITE_URL=https://www.belloxdydx.org
+```
+
+The anon key is public by design; RLS is what protects the data. The service
+role key never appears in this app.
+
+---
+
+## Access rules, unchanged
+
+One account per device. One live session at a time — on the direct path the app
+subscribes to its own `active_sessions` row over Realtime, so a second sign-in
+signs the first device out instantly instead of polling every 45 seconds.
+Device and password resets still go through Tutor Bello on WhatsApp.
