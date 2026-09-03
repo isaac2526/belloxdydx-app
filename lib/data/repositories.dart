@@ -455,6 +455,27 @@ class AuthRepository {
   }
 
   Future<bool> _heartbeat() async {
+    // No token to present is not the same as a stolen session, and the
+    // website cannot tell them apart — /api/auth/heartbeat answers 401
+    // "superseded" whether another device took the row or the header was
+    // simply absent. So the app has to know the difference itself.
+    //
+    // Without this, any state that loses the token — a reinstall that
+    // kept the Supabase session, a cleared preference, a first launch
+    // after an upgrade that changed the key — reads as "somebody else
+    // signed in" and ejects a paying student.
+    if (_b.mobileSessionToken == null) {
+      try {
+        await _bindDevice();
+        return _b.mobileSessionToken != null;
+      } catch (e) {
+        // Could not re-bind (usually offline). Staying signed in is the
+        // right way to be wrong: the next successful bind settles it.
+        debugPrint('[session] could not re-bind: $e');
+        return true;
+      }
+    }
+
     try {
       await _b.apiGet('/api/auth/heartbeat', retries: 0);
       return true;
@@ -868,6 +889,8 @@ class AssessmentRepository {
       });
       final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
       await _rememberVerdict(questionId, verdict);
+      await _rememberAnswer(attemptId, questionId,
+          choice: choice, answerText: answerText, correct: verdict.correct);
       return verdict;
     }
     final r = await _b.apiSend('/api/practice/answer', body: {
@@ -878,7 +901,53 @@ class AssessmentRepository {
     });
     final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
     await _rememberVerdict(questionId, verdict);
+    await _rememberAnswer(attemptId, questionId,
+        choice: choice, answerText: answerText, correct: verdict.correct);
     return verdict;
+  }
+
+  /// Writes one committed answer into the locally-held copy of the
+  /// attempt.
+  ///
+  /// The attempt was only ever saved at the moment it OPENED. Every
+  /// answer after that lived in the practice screen's State object and
+  /// nowhere else, so a student who was pulled out of the app — an
+  /// incoming call, a battery-saver kill, an aggressive OEM task killer,
+  /// which is most of the phones this app runs on — came back to a round
+  /// that had forgotten everything they had done.
+  ///
+  /// The screen already resumes at the first UNANSWERED question, so
+  /// keeping the answers current is the whole of what "meet it back"
+  /// needs: the position falls out of it.
+  Future<void> _rememberAnswer(
+    String attemptId,
+    String questionId, {
+    required String choice,
+    required String answerText,
+    required bool correct,
+  }) async {
+    final store = _store;
+    if (store == null) return;
+    try {
+      final raw = await store.attempt(attemptId);
+      if (raw == null) return;
+      final session = raw['session'];
+      if (session is! Map) return;
+
+      final answers = Map<String, dynamic>.from(
+          (session['answers'] as Map?)?.cast<String, dynamic>() ?? {});
+      answers[questionId] = {
+        'choice': choice,
+        'answer_text': answerText,
+        'is_correct': correct,
+      };
+      session['answers'] = answers;
+      raw['session'] = session;
+      raw['at'] = DateTime.now().millisecondsSinceEpoch;
+      await store.putAttempt(attemptId, raw);
+    } catch (e) {
+      debugPrint('[offline] could not keep the answer: $e');
+    }
   }
 
   /// Folds what the server just revealed back into the cached question.

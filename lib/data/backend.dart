@@ -104,7 +104,27 @@ class Backend {
 
   /// The mobile session token the website issues for the single-session
   /// rule. Only used on the legacy path.
+  ///
+  /// It MUST be restored from disk on a cold start, and for a long time
+  /// it was not. The consequence was not subtle. The website's
+  /// /api/auth/heartbeat compares this token against the one row in
+  /// active_sessions and answers 401 "superseded" when it cannot match
+  /// — including when the header is simply absent. The app polls that
+  /// endpoint every three minutes on the legacy path, which is the path
+  /// production runs on, and reads a 401 as "somebody else took your
+  /// session" and signs the student out.
+  ///
+  /// So: every student, on every relaunch, was told they had signed in
+  /// on another device and thrown back to the login screen, within
+  /// three minutes of opening the app. The Supabase bearer token
+  /// survived a restart and this one did not, which is exactly why
+  /// signing in appeared to work and then undo itself.
   String? mobileSessionToken;
+
+  /// Reads it back. Called once at boot, before anything can poll.
+  void restoreMobileSession(String? token) {
+    if (token != null && token.isNotEmpty) mobileSessionToken = token;
+  }
 
   // ------------------------------------------------------------
   // Connectivity

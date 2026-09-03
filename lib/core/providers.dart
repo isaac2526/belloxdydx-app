@@ -164,6 +164,16 @@ class SessionNotifier extends StateNotifier<SessionState>
     // error a student sees already knows whether their phone has a
     // connection at all.
     _backend.watchConnectivity();
+
+    // FIRST, before anything can poll. The website's heartbeat treats a
+    // missing session header exactly like a stolen session, and the app
+    // treats that answer as grounds to sign the student out. Restoring
+    // this after the first poll would be too late; not restoring it at
+    // all — which is what happened — signed everybody out three minutes
+    // into every launch.
+    _backend.restoreMobileSession(
+      _ref.read(localStoreProvider).getString(BxKeys.mobileSession),
+    );
     await _backend.probeCapabilities();
     if (!_backend.signedIn) {
       state = const SessionState.signedOut();

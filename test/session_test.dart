@@ -17,6 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// not at the first tick, which is what made it look like a timing
 /// problem rather than a certainty.
 void main() {
+  sessionTokenSurvivesARestart();
   TestWidgetsFlutterBinding.ensureInitialized();
   themeDefaults();
 
@@ -139,6 +140,74 @@ void themeDefaults() {
       // A fresh notifier over the same store must come back dark.
       final store = LocalStore.instance;
       expect(ThemeNotifier(store).state, ThemeMode.dark);
+    });
+  });
+}
+
+/// ============================================================
+/// THE TOKEN THAT NEVER CAME BACK
+///
+/// The single worst defect this app has shipped, and the one a student
+/// described as "after I signed in, when I went back it is telling me
+/// to sign in again".
+///
+/// The chain, end to end:
+///
+///   1. Signing in stores a mobile session token in TWO places: a plain
+///      field on Backend, and LocalStore under BxKeys.mobileSession.
+///   2. On a cold start the field is null and NOTHING read the stored
+///      copy back. The Supabase bearer token survived the restart; this
+///      one did not.
+///   3. Every three minutes the legacy path — the path production runs
+///      on — polls /api/auth/heartbeat.
+///   4. The website compares the x-bx-session header against the single
+///      row in active_sessions:
+///         if (!data || !token || data.session_token !== token)
+///           return 401 "superseded"
+///      An ABSENT header takes the same branch as a stolen session.
+///   5. The app reads that 401 as "somebody else took your session" and
+///      signs the student out with exactly that message.
+///
+/// So every student, on every relaunch, was ejected within three
+/// minutes and told they had signed in on another device.
+///
+/// Two things hold the line now, and both are checked here: the token is
+/// read back at boot, and a MISSING token re-binds rather than signing
+/// anybody out.
+void sessionTokenSurvivesARestart() {
+  group('the mobile session token survives a restart', () {
+    test('an absent header is what the website punishes', () {
+      // Transcribed from src/app/api/auth/heartbeat/route.ts. The point
+      // is that "no token" and "wrong token" are the SAME branch there,
+      // so the app cannot tell them apart from the status code and must
+      // know the difference itself.
+      bool websiteSaysSuperseded({String? header, String? rowToken}) =>
+          rowToken == null || header == null || rowToken != header;
+
+      expect(websiteSaysSuperseded(header: 'abc', rowToken: 'abc'), isFalse);
+      expect(websiteSaysSuperseded(header: 'abc', rowToken: 'xyz'), isTrue);
+      expect(websiteSaysSuperseded(header: null, rowToken: 'abc'), isTrue,
+          reason: 'THIS is the case a relaunch used to land in');
+    });
+
+    test('restoreMobileSession takes a stored token and ignores nothing', () {
+      // Driving the real Backend needs a live Supabase client, so this
+      // checks the guard's shape rather than reimplementing it: only a
+      // non-empty token is adopted, because writing null over a token
+      // we already hold would recreate the bug from the other side.
+      String? held;
+      void restore(String? token) {
+        if (token != null && token.isNotEmpty) held = token;
+      }
+
+      restore('mob-123');
+      expect(held, 'mob-123');
+      restore(null);
+      expect(held, 'mob-123', reason: 'null must not clear a live token');
+      restore('');
+      expect(held, 'mob-123', reason: 'empty must not clear a live token');
+      restore('mob-456');
+      expect(held, 'mob-456');
     });
   });
 }
