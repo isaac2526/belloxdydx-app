@@ -232,7 +232,16 @@ class SessionNotifier extends StateNotifier<SessionState>
       if (store == null) return;
       // Somebody else's downloads are not this student's to see.
       await store.claim(p.id);
-      if (p.isFrozen) return;
+
+      // A frozen account still SEES the app — the chairman's rule is
+      // that the ice stands in the way of using it, not of opening it —
+      // so it still has to obey the screenshot policy. What it does not
+      // get is a sync: there is no point spending a bundle filling a
+      // vault for material the account cannot open.
+      if (p.isFrozen) {
+        await applyPolicy();
+        return;
+      }
       await _ref
           .read(syncStatusProvider.notifier)
           .start(level: p.currentLevel);
