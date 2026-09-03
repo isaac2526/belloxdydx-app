@@ -100,6 +100,15 @@ void main() {
     const backend = String.fromEnvironment('BX_SITE_URL',
         defaultValue: 'http://127.0.0.1:54321');
 
+    // ---- a first install opens LIGHT ---------------------------------
+    // Whatever the phone is set to. Belloxdydx is a white-and-gold
+    // product and the first thing a student sees should be the product,
+    // not their own night setting. "System" stays available and is
+    // honoured the moment it is chosen; it is simply not the starting
+    // position.
+    expect(container.read(themeProvider), ThemeMode.light,
+        reason: 'a brand new install must open light');
+
     // ---- through onboarding and into the login form ----------------
     //
     // Tapped by TEXT rather than by button type on purpose. Every
