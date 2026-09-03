@@ -294,7 +294,14 @@ class SyncEngine {
         while (!_cancelled && queue.isNotEmpty) {
           final job = queue.removeAt(0);
           try {
-            bytes += await _perform(job, store);
+            // Read into a local and add afterwards. `bytes += await …`
+            // reads the counter, suspends, and writes back a value three
+            // workers may all have read before any of them wrote — a
+            // lost update that only shows up as a progress bar quietly
+            // under-counting, which is exactly the kind of wrongness
+            // nobody chases down later.
+            final moved = await _perform(job, store);
+            bytes += moved;
           } catch (e) {
             // One file failing must never end the sync. A lecture note
             // that 404s is not a reason to lose the other ninety.

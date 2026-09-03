@@ -319,6 +319,39 @@ void main() {
   });
 
   // ------------------------------------------------------------
+  group('signing out does not throw away your material', () {
+    // LocalStore.clearCache() runs on every sign-out and deletes
+    // <documents>/cache. The offline root sits deliberately OUTSIDE
+    // that directory: a student who signs out on Friday and back in on
+    // Monday should not have to re-download a semester of notes over
+    // their own data. A different student signing in is the case that
+    // wipes, and that is covered by claim() above.
+    test('the offline root is not inside the cache directory', () async {
+      final store = await open();
+      expect(store.rootPath, isNot(contains('/cache')),
+          reason: 'sign-out clears <documents>/cache; the vault must not '
+              'be in it');
+      expect(store.rootPath, endsWith('/offline'));
+    });
+
+    test('clearing the JSON cache leaves the vault alone', () async {
+      final store = await open();
+      await store.putNote(id: 'n1', title: 'T', html: '<p>kept</p>');
+      await store.flush();
+
+      // Exactly what LocalStore.clearCache does.
+      final cache = Directory('${docs.path}/cache');
+      await cache.create(recursive: true);
+      await File('${cache.path}/content.json').writeAsString('{}');
+      await cache.delete(recursive: true);
+
+      final reopened = await open();
+      expect(await reopened.readNote('n1'), '<p>kept</p>');
+      expect(reopened.readable.length, 1);
+    });
+  });
+
+  // ------------------------------------------------------------
   group('assets', () {
     test('are found synchronously, which is what build() needs', () async {
       final store = await open();
