@@ -121,12 +121,20 @@ class Backend {
 
   bool? get hasConnection => _hasConnection;
 
+  /// True only when we KNOW the connection is one nobody pays per
+  /// megabyte for. Unknown counts as metered: spending a student's data
+  /// bundle because we could not tell is the wrong way to be wrong.
+  bool _unmetered = false;
+  bool get isUnmetered => _unmetered;
+
   void watchConnectivity() {
     if (_connWatch != null) return;
 
     void apply(List<ConnectivityResult> r) {
       _hasConnection =
           !(r.isEmpty || r.every((x) => x == ConnectivityResult.none));
+      _unmetered = r.contains(ConnectivityResult.wifi) ||
+          r.contains(ConnectivityResult.ethernet);
     }
 
     // Wrapped whole, and each call wrapped again inside.

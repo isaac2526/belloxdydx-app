@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
@@ -51,8 +50,18 @@ import 'offline_store.dart';
 /// Per-file ceiling for an automatically fetched image or voice note.
 const int _maxAutoAsset = 8 * 1024 * 1024;
 
-/// Total spend on tier 2 in one sync.
+/// The same ceiling on somebody's data bundle. A 6 MB voice note is
+/// worth fetching over Wi-Fi and is not worth a Nigerian student's
+/// airtime without them saying so.
+const int _maxMeteredAsset = 2 * 1024 * 1024;
+
+/// Total spend on tier 2 in one sync, on Wi-Fi.
 const int _assetBudget = 120 * 1024 * 1024;
+
+/// Total spend on tier 2 in one sync, on mobile data. Deliberately
+/// small: enough for the diagrams on a semester of notes, nowhere near
+/// enough to notice on a bill.
+const int _meteredAssetBudget = 20 * 1024 * 1024;
 
 /// Per-file ceiling for a tier 3 document.
 const int _maxAutoDoc = 40 * 1024 * 1024;
@@ -173,6 +182,13 @@ class SyncEngine {
   int _assetSpend = 0;
   int _docSpend = 0;
 
+  /// Whether this sync is running on a connection somebody pays per
+  /// megabyte for. Decided once per run, not per file.
+  bool _metered = true;
+
+  int get _assetCap => _metered ? _maxMeteredAsset : _maxAutoAsset;
+  int get _assetAllowance => _metered ? _meteredAssetBudget : _assetBudget;
+
   void _emit(SyncStatus s) {
     _status = s;
     if (!_controller.isClosed) _controller.add(s);
@@ -185,16 +201,15 @@ class SyncEngine {
     await _controller.close();
   }
 
-  /// True when there is a connection good enough for the big tier.
-  Future<bool> _onWifi() async {
-    try {
-      final r = await Connectivity().checkConnectivity();
-      return r.contains(ConnectivityResult.wifi) ||
-          r.contains(ConnectivityResult.ethernet);
-    } catch (_) {
-      return false;
-    }
-  }
+  /// True when the connection is one nobody pays per megabyte for.
+  ///
+  /// Read from the Backend's single connectivity watcher rather than by
+  /// asking the plugin again. connectivity_plus reaches the platform
+  /// differently on each OS and on some of them a failure arrives as an
+  /// unhandled error in the zone rather than a rejected future — which
+  /// takes down whatever is running, including a sync. One subscription,
+  /// already hardened, is the safer answer.
+  bool get _onWifi => _b.isUnmetered;
 
   /// Runs a sync, or joins the one already running.
   ///
@@ -241,6 +256,7 @@ class SyncEngine {
     _cancelled = false;
     _assetSpend = 0;
     _docSpend = 0;
+    _metered = !_onWifi;
     _emit(SyncStatus(
       phase: SyncPhase.running,
       label: 'Checking for new material',
@@ -393,7 +409,9 @@ class SyncEngine {
     }
 
     // ---- tier 3: whole documents, opt-in and Wi-Fi only ----------
-    if (autoDocuments && await _onWifi()) {
+    // Wi-Fi only, whatever the switch says. Whole documents are the one
+    // tier big enough to matter on a bill.
+    if (autoDocuments && !_metered) {
       for (final m in _content.materials) {
         if (m.kind == MaterialKind.note ||
             m.kind == MaterialKind.video ||
@@ -481,8 +499,8 @@ class SyncEngine {
 
   Future<int> _fetchAsset(String url, OfflineStore store) async {
     if (url.isEmpty || store.hasAsset(url)) return 0;
-    if (_assetSpend >= _assetBudget) return 0;
-    final bytes = await _download(url, cap: _maxAutoAsset);
+    if (_assetSpend >= _assetAllowance) return 0;
+    final bytes = await _download(url, cap: _assetCap);
     if (bytes == null) return 0;
     await store.putAsset(url, bytes);
     _assetSpend += bytes.length;
