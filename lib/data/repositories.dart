@@ -888,9 +888,13 @@ class AssessmentRepository {
         'p_answer_text': answerText.isEmpty ? null : answerText,
       });
       final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
-      await _rememberVerdict(questionId, verdict);
-      await _rememberAnswer(attemptId, questionId,
-          choice: choice, answerText: answerText, correct: verdict.correct);
+      // NOT awaited. Both of these are bookkeeping; neither is anything
+      // the student is waiting to see, and putting disk work between
+      // the tap and the right/wrong is how an answer starts to feel
+      // slow halfway through a semester.
+      unawaited(_rememberVerdict(questionId, verdict));
+      unawaited(_rememberAnswer(attemptId, questionId,
+          choice: choice, answerText: answerText, correct: verdict.correct));
       return verdict;
     }
     final r = await _b.apiSend('/api/practice/answer', body: {
@@ -900,9 +904,9 @@ class AssessmentRepository {
       'answerText': answerText,
     });
     final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
-    await _rememberVerdict(questionId, verdict);
-    await _rememberAnswer(attemptId, questionId,
-        choice: choice, answerText: answerText, correct: verdict.correct);
+    unawaited(_rememberVerdict(questionId, verdict));
+    unawaited(_rememberAnswer(attemptId, questionId,
+        choice: choice, answerText: answerText, correct: verdict.correct));
     return verdict;
   }
 
@@ -960,30 +964,21 @@ class AssessmentRepository {
   Future<void> _rememberVerdict(String questionId, AnswerVerdict v) async {
     final store = _store;
     if (store == null) return;
-    if ((v.correctKey ?? '').isEmpty &&
-        (v.acceptedAnswer ?? '').isEmpty &&
-        (v.explanationHtml ?? '').isEmpty) {
-      return;
-    }
+
+    final fields = <String, dynamic>{
+      if ((v.correctKey ?? '').isNotEmpty) 'correct_key': v.correctKey,
+      if ((v.acceptedAnswer ?? '').isNotEmpty) 'answer_text': v.acceptedAnswer,
+      if ((v.explanationHtml ?? '').isNotEmpty)
+        'explanation_html': v.explanationHtml,
+      if ((v.explanationImageUrl ?? '').isNotEmpty)
+        'explanation_image_url': v.explanationImageUrl,
+      if ((v.explanationAudioUrl ?? '').isNotEmpty)
+        'explanation_audio_url': v.explanationAudioUrl,
+    };
+    if (fields.isEmpty) return;
+
     try {
-      for (final item in store.items.where((i) => i.kind == 'questions')) {
-        final rows = await store.questions(item.courseId);
-        if (!rows.any((r) => '${r['id']}' == questionId)) continue;
-        await store.putQuestions(item.courseId, [
-          {
-            'id': questionId,
-            if ((v.correctKey ?? '').isNotEmpty) 'correct_key': v.correctKey,
-            if ((v.acceptedAnswer ?? '').isNotEmpty)
-              'answer_text': v.acceptedAnswer,
-            if ((v.explanationHtml ?? '').isNotEmpty)
-              'explanation_html': v.explanationHtml,
-            if ((v.explanationImageUrl ?? '').isNotEmpty)
-              'explanation_image_url': v.explanationImageUrl,
-            if ((v.explanationAudioUrl ?? '').isNotEmpty)
-              'explanation_audio_url': v.explanationAudioUrl,
-          }
-        ]);
-      }
+      await store.patchQuestion(questionId, fields);
     } catch (e) {
       debugPrint('[offline] could not fold in the verdict: $e');
     }

@@ -352,6 +352,184 @@ void main() {
   });
 
   // ------------------------------------------------------------
+  group('the store tells the truth about storage', () {
+    // This app has now been wrong about storage in BOTH directions.
+    // First it told a student with 256 GB free to clear room, because
+    // every save failure was reported as a full disk. Then the sync
+    // announced "Saved for offline" after a run in which every write
+    // had failed with ENOSPC — each caught, each logged, none of them
+    // reaching the student — so a nearly full phone reported success
+    // and then could not open a thing.
+    //
+    // Being wrong either way destroys trust in the whole feature.
+
+    test('a claim is not a fact: verifyItem checks the disk', () async {
+      final store = await open();
+      await store.putDocument(
+        id: 'd1',
+        title: 'Past questions',
+        kind: 'pq',
+        bytes: List<int>.filled(64, 3),
+        extension: 'pdf',
+      );
+      expect(await store.verifyItem('d1'), isTrue);
+
+      // The catalogue still says it is there. The file is not.
+      await File(store.resolve(store.item('d1')!.docRel!)).delete();
+      expect(await store.verifyItem('d1'), isFalse,
+          reason: 'an index entry must never be taken as proof');
+    });
+
+    test('an empty file is not a saved file', () async {
+      final store = await open();
+      await store.putDocument(
+        id: 'd1',
+        title: 'T',
+        kind: 'pq',
+        bytes: [1, 2, 3],
+        extension: 'pdf',
+      );
+      await File(store.resolve(store.item('d1')!.docRel!)).writeAsBytes([]);
+      expect(await store.verifyItem('d1'), isFalse);
+    });
+
+    test('an asset is verified the same way', () async {
+      final store = await open();
+      const url = 'https://p.supabase.co/storage/v1/object/public/x/a.png';
+      await store.putAsset(url, [9, 9, 9]);
+      expect(await store.verifyAsset(url), isTrue);
+      await File(store.assetPath(url)!).delete();
+      expect(await store.verifyAsset(url), isFalse);
+      expect(await store.verifyAsset('https://nope.test/x.png'), isFalse);
+    });
+
+    test('the library has a ceiling and it is enforced', () async {
+      final store = await open();
+      final room = await store.canWrite(OfflineStore.maxTotalBytes + 1);
+      expect(room.ok, isFalse);
+      expect(room.reason, contains('full'));
+      expect(room.reason, isNot(contains('Exception')));
+    });
+
+    test('a small write is allowed', () async {
+      final store = await open();
+      expect((await store.canWrite(1024)).ok, isTrue);
+    });
+
+    test('eviction takes the oldest unpinned item and never a pinned one',
+        () async {
+      final store = await open();
+      // Pinned means the student chose it by hand. It is never the
+      // thing we throw away to make room for something they did not.
+      await store.putDocument(
+        id: 'kept',
+        title: 'Chosen',
+        kind: 'pq',
+        bytes: List<int>.filled(32, 1),
+        extension: 'pdf',
+        pinned: true,
+      );
+      await store.putDocument(
+        id: 'auto',
+        title: 'Synced',
+        kind: 'pq',
+        bytes: List<int>.filled(32, 1),
+        extension: 'pdf',
+        pinned: false,
+      );
+      await store.flush();
+
+      // Ask for more than the ceiling so eviction has to act.
+      await store.evictFor(OfflineStore.maxTotalBytes);
+      expect(store.has('kept'), isTrue, reason: 'pinned is never evicted');
+      expect(store.has('auto'), isFalse);
+    });
+
+    test('the sweep reclaims staging files and orphans', () async {
+      final store = await open();
+      await store.putNote(id: 'n1', title: 'T', html: '<p>x</p>');
+      await store.flush();
+
+      // What a phone that killed the app mid-sync leaves behind.
+      final notes = Directory('${docs.path}/offline/notes');
+      await File('${notes.path}/half-written.html.3.part')
+          .writeAsString('incomplete');
+      // And a file whose catalogue row was lost: invisible in the Vault,
+      // impossible to delete from it, still counted against storage.
+      await File('${notes.path}/orphan.html').writeAsString('nobody owns me');
+
+      final reclaimed = await store.sweep();
+      expect(reclaimed, greaterThan(0));
+      expect(File('${notes.path}/half-written.html.3.part').existsSync(),
+          isFalse);
+      expect(File('${notes.path}/orphan.html').existsSync(), isFalse);
+      expect(await store.readNote('n1'), '<p>x</p>',
+          reason: 'the sweep must not touch a live file');
+    });
+  });
+
+  // ------------------------------------------------------------
+  group('finding one question does not decode all of them', () {
+    // Folding an answer verdict back into a cached question used to
+    // read and jsonDecode EVERY bucket to find the one row it wanted,
+    // on the UI isolate, before the student could be shown whether they
+    // were right. The cost grew with every round anybody ever played.
+    test('patchQuestion updates exactly the row it names', () async {
+      final store = await open();
+      await store.putQuestions('PHY101', [
+        {'id': 'q1', 'question_html': '<p>a</p>'},
+        {'id': 'q2', 'question_html': '<p>b</p>'},
+      ]);
+      await store.putQuestions('CHM101', [
+        {'id': 'q3', 'question_html': '<p>c</p>'},
+      ]);
+
+      final ok = await store.patchQuestion('q2', {
+        'correct_key': 'B',
+        'explanation_html': '<p>because</p>',
+      });
+      expect(ok, isTrue);
+
+      final phy = await store.questions('PHY101');
+      final q2 = phy.firstWhere((r) => r['id'] == 'q2');
+      expect(q2['correct_key'], 'B');
+      expect(q2['explanation_html'], '<p>because</p>');
+      expect(q2['question_html'], '<p>b</p>', reason: 'nothing else changes');
+
+      final q1 = phy.firstWhere((r) => r['id'] == 'q1');
+      expect(q1.containsKey('correct_key'), isFalse,
+          reason: 'a sibling row is untouched');
+    });
+
+    test('it finds a question in any bucket', () async {
+      final store = await open();
+      await store.putQuestions('A', [{'id': 'qa'}]);
+      await store.putQuestions('B', [{'id': 'qb'}]);
+      await store.putQuestions('C', [{'id': 'qc'}]);
+      expect(await store.bucketFor('qc'), 'C');
+      expect(await store.patchQuestion('qc', {'correct_key': 'D'}), isTrue);
+      expect((await store.questions('C')).first['correct_key'], 'D');
+    });
+
+    test('an unknown question is a quiet no, not a throw', () async {
+      final store = await open();
+      await store.putQuestions('A', [{'id': 'qa'}]);
+      expect(await store.bucketFor('nope'), isNull);
+      expect(await store.patchQuestion('nope', {'correct_key': 'A'}), isFalse);
+    });
+
+    test('empty fields change nothing', () async {
+      final store = await open();
+      await store.putQuestions('A', [
+        {'id': 'qa', 'correct_key': 'B'},
+      ]);
+      await store.patchQuestion('qa', {'correct_key': '', 'answer_text': null});
+      expect((await store.questions('A')).first['correct_key'], 'B',
+          reason: 'a blank from the server must not erase what we hold');
+    });
+  });
+
+  // ------------------------------------------------------------
   group('assets', () {
     test('are found synchronously, which is what build() needs', () async {
       final store = await open();

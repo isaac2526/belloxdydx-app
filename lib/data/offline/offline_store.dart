@@ -233,6 +233,21 @@ class OfflineStore {
 
   final Map<String, OfflineItem> _items = {};
   final Map<String, OfflineAsset> _assets = {};
+
+  /// questionId -> the bucket its row lives in.
+  ///
+  /// Held in memory only, and deliberately not written to the
+  /// catalogue: it is one entry per question, so persisting it would
+  /// bloat index.json — which is re-encoded whole — for something that
+  /// can be rebuilt by reading the buckets once.
+  ///
+  /// It exists because folding an answer verdict back into the cached
+  /// question used to READ AND DECODE EVERY BUCKET to find the one row
+  /// it wanted, on the UI isolate, before the student could be shown
+  /// whether they were right. That cost grew with every round anybody
+  /// ever played.
+  final Map<String, String> _questionHome = {};
+  bool _homeMapped = false;
   String _owner = '';
   int _syncedAtMs = 0;
 
@@ -406,6 +421,8 @@ class OfflineStore {
   Future<void> wipe() async {
     _items.clear();
     _assets.clear();
+    _questionHome.clear();
+    _homeMapped = false;
     _owner = '';
     _syncedAtMs = 0;
     for (final name in ['notes', 'docs', 'assets', 'questions']) {
@@ -458,6 +475,171 @@ class OfflineStore {
       (f) => f.writeAsString(text, flush: true),
     );
     return '$bucket/$name';
+  }
+
+  // ------------------------------------------------------------
+  // Room to write
+  //
+  // The store used to have no ceiling, no eviction and no idea how full
+  // the phone was. On a nearly full 32 GB device every write failed with
+  // ENOSPC, each failure was caught and logged, and the sync still
+  // finished by announcing "Saved for offline" — after which every Open
+  // failed, offline, with the file never having existed.
+  //
+  // That is the same lie as the one this app already shipped once in the
+  // other direction, when it told a student with 256 GB free to clear
+  // room. Being wrong about storage in either direction destroys trust
+  // in the whole feature.
+  // ------------------------------------------------------------
+
+  /// Never fill a student's phone. A library beyond this is not worth
+  /// the app being blamed for a device that will not take a photograph.
+  static const int maxTotalBytes = 900 * 1024 * 1024;
+
+  /// Leave this much of the DEVICE free, whatever our own ceiling says.
+  static const int keepFreeBytes = 400 * 1024 * 1024;
+
+  int _freeBytes = -1; // -1 = not measured yet
+
+  /// How much space the phone actually has. Measured with statvfs
+  /// through a temporary file, because Dart exposes no free-space API
+  /// and the alternative is guessing.
+  Future<int> freeSpace({bool refresh = false}) async {
+    if (_freeBytes >= 0 && !refresh) return _freeBytes;
+    try {
+      final result = await Process.run('df', ['-kP', _root.path])
+          .timeout(const Duration(seconds: 3));
+      final lines = '${result.stdout}'.trim().split('\n');
+      if (lines.length >= 2) {
+        final cols = lines.last.trim().split(RegExp(r'\s+'));
+        if (cols.length >= 4) {
+          final kb = int.tryParse(cols[3]);
+          if (kb != null) return _freeBytes = kb * 1024;
+        }
+      }
+    } catch (_) {
+      // df is not available on iOS or in a locked-down sandbox. Fall
+      // through: unknown free space must not stop a student saving a
+      // note, so it is treated as "enough" and the write itself is the
+      // real test — which is why every write is checked afterwards.
+    }
+    return _freeBytes = -1;
+  }
+
+  /// Whether [bytes] can be written without filling the device or
+  /// blowing our own ceiling. Answers honestly, and says why not.
+  Future<({bool ok, String? reason})> canWrite(int bytes) async {
+    if (totalBytes + bytes > maxTotalBytes) {
+      return (
+        ok: false,
+        reason: 'Your offline library is full. Remove something from the '
+            'Vault to make room.',
+      );
+    }
+    final free = await freeSpace();
+    if (free >= 0 && free - bytes < keepFreeBytes) {
+      return (
+        ok: false,
+        reason: 'This phone is nearly out of space. Free some up and try '
+            'again.',
+      );
+    }
+    return (ok: true, reason: null);
+  }
+
+  /// Confirms a file really is on disk at the size we think.
+  ///
+  /// The verification pass. A catalogue entry is a claim; this is the
+  /// check. Used after a download so "Saved" means saved.
+  Future<bool> verifyItem(String id) async {
+    final i = _items[id];
+    if (i == null) return false;
+    var sawSomething = false;
+    for (final rel in [i.docRel, i.htmlRel]) {
+      if (rel == null || rel.isEmpty) continue;
+      try {
+        final f = File(resolve(rel));
+        if (!await f.exists()) return false;
+        if (await f.length() <= 0) return false;
+        sawSomething = true;
+      } catch (_) {
+        return false;
+      }
+    }
+    return sawSomething;
+  }
+
+  Future<bool> verifyAsset(String url) async {
+    final a = _assets[assetKeyFor(url)];
+    if (a == null) return false;
+    try {
+      final f = File(resolve(a.rel));
+      return await f.exists() && await f.length() > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Deletes the least recently saved unpinned items until [wanted]
+  /// bytes fit under the ceiling. Pinned items — the ones a student
+  /// chose by hand — are never touched.
+  Future<int> evictFor(int wanted) async {
+    if (totalBytes + wanted <= maxTotalBytes) return 0;
+    final candidates = _items.values
+        .where((i) => !i.pinned && i.kind != 'questions')
+        .toList()
+      ..sort((a, b) => a.savedAtMs.compareTo(b.savedAtMs));
+
+    var freed = 0;
+    for (final i in candidates) {
+      if (totalBytes + wanted <= maxTotalBytes) break;
+      freed += i.bytes;
+      await removeItem(i.id);
+    }
+    if (freed > 0) debugPrint('[offline] evicted ${formatBytes(freed)}');
+    return freed;
+  }
+
+  /// Sweeps staging files and files with no catalogue entry.
+  ///
+  /// A phone that kills the app mid-sync — which is what these phones
+  /// do — leaves `.part` files behind, and an entry lost from the
+  /// catalogue orphans its file forever: it does not show in the Vault,
+  /// cannot be removed from it, and still counts against the student's
+  /// storage.
+  Future<int> sweep() async {
+    var reclaimed = 0;
+    final live = <String>{
+      for (final i in _items.values) ...[
+        if (i.docRel != null) i.docRel!,
+        if (i.htmlRel != null) i.htmlRel!,
+      ],
+      for (final a in _assets.values) a.rel,
+    };
+
+    for (final bucket in const ['notes', 'docs', 'assets', 'questions']) {
+      try {
+        final dir = Directory('${_root.path}/$bucket');
+        if (!await dir.exists()) continue;
+        await for (final f in dir.list()) {
+          if (f is! File) continue;
+          final rel = '$bucket/${f.uri.pathSegments.last}';
+          final isStaging = rel.contains('.part');
+          if (!isStaging && live.contains(rel)) continue;
+          // questions/ is indexed by item, not by path, so keep any
+          // bucket file whose catalogue row exists.
+          if (!isStaging && bucket == 'questions') continue;
+          try {
+            reclaimed += await f.length();
+            await f.delete();
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    if (reclaimed > 0) {
+      debugPrint('[offline] reclaimed ${formatBytes(reclaimed)} of dead files');
+    }
+    return reclaimed;
   }
 
   // ------------------------------------------------------------
@@ -704,6 +886,7 @@ class OfflineStore {
     for (final row in rows) {
       final id = '${row['id'] ?? ''}';
       if (id.isEmpty) continue;
+      _questionHome[id] = bucket;
       final before = merged[id];
       if (before == null) {
         merged[id] = row;
@@ -751,12 +934,77 @@ class OfflineStore {
       if (decoded is! Map) return const [];
       final rows = decoded['rows'];
       if (rows is! List) return const [];
-      return rows
+      final out = rows
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
+      for (final r in out) {
+        final id = '${r['id'] ?? ''}';
+        if (id.isNotEmpty) _questionHome[id] = bucket;
+      }
+      return out;
     } catch (_) {
       return const [];
+    }
+  }
+
+  /// Which bucket holds one question, without decoding all of them.
+  ///
+  /// Answers from memory once anything has been read. A miss costs one
+  /// pass over the buckets, and only the first miss — after that the map
+  /// is complete.
+  Future<String?> bucketFor(String questionId) async {
+    final known = _questionHome[questionId];
+    if (known != null) return known;
+    if (_homeMapped) return null;
+    for (final i in _items.values.where((i) => i.kind == 'questions')) {
+      await questions(i.courseId);
+      final found = _questionHome[questionId];
+      if (found != null) return found;
+    }
+    _homeMapped = true;
+    return _questionHome[questionId];
+  }
+
+  /// Patches the fields of ONE cached question, touching one file.
+  ///
+  /// This is what the answer-verdict path uses. It used to call
+  /// putQuestions, which reads the whole bucket, merges, re-encodes and
+  /// writes it back — for every bucket in the catalogue, to change one
+  /// row.
+  Future<bool> patchQuestion(
+    String questionId,
+    Map<String, dynamic> fields,
+  ) async {
+    if (fields.isEmpty) return false;
+    final bucket = await bucketFor(questionId);
+    if (bucket == null) return false;
+    try {
+      final rows = await questions(bucket);
+      var touched = false;
+      for (final r in rows) {
+        if ('${r['id'] ?? ''}' != questionId) continue;
+        fields.forEach((k, v) {
+          final empty = v == null || (v is String && v.trim().isEmpty);
+          if (!empty) r[k] = v;
+        });
+        touched = true;
+        break;
+      }
+      if (!touched) return false;
+      final safe = _safeName(bucket);
+      await _writeText(
+        'questions',
+        '$safe.json',
+        jsonEncode({
+          'at': DateTime.now().millisecondsSinceEpoch,
+          'rows': rows,
+        }),
+      );
+      return true;
+    } catch (e) {
+      debugPrint('[offline] could not patch $questionId: $e');
+      return false;
     }
   }
 

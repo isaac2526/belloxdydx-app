@@ -90,6 +90,14 @@ class SyncStatus {
 
   final int syncedAtMs;
 
+  /// How many items were asked for and did NOT arrive.
+  ///
+  /// This exists because the sync used to announce "Saved for offline"
+  /// after a run in which every single write had failed. Each failure
+  /// was caught and logged and none of them reached the student, so a
+  /// nearly full phone reported success and then could not open a thing.
+  final int failed;
+
   const SyncStatus({
     this.phase = SyncPhase.idle,
     this.label = '',
@@ -98,6 +106,7 @@ class SyncStatus {
     this.bytes = 0,
     this.message,
     this.syncedAtMs = 0,
+    this.failed = 0,
   });
 
   bool get isRunning => phase == SyncPhase.running;
@@ -115,6 +124,7 @@ class SyncStatus {
     int? bytes,
     String? message,
     int? syncedAtMs,
+    int? failed,
     bool clearMessage = false,
   }) =>
       SyncStatus(
@@ -125,6 +135,7 @@ class SyncStatus {
         bytes: bytes ?? this.bytes,
         message: clearMessage ? null : (message ?? this.message),
         syncedAtMs: syncedAtMs ?? this.syncedAtMs,
+        failed: failed ?? this.failed,
       );
 }
 
@@ -185,6 +196,10 @@ class SyncEngine {
   /// Whether this sync is running on a connection somebody pays per
   /// megabyte for. Decided once per run, not per file.
   bool _metered = true;
+
+  /// Set the first time a write is refused for want of space, so the
+  /// end of the run can say that rather than a generic failure.
+  String? _outOfRoom;
 
   int get _assetCap => _metered ? _maxMeteredAsset : _maxAutoAsset;
   int get _assetAllowance => _metered ? _meteredAssetBudget : _assetBudget;
@@ -257,6 +272,8 @@ class SyncEngine {
     _assetSpend = 0;
     _docSpend = 0;
     _metered = !_onWifi;
+    _outOfRoom = null;
+    await store.freeSpace(refresh: true);
     _emit(SyncStatus(
       phase: SyncPhase.running,
       label: 'Checking for new material',
@@ -288,6 +305,7 @@ class SyncEngine {
 
       var done = 0;
       var bytes = 0;
+      var failed = 0;
       final queue = List<_Job>.from(jobs);
 
       Future<void> worker() async {
@@ -302,15 +320,22 @@ class SyncEngine {
             // nobody chases down later.
             final moved = await _perform(job, store);
             bytes += moved;
+            // Zero bytes from a job that was supposed to fetch a file
+            // means it did not land — out of space, over budget, a bad
+            // status. It is not a success and must not be counted as one.
+            if (moved <= 0 && job.kind != 'note') failed++;
           } catch (e) {
             // One file failing must never end the sync. A lecture note
-            // that 404s is not a reason to lose the other ninety.
+            // that 404s is not a reason to lose the other ninety — but
+            // it IS counted, so the end of the run can say so.
+            failed++;
             debugPrint('[sync] ${job.kind} ${job.id} failed: $e');
           }
           done++;
           _emit(_status.copyWith(
             done: done,
             bytes: bytes,
+            failed: failed,
             label: _labelFor(job),
           ));
           // Let the UI breathe between files.
@@ -326,14 +351,29 @@ class SyncEngine {
         return;
       }
 
+      // Dead files from a previous interrupted run, reclaimed while we
+      // are already touching the disk.
+      await store.sweep();
       await store.markSynced();
+
+      // Say what actually happened. "Saved for offline" after a run in
+      // which everything failed is the single most damaging thing this
+      // feature can do: the student believes the material is on the
+      // phone, turns the data off, and finds nothing.
+      final ok = failed == 0;
       _emit(SyncStatus(
-        phase: SyncPhase.done,
-        label: 'Saved for offline',
+        phase: ok ? SyncPhase.done : SyncPhase.failed,
+        label: ok ? 'Saved for offline' : 'Some of it did not save',
         done: done,
         total: jobs.length,
         bytes: bytes,
+        failed: failed,
         syncedAtMs: store.syncedAtMs,
+        message: ok
+            ? null
+            : _outOfRoom ??
+                '$failed ${failed == 1 ? 'item' : 'items'} could not be '
+                    'saved. Tap sync again on a steadier connection.',
       ));
     } catch (e) {
       _emit(_status.copyWith(
@@ -509,7 +549,23 @@ class SyncEngine {
     if (_assetSpend >= _assetAllowance) return 0;
     final bytes = await _download(url, cap: _assetCap);
     if (bytes == null) return 0;
+
+    // Room is checked BEFORE the write, not discovered by it. A failed
+    // write on a full phone still cost the student the download.
+    final room = await store.canWrite(bytes.length);
+    if (!room.ok) {
+      await store.evictFor(bytes.length);
+      final again = await store.canWrite(bytes.length);
+      if (!again.ok) {
+        _outOfRoom = again.reason;
+        return 0;
+      }
+    }
+
     await store.putAsset(url, bytes);
+    // And confirmed after it. The catalogue entry is a claim; this is
+    // the check that turns it into a fact.
+    if (!await store.verifyAsset(url)) return 0;
     _assetSpend += bytes.length;
     return bytes.length;
   }
@@ -520,6 +576,16 @@ class SyncEngine {
     final url = _b.fileUrl(m.url);
     final bytes = await _download(url, cap: _maxAutoDoc);
     if (bytes == null) return 0;
+
+    final room = await store.canWrite(bytes.length);
+    if (!room.ok) {
+      await store.evictFor(bytes.length);
+      final again = await store.canWrite(bytes.length);
+      if (!again.ok) {
+        _outOfRoom = again.reason;
+        return 0;
+      }
+    }
     final course = _content.courseById(m.courseId);
     await store.putDocument(
       id: m.id,
@@ -532,6 +598,7 @@ class SyncEngine {
       sig: job.sig,
       pinned: false,
     );
+    if (!await store.verifyItem(m.id)) return 0;
     _docSpend += bytes.length;
     return bytes.length;
   }
