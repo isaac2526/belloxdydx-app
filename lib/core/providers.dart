@@ -10,6 +10,7 @@ import 'security.dart';
 import '../data/backend.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
+import '../data/offline/course_downloader.dart';
 import '../data/offline/offline_store.dart';
 import '../data/offline/sync_engine.dart';
 import '../data/repositories.dart';
@@ -117,6 +118,138 @@ class SyncStatusNotifier extends StateNotifier<SyncStatus> {
   }
 }
 
+// ------------------------------------------------------------
+// Downloading a course
+// ------------------------------------------------------------
+
+/// What the server is publishing right now, per course.
+///
+/// One cheap call, shared by every Download button on screen, refreshed
+/// on a resume and after a download. This is the whole of the "there's
+/// a change in this course, download now" badge.
+class CourseStampsNotifier extends StateNotifier<Map<String, CourseStamp>> {
+  CourseStampsNotifier(this._ref) : super(const {});
+
+  final Ref _ref;
+  DateTime _lastRead = DateTime.fromMillisecondsSinceEpoch(0);
+  Future<void>? _inFlight;
+
+  /// Throttled, because every course tile asks for it as it scrolls
+  /// into view. Pass [force] after a download, when the answer has
+  /// certainly changed.
+  Future<void> refresh({bool force = false}) {
+    final running = _inFlight;
+    if (running != null) return running;
+    if (!force &&
+        DateTime.now().difference(_lastRead) < const Duration(minutes: 5)) {
+      return Future.value();
+    }
+    final f = _read().whenComplete(() => _inFlight = null);
+    _inFlight = f;
+    return f;
+  }
+
+  Future<void> _read() async {
+    try {
+      final rows = await _ref.read(contentRepoProvider).manifest();
+      if (!mounted) return;
+      _lastRead = DateTime.now();
+      state = {for (final r in rows) r.id: r};
+    } catch (e) {
+      // A manifest the app could not read is not an error a student
+      // needs to see. The badge simply does not appear this time.
+      debugPrint('[course] manifest skipped: $e');
+    }
+  }
+}
+
+final courseStampsProvider =
+    StateNotifierProvider<CourseStampsNotifier, Map<String, CourseStamp>>(
+  CourseStampsNotifier.new,
+);
+
+/// One Download button's state, per course.
+///
+/// A family rather than one notifier with a map, so a course hub can
+/// watch its own course and rebuild for nothing else — and so two
+/// downloads can never share a progress counter.
+class CourseDownloadNotifier extends StateNotifier<CourseDownloadState> {
+  CourseDownloadNotifier(this._ref, this.courseId)
+      : _engine = CourseDownloader(
+          backend: _ref.read(backendProvider),
+          content: _ref.read(contentRepoProvider),
+          store: Offline.store,
+          courseId: courseId,
+        ),
+        super(_seed(courseId)) {
+    state = _engine.state;
+    _sub = _engine.updates.listen((s) {
+      if (mounted) state = s;
+    });
+    // Whatever the manifest already says, applied without a call.
+    _engine.applyStamp(_ref.read(courseStampsProvider)[courseId]);
+    state = _engine.state;
+    _ref.listen<Map<String, CourseStamp>>(courseStampsProvider, (_, next) {
+      _engine.applyStamp(next[courseId]);
+      if (mounted) state = _engine.state;
+    });
+  }
+
+  final Ref _ref;
+  final String courseId;
+  final CourseDownloader _engine;
+  StreamSubscription<CourseDownloadState>? _sub;
+
+  static CourseDownloadState _seed(String courseId) =>
+      CourseDownloadState(courseId: courseId);
+
+  Future<void> start() async {
+    await _engine.run();
+    // The badge is re-read from the server rather than assumed: a
+    // question added while the download was running must still show up
+    // as a change.
+    await _ref.read(courseStampsProvider.notifier).refresh(force: true);
+    if (mounted) {
+      _engine.applyStamp(_ref.read(courseStampsProvider)[courseId]);
+      state = _engine.state;
+    }
+  }
+
+  void cancel() => _engine.cancel();
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    unawaited(_engine.dispose());
+    super.dispose();
+  }
+}
+
+final courseDownloadProvider = StateNotifierProvider.family<
+    CourseDownloadNotifier, CourseDownloadState, String>(
+  (ref, courseId) => CourseDownloadNotifier(ref, courseId),
+);
+
+/// How many courses on this shelf have something new waiting. Read by
+/// the dashboard so the badge is visible before a student opens the
+/// course list.
+final coursesWithUpdatesProvider = Provider<int>((ref) {
+  final stamps = ref.watch(courseStampsProvider);
+  final store = ref.watch(offlineStoreProvider);
+  if (store == null) return 0;
+  var n = 0;
+  for (final s in stamps.values) {
+    if (s.isEmpty) continue;
+    final rec = store.courseRecord(s.id);
+    // Only a course this phone has ALREADY downloaded can have an
+    // update. Everything else is simply not downloaded yet, which is a
+    // different sentence and a different button.
+    if (rec == null) continue;
+    if (s.differsFrom(rec)) n++;
+  }
+  return n;
+});
+
 final engageRepoProvider = Provider<EngageRepository>(
   (ref) =>
       EngageRepository(ref.watch(backendProvider), ref.watch(localStoreProvider)),
@@ -161,6 +294,10 @@ class SessionNotifier extends StateNotifier<SessionState>
             .read(syncStatusProvider.notifier)
             .start(level: state.profile?.currentLevel);
         await applyPolicy();
+        // What Tutor Bello published while the student was away. This
+        // is what makes "there's a change in this course" arrive on its
+        // own rather than only when somebody opens the course.
+        await _ref.read(courseStampsProvider.notifier).refresh();
       } catch (e) {
         debugPrint('[resume] refresh skipped: $e');
       }
@@ -338,6 +475,7 @@ class SessionNotifier extends StateNotifier<SessionState>
         await applyPolicy();
         return;
       }
+      unawaited(_ref.read(courseStampsProvider.notifier).refresh());
       await _ref
           .read(syncStatusProvider.notifier)
           .start(level: p.currentLevel);

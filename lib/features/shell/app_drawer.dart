@@ -356,32 +356,15 @@ class _CoursePickerState extends ConsumerState<_CoursePicker> {
     setState(() => _busy = course.id);
     final assessment = ref.read(assessmentRepoProvider);
     try {
-      final id = await assessment.startPractice(course.id);
+      // No signal is not the end of the round: whatever is already on
+      // the phone can still be practised. The rule about which failures
+      // qualify lives in the repository, so this screen and the course
+      // hub cannot drift apart on it.
+      final id = await assessment.startPracticeOrOffline(course.id);
       if (!mounted) return;
       Navigator.of(context).pop();
       context.push(Routes.practice(id));
     } catch (e) {
-      // No signal is not the end of the round: whatever is already on
-      // the phone can still be practised.
-      //
-      // Only for a TRANSPORT failure, though. "This course has no
-      // questions loaded yet" is a real answer from a reachable server
-      // and a student needs to read it — quietly substituting a
-      // different round would hide the thing they should tell Tutor
-      // Bello about.
-      final code = e is BxError ? e.code : null;
-      final offline = code == 'offline' || code == 'timeout';
-      if (offline) {
-        try {
-          final id = await assessment.startOfflinePractice(courseId: course.id);
-          if (!mounted) return;
-          Navigator.of(context).pop();
-          context.push(Routes.practice(id));
-          return;
-        } catch (_) {
-          // Fall through to the real message below.
-        }
-      }
       if (!mounted) return;
       bxToast(
         context,

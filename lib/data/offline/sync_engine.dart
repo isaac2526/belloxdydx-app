@@ -477,23 +477,9 @@ class SyncEngine {
     return jobs;
   }
 
-  /// What a copy was made from. `updated_at` when the backend sends one
-  /// — the direct RPC always does, and the website route now does too —
-  /// otherwise the URL, which at least catches a replaced file.
-  String _sigFor(StudyMaterial m) =>
-      m.updatedAt?.toIso8601String() ?? '${m.url}#${m.sortOrder}';
+  String _sigFor(StudyMaterial m) => sigFor(m);
 
-  static Iterable<String> _urlsInHtml(String html) sync* {
-    for (final m in kEmbeddedStorageUrl.allMatches(html)) {
-      yield m.group(0)!;
-    }
-    for (final m in _proxyUrlInHtml.allMatches(html)) {
-      yield m.group(0)!;
-    }
-  }
-
-  static final RegExp _proxyUrlInHtml =
-      RegExp(r'''https?://[^\s"'<>()]*?/api/file\?u=[A-Za-z0-9_=-]+''');
+  static Iterable<String> _urlsInHtml(String html) => urlsInHtml(html);
 
   // ------------------------------------------------------------
   // Doing the work
@@ -631,3 +617,29 @@ class SyncEngine {
 }
 
 int utf8Length(String s) => s.codeUnits.length;
+
+/// What a copy was made from. `updated_at` when the backend sends one
+/// — the direct RPC always does, and the website route now does too —
+/// otherwise the URL, which at least catches a replaced file.
+///
+/// Shared with the per-course downloader on purpose: two different
+/// signatures for the same material would mean the background sync and
+/// the Download button each thought the other's copy was stale, and the
+/// pair of them would re-fetch the whole shelf forever.
+String sigFor(StudyMaterial m) =>
+    m.updatedAt?.toIso8601String() ?? '${m.url}#${m.sortOrder}';
+
+/// Every storage URL embedded in a body, in either of the two shapes it
+/// can arrive in — the raw Supabase URL on the direct path, the
+/// `…/api/file?u=<base64>` proxy URL on the website path.
+Iterable<String> urlsInHtml(String html) sync* {
+  for (final m in kEmbeddedStorageUrl.allMatches(html)) {
+    yield m.group(0)!;
+  }
+  for (final m in _proxyUrlInHtml.allMatches(html)) {
+    yield m.group(0)!;
+  }
+}
+
+final RegExp _proxyUrlInHtml =
+    RegExp(r'''https?://[^\s"'<>()]*?/api/file\?u=[A-Za-z0-9_=-]+''');

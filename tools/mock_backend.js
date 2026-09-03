@@ -139,11 +139,11 @@ for (const c of COURSES) {
   mk('note', `${c.code} · Common mistakes`, { topic: 'Revision' });
   mk('slide', `${c.code} · Lecture 1 slides`, {
     topic: 'Week 1',
-    url: 'https://example.supabase.co/storage/v1/object/public/materials/lecture1.pdf',
+    url: `${STORAGE}/materials/lecture1.pdf`,
   });
   mk('slide', `${c.code} · Lecture 2 slides`, {
     topic: 'Week 2',
-    url: 'https://example.supabase.co/storage/v1/object/public/materials/lecture2.pdf',
+    url: `${STORAGE}/materials/lecture2.pdf`,
   });
   mk('video', `${c.code} · Tutor Bello explains the basics`, {
     duration: '24 min',
@@ -151,7 +151,7 @@ for (const c of COURSES) {
   });
   mk('pq', `${c.code} · 2023 past questions`, {
     topic: 'Past questions',
-    url: 'https://example.supabase.co/storage/v1/object/public/materials/pq2023.pdf',
+    url: `${STORAGE}/materials/pq2023.pdf`,
   });
 }
 
@@ -225,6 +225,11 @@ for (const c of COURSES) {
       explanation_audio_url: `${STORAGE}/questions/why-${i % 3}.mp3`,
       marks: 1,
       course: c.code,
+      created_at: new Date(Date.now() - (i + 1) * 86400000).toISOString(),
+      // Stamped, because the per-course manifest compares stamps and a
+      // bank with no updated_at would report "nothing has ever changed"
+      // forever.
+      updated_at: new Date(Date.now() - (i + 1) * 3600000).toISOString(),
     });
   }
 }
@@ -241,6 +246,15 @@ for (const c of COURSES.slice(0, 5)) {
     id: uid(tSeq++), course_id: c.id, title: `${c.code} Mock Exam`,
     mode: 'exam', duration_minutes: 45, question_count: 20,
   });
+}
+
+// The questions a published test claims by hand. The per-course
+// download must never hand these over, however offline the phone is —
+// that is the one part of the answer-key trade that is enforceable.
+const TEST_PINNED = new Set();
+for (const c of COURSES.slice(0, 2)) {
+  const mine = QUESTIONS.filter((q) => q.course_id === c.id).slice(0, 2);
+  for (const q of mine) TEST_PINNED.add(q.id);
 }
 
 const ANNOUNCEMENTS = [
@@ -260,6 +274,10 @@ const state = {
   points: {},         // user id -> number
   plays: [],          // millionaire
   devices: {},        // user id -> device id (the single-session rule)
+  // The estate-wide switch. Flipped by the driver through
+  // /__test/settings so a test can prove the app says something
+  // truthful when Tutor Bello turns the offline bank off.
+  offlineQuestions: true,
 };
 
 for (const u of Object.values(USERS)) {
@@ -470,6 +488,90 @@ const RPC = {
       level,
       // Carried on the bootstrap, exactly as the real route does.
       settings: RPC.bx_app_settings(u, {}),
+    };
+  },
+
+  // ---- the per-course download ----------------------------------
+  //
+  // Mirrors bx_manifest() and bx_course_bundle() in migration 0013 and
+  // the two /api/mobile routes that shadow them. The pinned-question
+  // rule is modelled too: TEST_PINNED holds the questions a published
+  // test claims, and the bundle must never hand those over.
+  bx_manifest: (u) => {
+    const level = u.current_level || '100';
+    return {
+      courses: COURSES.filter((c) => c.level_code === level).map((c) => {
+        const mats = MATERIALS.filter((m) => m.course_id === c.id);
+        const qs = QUESTIONS.filter((q) => q.course_id === c.id);
+        const newest = (rows, key) =>
+          rows.map((r) => r[key] || '').sort().reverse()[0] || '';
+        const ms = newest(mats, 'updated_at');
+        const qsStamp = newest(qs, 'updated_at');
+        return {
+          id: c.id,
+          code: c.code,
+          title: c.title,
+          materials: mats.length,
+          questions: qs.length,
+          material_stamp: ms,
+          question_stamp: qsStamp,
+          stamp: [ms, qsStamp].sort().reverse()[0] || '',
+        };
+      }),
+    };
+  },
+
+  bx_course_bundle: (u, p) => {
+    const course = COURSES.find((c) => c.id === p.p_course_id);
+    if (!course) return { error: 'not_found' };
+    if (!u.is_activated) return { error: 'not_activated' };
+    const part = p.p_part || 'all';
+    const off = Math.max(0, p.p_offset | 0);
+    const lim = Math.min(Math.max(p.p_limit | 0 || 200, 1), 400);
+
+    const allMats = MATERIALS.filter((m) => m.course_id === course.id);
+    const allQs = QUESTIONS.filter(
+      (q) => q.course_id === course.id && !TEST_PINNED.has(q.id)
+    );
+
+    const mats = part === 'all' || part === 'materials'
+      ? allMats.slice(off, off + lim)
+      : [];
+    const qs = state.offlineQuestions !== false &&
+        (part === 'all' || part === 'questions')
+      ? allQs.slice(off, off + lim)
+      : [];
+
+    const mTotal = part === 'all' || part === 'materials' ? allMats.length : 0;
+    const qTotal = state.offlineQuestions !== false &&
+        (part === 'all' || part === 'questions')
+      ? QUESTIONS.filter((q) => q.course_id === course.id).length
+      : 0;
+
+    return {
+      course: {
+        id: course.id,
+        code: course.code,
+        title: course.title,
+        semester: course.semester,
+      },
+      materials: mats,
+      questions: qs.map((q) => ({ ...q, course_code: course.code })),
+      counts: {
+        materials: mTotal,
+        questions: qTotal,
+        materialsInPage: mats.length,
+        questionsInPage: qs.length,
+        withheld: QUESTIONS.filter(
+          (q) => q.course_id === course.id && TEST_PINNED.has(q.id)
+        ).length,
+      },
+      questionsIncluded: state.offlineQuestions !== false,
+      nextOffset: off + lim < Math.max(mTotal, qTotal) ? off + lim : null,
+      stamp: [...mats, ...qs]
+        .map((r) => r.updated_at || '')
+        .sort()
+        .reverse()[0] || '',
     };
   },
 
@@ -939,8 +1041,45 @@ const server = http.createServer(async (req, res) => {
   LOG_PATH = `${req.method} ${path}${url.search}`;
 
   if (path === '/__test/settings') {
-    if (req.method === 'POST') Object.assign(MOCK_SETTINGS, body);
-    return send(res, 200, MOCK_SETTINGS);
+    if (req.method === 'POST') {
+      Object.assign(MOCK_SETTINGS, body);
+      if (typeof body.offlineQuestions === 'boolean') {
+        state.offlineQuestions = body.offlineQuestions;
+      }
+    }
+    return send(res, 200, { ...MOCK_SETTINGS,
+      offlineQuestions: state.offlineQuestions });
+  }
+
+  // Tutor Bello adding a question, from a test. The manifest must move
+  // and the app must raise "there's a change in this course".
+  if (path === '/__test/publish') {
+    const courseId = body.courseId || COURSES[0].id;
+    const course = COURSES.find((c) => c.id === courseId) || COURSES[0];
+    const now = new Date().toISOString();
+    QUESTIONS.push({
+      id: uid(qSeq++),
+      course_id: course.id,
+      question_html: `A question Tutor Bello added at ${now}`,
+      question_image_url: null,
+      question_audio_url: null,
+      options: [
+        { key: 'A', text: 'Yes', image_url: null },
+        { key: 'B', text: 'No', image_url: null },
+      ],
+      question_type: 'mcq',
+      correct_key: 'A',
+      answer_text: null,
+      explanation_html: '<p>Because it is.</p>',
+      explanation_image_url: null,
+      explanation_audio_url: null,
+      marks: 1,
+      course: course.code,
+      created_at: now,
+      updated_at: now,
+    });
+    return send(res, 200, { ok: true, courseId: course.id,
+      questions: QUESTIONS.filter((q) => q.course_id === course.id).length });
   }
 
   // ---- real bytes for the offline sync -----------------------
@@ -953,10 +1092,23 @@ const server = http.createServer(async (req, res) => {
       'base64',
     );
     const mp3 = Buffer.from('SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA', 'base64');
+    // A real, openable one-page PDF. The per-course download fetches
+    // whole documents, so the harness has to serve bytes a PDF reader
+    // would accept rather than a PNG with a .pdf name.
+    const pdf = Buffer.from(
+      '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n' +
+      '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
+      '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n' +
+      'trailer<</Root 1 0 R>>\n%%EOF\n',
+      'latin1',
+    );
     const isAudio = /\.mp3$/.test(path);
-    const body = isAudio ? mp3 : png;
+    const isPdf = /\.pdf$/.test(path);
+    const body = isPdf ? pdf : isAudio ? mp3 : png;
     res.writeHead(200, {
-      'content-type': isAudio ? 'audio/mpeg' : 'image/png',
+      'content-type': isPdf
+        ? 'application/pdf'
+        : isAudio ? 'audio/mpeg' : 'image/png',
       'content-length': body.length,
       'cache-control': 'public, max-age=86400',
     });
@@ -1071,6 +1223,22 @@ const server = http.createServer(async (req, res) => {
     if (path === '/api/mobile/content') {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
       return send(res, 200, RPC.bx_content(u, {}));
+    }
+    if (path === '/api/mobile/manifest') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_manifest(u, {}));
+    }
+    if (path === '/api/mobile/course-bundle') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      const r = RPC.bx_course_bundle(u, {
+        p_course_id: url.searchParams.get('courseId') || '',
+        p_offset: Number(url.searchParams.get('offset') || 0),
+        p_limit: Number(url.searchParams.get('limit') || 200),
+        p_part: url.searchParams.get('part') || 'all',
+      });
+      if (r.error === 'not_found') return send(res, 404, r);
+      if (r.error === 'not_activated') return send(res, 403, r);
+      return send(res, 200, r);
     }
     if (path === '/api/mobile/tests') {
       if (!u) return send(res, 401, { error: 'unauthenticated' });

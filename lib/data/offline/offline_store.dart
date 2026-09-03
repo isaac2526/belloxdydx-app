@@ -248,6 +248,16 @@ class OfflineStore {
   /// ever played.
   final Map<String, String> _questionHome = {};
   bool _homeMapped = false;
+
+  /// What each course looked like the last time it was downloaded
+  /// whole: courseId -> {materials, questions, stamp, at, ok}.
+  ///
+  /// This is the memory behind "there's a change in this course,
+  /// download now". The badge is the difference between this and the
+  /// manifest the server serves — not a guess about time, which is why
+  /// it holds counts as well as a stamp: `updated_at` cannot see a
+  /// deletion, and a count cannot see an edit.
+  final Map<String, Map<String, dynamic>> _courses = {};
   String _owner = '';
   int _syncedAtMs = 0;
 
@@ -307,10 +317,17 @@ class OfflineStore {
           }
         });
       }
+      final courses = map['courses'];
+      if (courses is Map) {
+        courses.forEach((k, v) {
+          if (v is Map) _courses['$k'] = Map<String, dynamic>.from(v);
+        });
+      }
     } catch (e) {
       debugPrint('[offline] unreadable index, starting clean: $e');
       _items.clear();
       _assets.clear();
+      _courses.clear();
     }
   }
 
@@ -350,6 +367,7 @@ class OfflineStore {
         'syncedAt': _syncedAtMs,
         'items': {for (final e in _items.entries) e.key: e.value.toJson()},
         'assets': {for (final e in _assets.entries) e.key: e.value.toJson()},
+        'courses': _courses,
       });
       // Written aside and renamed: a kill mid-write leaves the previous
       // catalogue intact instead of a truncated one.
@@ -421,6 +439,7 @@ class OfflineStore {
   Future<void> wipe() async {
     _items.clear();
     _assets.clear();
+    _courses.clear();
     _questionHome.clear();
     _homeMapped = false;
     _owner = '';
@@ -442,6 +461,49 @@ class OfflineStore {
     _touch();
     await flush();
   }
+
+  // ------------------------------------------------------------
+  // What each course looked like when it was last downloaded
+  // ------------------------------------------------------------
+
+  /// The record of the last full download of one course, or null if it
+  /// has never been downloaded.
+  Map<String, dynamic>? courseRecord(String courseId) =>
+      courseId.isEmpty ? null : _courses[courseId];
+
+  /// Writes the record. [ok] is false when the run did not land
+  /// everything it went for, and a course that did not land completely
+  /// must keep asking to be downloaded rather than sitting there
+  /// looking finished.
+  Future<void> putCourseRecord(
+    String courseId, {
+    required int materials,
+    required int questions,
+    required String stamp,
+    required bool ok,
+    int bytes = 0,
+  }) async {
+    if (courseId.isEmpty) return;
+    _courses[courseId] = {
+      'materials': materials,
+      'questions': questions,
+      'stamp': stamp,
+      'ok': ok,
+      'bytes': bytes,
+      'at': DateTime.now().millisecondsSinceEpoch,
+    };
+    _touch();
+    await flush();
+  }
+
+  Future<void> forgetCourseRecord(String courseId) async {
+    if (_courses.remove(courseId) == null) return;
+    _touch();
+    await flush();
+  }
+
+  /// Every course this phone has downloaded, in no particular order.
+  Iterable<String> get downloadedCourses => _courses.keys;
 
   // ------------------------------------------------------------
   // Paths

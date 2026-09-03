@@ -1246,6 +1246,123 @@ class StudyLevel {
       );
 }
 
+/// One line of the course manifest: how much of a course the server is
+/// publishing right now, and when the newest piece of it was touched.
+///
+/// Two numbers AND a stamp, because neither is enough alone.
+/// `updated_at` cannot see a deletion — unpublish a question and the
+/// newest stamp does not move — and a count cannot see an edit. A
+/// course whose material was corrected and whose question was
+/// withdrawn on the same afternoon shows a change in exactly one of
+/// them, and the student needs to be told either way.
+@immutable
+class CourseStamp {
+  final String id;
+  final String code;
+  final String title;
+  final int materials;
+  final int questions;
+  final String stamp;
+
+  const CourseStamp({
+    required this.id,
+    this.code = '',
+    this.title = '',
+    this.materials = 0,
+    this.questions = 0,
+    this.stamp = '',
+  });
+
+  factory CourseStamp.fromJson(Map<String, dynamic> j) => CourseStamp(
+        id: _str(_pick(j, ['id', 'course_id', 'courseId'])),
+        code: _str(_pick(j, ['code', 'course_code'])),
+        title: _str(j['title']),
+        materials: _int(j['materials'], 0),
+        questions: _int(j['questions'], 0),
+        stamp: _str(j['stamp']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'code': code,
+        'title': title,
+        'materials': materials,
+        'questions': questions,
+        'stamp': stamp,
+      };
+
+  /// Whether what the server has differs from what the phone holds.
+  ///
+  /// A record that is missing, or that recorded an incomplete run, is
+  /// always "different" — a course that only half landed must keep
+  /// asking to be downloaded rather than sitting there looking
+  /// finished.
+  bool differsFrom(Map<String, dynamic>? held) {
+    if (held == null) return true;
+    if (held['ok'] != true) return true;
+    if (_int(held['materials'], -1) != materials) return true;
+    if (_int(held['questions'], -1) != questions) return true;
+    return _str(held['stamp']) != stamp;
+  }
+
+  /// Nothing published yet. Offering a Download button for this would
+  /// be offering to download an empty course.
+  bool get isEmpty => materials == 0 && questions == 0;
+}
+
+/// One page of a course download.
+@immutable
+class CourseBundlePage {
+  final List<StudyMaterial> materials;
+
+  /// Question rows exactly as the backend sent them, kept as maps
+  /// rather than [Question] objects on purpose: the offline store
+  /// merges them field by field with what it already holds, and going
+  /// through a model would drop any field the model does not know
+  /// about — including a key it was holding.
+  final List<Map<String, dynamic>> questions;
+
+  final int materialTotal;
+  final int questionTotal;
+  final int withheld;
+
+  /// False when Tutor Bello has switched the offline question bank off
+  /// for the whole estate. Without this the app would read an empty
+  /// list as "this course has no questions" and say so to the student.
+  final bool questionsIncluded;
+
+  final int? nextOffset;
+
+  const CourseBundlePage({
+    this.materials = const [],
+    this.questions = const [],
+    this.materialTotal = 0,
+    this.questionTotal = 0,
+    this.withheld = 0,
+    this.questionsIncluded = true,
+    this.nextOffset,
+  });
+
+  factory CourseBundlePage.fromJson(Map<String, dynamic> j) {
+    final counts = j['counts'] is Map
+        ? Map<String, dynamic>.from(j['counts'] as Map)
+        : const <String, dynamic>{};
+    return CourseBundlePage(
+      materials: _rows(j['materials'])
+          .map(StudyMaterial.fromJson)
+          .toList(growable: false),
+      questions: _rows(j['questions']),
+      materialTotal: _int(counts['materials'], 0),
+      questionTotal: _int(counts['questions'], 0),
+      withheld: _int(counts['withheld'], 0),
+      questionsIncluded: j['questionsIncluded'] != false,
+      nextOffset: _intOrNull(j['nextOffset']),
+    );
+  }
+
+  bool get isEmpty => materials.isEmpty && questions.isEmpty;
+}
+
 @immutable
 class DailyChallenge {
   final String id;

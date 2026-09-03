@@ -4,6 +4,7 @@ import 'package:belloxdydx/data/backend.dart';
 import 'package:belloxdydx/core/providers.dart';
 import 'package:belloxdydx/features/auth/auth_brand.dart';
 import 'package:belloxdydx/data/models.dart';
+import 'package:belloxdydx/data/offline/course_downloader.dart';
 import 'package:belloxdydx/data/offline/offline_store.dart';
 import 'package:belloxdydx/features/shell/app_drawer.dart';
 import 'package:belloxdydx/main.dart' as app;
@@ -510,6 +511,139 @@ void main() {
         reason: 'a switch Tutor Bello flips must reach the phone with no '
             'new build');
 
+    // ---- the Download button, one whole course ------------------------
+    //
+    // "every course should have its own download materials button and it
+    //  must download all the materials ... Even questions oo, it should
+    //  pull everything ... it must be sure that everything was
+    //  downloaded"
+    //
+    // The background sync above is careful with a student's data bundle
+    // because they did not ask for it. This one they asked for by name,
+    // so it must bring down EVERYTHING, and it must be able to say
+    // whether it did.
+    final course = container.read(contentRepoProvider).courses.first;
+
+    await tester.runAsync(
+        () => container.read(courseStampsProvider.notifier).refresh(force: true));
+    await tester.pump(const Duration(seconds: 1));
+    final stamp = container.read(courseStampsProvider)[course.id];
+    expect(stamp, isNotNull,
+        reason: 'the manifest must know this course');
+    expect(stamp!.questions, greaterThan(0),
+        reason: 'a manifest that reports no questions cannot raise a badge');
+    debugPrint('[journey] manifest ${course.code}: '
+        '${stamp.materials} materials, ${stamp.questions} questions');
+
+    // The answer-key trade, checked at the wire rather than inferred:
+    // questions pinned to a published test must NOT come down, however
+    // offline the phone is.
+    final firstPage = await tester.runAsync(() => container
+        .read(contentRepoProvider)
+        .courseBundle(course.id, part: 'questions', limit: 400));
+    expect(firstPage, isNotNull);
+    expect(firstPage!.withheld, greaterThan(0),
+        reason: 'the mock pins two questions to a published test; a bundle '
+            'that hands them over is the one version of this feature that '
+            'costs Tutor Bello something');
+    expect(firstPage.questions.length, lessThan(firstPage.questionTotal),
+        reason: 'the pinned ones must actually be missing from the payload, '
+            'not merely counted');
+    expect(firstPage.questionsIncluded, isTrue);
+    debugPrint('[journey] bundle: ${firstPage.questions.length} of '
+        '${firstPage.questionTotal} questions, '
+        '${firstPage.withheld} withheld');
+
+    final before = await tester.runAsync(() => store.questions(course.id)) ??
+        const <Map<String, dynamic>>[];
+    final markableBefore = before.where(isMarkableOffline).length;
+
+    await tester.runAsync(() =>
+        container.read(courseDownloadProvider(course.id).notifier).start());
+    await tester.pump(const Duration(seconds: 2));
+
+    final download = container.read(courseDownloadProvider(course.id));
+    debugPrint('[journey] download: ${download.phase.name} · '
+        '${download.label} · ${download.questions} questions · '
+        '${download.materials} files · ${download.assets} pictures · '
+        '${formatBytes(download.bytes)} · ${download.failed} failed');
+    expect(download.phase, CourseDownloadPhase.done,
+        reason: 'A COURSE DOWNLOAD MUST REPORT HONESTLY. '
+            'It said: ${download.label} / ${download.message}');
+    expect(download.held, isTrue);
+    expect(download.updateAvailable, isFalse,
+        reason: 'a course that has just been downloaded whole cannot also '
+            'have an update waiting');
+    expect(download.failed, 0,
+        reason: 'every file it went for must be on the disk — that is what '
+            '"it must be sure that everything was downloaded" means');
+
+    // What is actually on the phone, read off the disk.
+    final after = await tester.runAsync(() => store.questions(course.id)) ??
+        const <Map<String, dynamic>>[];
+    expect(after.length, greaterThanOrEqualTo(firstPage.questions.length),
+        reason: 'THE WHOLE BANK MUST BE ON THE PHONE');
+    final markableAfter = after.where(isMarkableOffline).length;
+    expect(markableAfter, greaterThanOrEqualTo(markableBefore),
+        reason: 'a download must never lose a key it already held');
+    expect(markableAfter, greaterThanOrEqualTo(20),
+        reason: 'a bank the phone cannot MARK is not an offline bank');
+    debugPrint('[journey] on the phone: ${after.length} questions, '
+        '$markableAfter markable (was $markableBefore)');
+
+    // And it survives being read back from a fresh catalogue, which is
+    // what the next launch does.
+    final record = store.courseRecord(course.id);
+    expect(record, isNotNull);
+    expect(record!['ok'], isTrue);
+    expect(record['questions'], stamp.questions,
+        reason: 'the record holds the MANIFEST count, not what was saved — '
+            'they differ by the withheld ones, and storing what was saved '
+            'would leave the badge lit forever');
+
+    // ---- "there's a change in course, download now" -------------------
+    //
+    // Tutor Bello adds a question. Nothing about the phone changes. The
+    // badge has to appear on its own.
+    final published = await tester.runAsync(() async {
+      final client = HttpClient();
+      try {
+        final req = await client.postUrl(Uri.parse('$backend/__test/publish'));
+        req.headers.contentType = ContentType.json;
+        req.write('{"courseId":"${course.id}"}');
+        final res = await req.close();
+        await res.drain<void>();
+        return res.statusCode;
+      } finally {
+        client.close();
+      }
+    });
+    expect(published, 200, reason: 'the test hook must have fired');
+
+    await tester.runAsync(
+        () => container.read(courseStampsProvider.notifier).refresh(force: true));
+    await tester.pump(const Duration(seconds: 1));
+    final stale = container.read(courseDownloadProvider(course.id));
+    expect(stale.updateAvailable, isTrue,
+        reason: 'A QUESTION TUTOR BELLO ADDS MUST RAISE THE BADGE. '
+            'Manifest now: ${container.read(courseStampsProvider)[course.id]?.questions}');
+    expect(stale.held, isTrue,
+        reason: 'an update is a different sentence from a first download');
+    debugPrint('[journey] badge raised: "there is a change in '
+        '${course.code}"');
+
+    // Updating clears it, and only fetches what is missing.
+    await tester.runAsync(() =>
+        container.read(courseDownloadProvider(course.id).notifier).start());
+    await tester.pump(const Duration(seconds: 2));
+    final updated = container.read(courseDownloadProvider(course.id));
+    expect(updated.phase, CourseDownloadPhase.done,
+        reason: 'the update said: ${updated.label} / ${updated.message}');
+    expect(updated.updateAvailable, isFalse,
+        reason: 'a badge that survives the update it asked for is a badge '
+            'nobody will trust twice');
+    debugPrint('[journey] badge cleared after update');
+
     // ---- the server disappears ----------------------------------------
     // Everything above could be explained by a warm cache. This cannot:
     // the backend is killed outright and the app has to stand on its own.
@@ -606,6 +740,22 @@ void main() {
         debugPrint('[journey] offline round: ${session.questions.length} '
             'questions, marked on the device');
       }
+
+      // And the course a student DOWNLOADED opens a round of its own,
+      // by course, with the server gone. This is the sentence the
+      // complaint was about: "the practice questions like it can't work
+      // offline even there's no place to download them".
+      final downloadedRound = await tester.runAsync(() => container
+          .read(assessmentRepoProvider)
+          .startPracticeOrOffline(course.id));
+      expect(downloadedRound, isNotNull,
+          reason: 'A DOWNLOADED COURSE MUST PRACTISE WITH NO SERVER');
+      final downloadedSession = await tester.runAsync(() =>
+          container.read(assessmentRepoProvider).openAttempt(downloadedRound!));
+      expect(downloadedSession, isNotNull);
+      expect(downloadedSession!.questions, isNotEmpty);
+      debugPrint('[journey] downloaded course practised offline: '
+          '${downloadedSession.questions.length} questions');
     }
 
     await store.flush();

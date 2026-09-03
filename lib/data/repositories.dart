@@ -616,6 +616,72 @@ class ContentRepository {
     }
   }
 
+  // ------------------------------------------------------------
+  // Downloading a whole course
+  // ------------------------------------------------------------
+
+  /// How much of each course the server is publishing right now.
+  ///
+  /// The cheapest question the app asks, and the whole of the "there's
+  /// a change in this course, download now" badge. Deliberately not a
+  /// diff: a diff costs the server real work on every app open, and the
+  /// app has to fetch the changed rows anyway.
+  Future<List<CourseStamp>> manifest() async {
+    final r = _b.isDirect
+        ? await _b.rpc('bx_manifest')
+        : await _b.apiGet('/api/mobile/manifest');
+    final rows = r['courses'];
+    if (rows is! List) return const [];
+    return rows
+        .whereType<Map>()
+        .map((e) => CourseStamp.fromJson(Map<String, dynamic>.from(e)))
+        .where((c) => c.id.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  /// One page of one course: materials with their bodies, questions
+  /// with their keys.
+  ///
+  /// [part] is 'all', 'materials' or 'questions'. The downloader walks
+  /// the two halves separately so a course with three materials and
+  /// nine hundred questions does not re-send the materials on every
+  /// page.
+  Future<CourseBundlePage> courseBundle(
+    String courseId, {
+    int offset = 0,
+    int limit = 200,
+    String part = 'all',
+  }) async {
+    final Map<String, dynamic> r;
+    if (_b.isDirect) {
+      r = await _b.rpc('bx_course_bundle', params: {
+        'p_course_id': courseId,
+        'p_offset': offset,
+        'p_limit': limit,
+        'p_part': part,
+      });
+      final err = r['error']?.toString();
+      if (err != null) throw BxError(_bundleMessage(err));
+    } else {
+      r = await _b.apiGet(
+        '/api/mobile/course-bundle?courseId=$courseId&offset=$offset'
+        '&limit=$limit&part=$part',
+      );
+    }
+    // Every storage URL in the payload goes through the shield, so an
+    // image inside a note body or a question resolves the same way it
+    // would have on the path the app is running.
+    return CourseBundlePage.fromJson(
+      _b.shieldDeep(r) as Map<String, dynamic>,
+    );
+  }
+
+  String _bundleMessage(String code) => switch (code) {
+        'not_found' => 'That course is not on your shelf.',
+        'not_activated' => 'Activate your account to download a course.',
+        _ => 'That course could not be downloaded.',
+      };
+
   void _ingest(Map<String, dynamic> r) {
     final rawCourses = r['courses'];
     if (rawCourses is List) {
@@ -854,6 +920,29 @@ class AssessmentRepository {
         'not_found' => 'That test could not be found.',
         _ => 'Could not start. Try again.',
       };
+
+  /// Starts practice, and falls back to the phone's own bank when the
+  /// server cannot be reached.
+  ///
+  /// Only for a TRANSPORT failure. "This course has no questions loaded
+  /// yet" is a real answer from a reachable server and a student needs
+  /// to read it — quietly substituting a different round would hide the
+  /// thing they should be telling Tutor Bello about.
+  Future<String> startPracticeOrOffline(
+    String courseId, {
+    int count = 20,
+  }) async {
+    try {
+      return await startPractice(courseId, count: count);
+    } catch (e) {
+      final code = e is BxError ? e.code : null;
+      if (code != 'offline' && code != 'timeout') rethrow;
+      // The offline attempt's own message is the more useful one here:
+      // "no saved questions yet, download this course" beats "no
+      // internet connection", because the student can act on it.
+      return startOfflinePractice(courseId: courseId, count: count);
+    }
+  }
 
   Future<AttemptSession> openAttempt(String attemptId) async {
     // A round taken with no signal never reaches a server.
@@ -1501,8 +1590,8 @@ class AssessmentRepository {
     }
     if (rows.isEmpty) {
       throw const BxError(
-          'No saved questions yet. Do one round with data and they save '
-          'themselves.');
+          'No saved questions for this course yet. Open the course and tap '
+          'Download — it pulls every question onto this phone.');
     }
 
     // Only questions that can actually be MARKED. A round where every
@@ -1512,8 +1601,9 @@ class AssessmentRepository {
     final markable = rows.where(isMarkableOffline).toList();
     if (markable.isEmpty) {
       throw const BxError(
-          'Your saved questions cannot be marked without data yet. Answer a '
-          'few with your data on and they will be ready offline.');
+          'The questions on this phone cannot be marked without data yet. '
+          'Open the course and tap Download — that brings the answers down '
+          'too.');
     }
     rows = markable;
     rows.shuffle();

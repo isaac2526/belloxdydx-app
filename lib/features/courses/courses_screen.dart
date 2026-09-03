@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/course_downloader.dart';
 import '../../data/repositories.dart';
 import '../../ui/ui.dart';
 import '../shell/app_drawer.dart';
@@ -277,15 +278,19 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
   }
 }
 
-class _CourseCard extends StatelessWidget {
+class _CourseCard extends ConsumerWidget {
   final Course course;
   final String counts;
 
   const _CourseCard({required this.course, required this.counts});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.bx;
+    // Read, not watched into a download: this row only ever REPORTS.
+    // Watching the family here is what puts a live badge on a shelf of
+    // twenty courses without any of them costing a request.
+    final download = ref.watch(courseDownloadProvider(course.id));
     return BxCard(
       onTap: () => context.push(Routes.course(Uri.encodeComponent(course.code))),
       child: Row(
@@ -308,6 +313,10 @@ class _CourseCard extends StatelessWidget {
                 ),
                 const SizedBox(height: BxSpace.xxs),
                 Text(counts, style: BxType.tiny(c.muted)),
+                if (download.held || download.isRunning) ...[
+                  const SizedBox(height: BxSpace.xs),
+                  _offlineChip(download),
+                ],
               ],
             ),
           ),
@@ -315,6 +324,31 @@ class _CourseCard extends StatelessWidget {
           Icon(Icons.chevron_right_rounded, size: 22, color: c.muted),
         ],
       ),
+    );
+  }
+
+  Widget _offlineChip(CourseDownloadState s) {
+    if (s.isRunning) {
+      return BxChip(
+        s.total > 0 ? 'Downloading ${(s.progress * 100).round()}%'
+            : 'Downloading',
+        icon: Icons.downloading_rounded,
+        dense: true,
+      );
+    }
+    if (s.updateAvailable) {
+      return const BxChip(
+        'Change waiting · download now',
+        accent: BxAccent.warning,
+        icon: Icons.sync_problem_rounded,
+        dense: true,
+      );
+    }
+    return const BxChip(
+      'Works offline',
+      accent: BxAccent.success,
+      icon: Icons.offline_pin_rounded,
+      dense: true,
     );
   }
 }

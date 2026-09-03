@@ -30,6 +30,7 @@ class _FakePaths extends PathProviderPlatform
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  courseDownloadRecords();
 
   late Directory docs;
   late _FakePaths paths;
@@ -769,6 +770,138 @@ void main() {
       expect(formatBytes(900), '900 B');
       expect(formatBytes(2048), '2 KB');
       expect(formatBytes(5 * 1024 * 1024), '5.0 MB');
+    });
+  });
+}
+
+/// ============================================================
+/// THE PER-COURSE DOWNLOAD
+///
+/// "every course should have its own download materials button ... it
+///  should say that, there's a change in course, download now"
+///
+/// The badge is one comparison, and getting it wrong in either
+/// direction is bad in a different way. Too eager and every course
+/// nags forever; too shy and a student sits an exam on questions their
+/// phone never fetched. These pin the comparison down.
+/// ============================================================
+void courseDownloadRecords() {
+  group('deciding whether a course has changed', () {
+    const server = CourseStamp(
+      id: 'c1',
+      code: 'CHM 101',
+      materials: 8,
+      questions: 240,
+      stamp: '2026-09-01T10:00:00Z',
+    );
+
+    Map<String, dynamic> held({
+      int materials = 8,
+      int questions = 240,
+      String stamp = '2026-09-01T10:00:00Z',
+      bool ok = true,
+    }) =>
+        {
+          'materials': materials,
+          'questions': questions,
+          'stamp': stamp,
+          'ok': ok,
+        };
+
+    test('a course never downloaded has no update, it has a download', () {
+      expect(server.differsFrom(null), isTrue);
+    });
+
+    test('an exact match is not a change', () {
+      expect(server.differsFrom(held()), isFalse);
+    });
+
+    test('a new question moves the count AND the stamp', () {
+      expect(
+        server.differsFrom(held(questions: 239, stamp: '2026-08-30T09:00:00Z')),
+        isTrue,
+      );
+    });
+
+    test('an EDITED question moves only the stamp', () {
+      // The count is unchanged, which is exactly why a count alone is
+      // not enough: a corrected answer key would never reach the phone.
+      expect(server.differsFrom(held(stamp: '2026-08-30T09:00:00Z')), isTrue);
+    });
+
+    test('a WITHDRAWN question moves only the count', () {
+      // updated_at cannot see a deletion — unpublish a question and the
+      // newest stamp does not move — which is why a stamp alone is not
+      // enough either.
+      expect(server.differsFrom(held(questions: 241)), isTrue);
+    });
+
+    test('a new material moves it too', () {
+      expect(server.differsFrom(held(materials: 7)), isTrue);
+    });
+
+    test('a run that did not finish keeps asking', () {
+      // Everything matches, but the download reported failures. A
+      // half-downloaded course must not sit there looking finished.
+      expect(server.differsFrom(held(ok: false)), isTrue);
+    });
+
+    test('an empty course is not offered as a download', () {
+      const nothing = CourseStamp(id: 'c2');
+      expect(nothing.isEmpty, isTrue);
+      expect(server.isEmpty, isFalse);
+    });
+  });
+
+  group('the record of what landed', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_course_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      final opened = await OfflineStore.open();
+      expect(opened, isNotNull);
+      store = opened!;
+    });
+
+    tearDown(() async {
+      await dir.delete(recursive: true);
+    });
+
+    test('a course with no record has never been downloaded', () {
+      expect(store.courseRecord('c1'), isNull);
+    });
+
+    test('the record survives being read back from disk', () async {
+      await store.putCourseRecord(
+        'c1',
+        materials: 8,
+        questions: 240,
+        stamp: '2026-09-01T10:00:00Z',
+        ok: true,
+        bytes: 12345,
+      );
+      await store.flush();
+
+      final reopened = await OfflineStore.open();
+      expect(reopened, isNotNull);
+      final rec = reopened!.courseRecord('c1');
+      expect(rec, isNotNull,
+          reason: 'a record only in RAM is a badge that comes back on every '
+              'launch');
+      expect(rec!['questions'], 240);
+      expect(rec['ok'], isTrue);
+      expect(rec['bytes'], 12345);
+    });
+
+    test('signing in as somebody else throws the records away', () async {
+      await store.claim('student-1');
+      await store.putCourseRecord('c1',
+          materials: 1, questions: 1, stamp: 's', ok: true);
+      await store.claim('student-2');
+      expect(store.courseRecord('c1'), isNull,
+          reason: "another student's downloads are not this one's to see");
     });
   });
 }
