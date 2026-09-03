@@ -154,6 +154,9 @@ class _Wordmark extends StatelessWidget {
           child: Image.asset(
             'assets/logo.png',
             fit: BoxFit.cover,
+            // Decoded at the size it is drawn, not the 1254x1254 the
+            // file happens to be.
+            cacheWidth: 216,
             errorBuilder: (_, __, ___) =>
                 Icon(Icons.school_rounded, size: 28, color: c.goldDeep),
           ),

@@ -60,6 +60,13 @@ class BxAuthBrand extends StatelessWidget {
           child: Image.asset(
             'assets/logo.png',
             fit: BoxFit.cover,
+            // The asset is 1254x1254. Decoded at full size for a 44- to
+            // 72-pixel plate that is about 6 MB of image cache for
+            // something the size of a thumbnail, on phones that do not
+            // have 6 MB to spare. cacheWidth decodes it at the size it
+            // is actually drawn — three times the logical size, so it
+            // stays sharp on a 3x screen.
+            cacheWidth: (size * 3).round(),
             // A missing asset must still leave a brand-shaped object on
             // the page rather than a broken-image glyph.
             errorBuilder: (_, __, ___) => Container(

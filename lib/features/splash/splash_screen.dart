@@ -52,6 +52,10 @@ class SplashScreen extends ConsumerWidget {
                         width: 96,
                         height: 96,
                         fit: BoxFit.cover,
+                        // The very first image the app decodes, on the
+                        // very first frame. At full size that is 6 MB
+                        // and a stutter before anything has loaded.
+                        cacheWidth: 288,
                         semanticLabel: 'Belloxdydx',
                       ),
                     ),
