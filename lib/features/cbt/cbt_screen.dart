@@ -1,12 +1,9 @@
 import 'dart:async';
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:go_router/go_router.dart';
-import 'package:just_audio/just_audio.dart';
 
 import '../../core/providers.dart';
 import '../../core/router.dart';
@@ -948,7 +945,7 @@ class _CbtScreenState extends ConsumerState<CbtScreen>
                       style: BxType.body(c.muted),
                     )
                   else
-                    HtmlWidget(q.questionHtml,
+                    BxHtml(q.questionHtml,
                         textStyle: BxType.bodyLg(c.ink)),
                   if ((q.questionImageUrl ?? '').isNotEmpty) ...[
                     const SizedBox(height: BxSpace.md),
@@ -956,7 +953,7 @@ class _CbtScreenState extends ConsumerState<CbtScreen>
                   ],
                   if ((q.questionAudioUrl ?? '').isNotEmpty) ...[
                     const SizedBox(height: BxSpace.md),
-                    _AudioRow(
+                    BxAudio(
                         url: q.questionAudioUrl!,
                         label: 'Listen to this question'),
                   ],
@@ -1091,7 +1088,7 @@ class _CbtScreenState extends ConsumerState<CbtScreen>
                   if (o.text.trim().isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 3),
-                      child: HtmlWidget(o.text, textStyle: BxType.body(ink)),
+                      child: BxHtml(o.text, textStyle: BxType.body(ink)),
                     ),
                   if ((o.imageUrl ?? '').isNotEmpty) ...[
                     if (o.text.trim().isNotEmpty)
@@ -1170,7 +1167,7 @@ class _CbtScreenState extends ConsumerState<CbtScreen>
           border: Border.all(color: c.line),
           borderRadius: BorderRadius.circular(BxRadius.sm),
         ),
-        child: CachedNetworkImage(
+        child: BxImage(
           imageUrl: url,
           fit: BoxFit.contain,
           placeholder: (_, __) =>
@@ -1202,109 +1199,3 @@ class _CbtScreenState extends ConsumerState<CbtScreen>
 /// the question down with it.
 /// ============================================================
 
-class _AudioRow extends StatefulWidget {
-  final String url;
-  final String label;
-  const _AudioRow({required this.url, required this.label});
-
-  @override
-  State<_AudioRow> createState() => _AudioRowState();
-}
-
-class _AudioRowState extends State<_AudioRow> {
-  AudioPlayer? _player;
-  StreamSubscription<PlayerState>? _sub;
-  bool _playing = false;
-  bool _busy = false;
-  bool _failed = false;
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    _player?.dispose();
-    super.dispose();
-  }
-
-  Future<void> _toggle() async {
-    if (_busy || _failed) return;
-    setState(() => _busy = true);
-    try {
-      var player = _player;
-      if (player == null) {
-        final created = AudioPlayer();
-        _player = created;
-        player = created;
-        _sub = created.playerStateStream.listen((state) {
-          if (!mounted) return;
-          final done = state.processingState == ProcessingState.completed;
-          setState(() => _playing = state.playing && !done);
-          if (done) {
-            unawaited(created.pause());
-            unawaited(created.seek(Duration.zero));
-          }
-        });
-        await created.setUrl(widget.url);
-      }
-      if (player.playing) {
-        await player.pause();
-      } else {
-        // play() only completes when the clip ends, so it is not awaited.
-        unawaited(player.play());
-      }
-      if (!mounted) return;
-      setState(() => _busy = false);
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _failed = true;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.bx;
-    return BxScaleTap(
-      onTap: _failed ? null : _toggle,
-      borderRadius: BorderRadius.circular(BxRadius.sm),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-            horizontal: BxSpace.sm, vertical: BxSpace.xs),
-        decoration: BoxDecoration(
-          color: c.surfaceAlt,
-          borderRadius: BorderRadius.circular(BxRadius.sm),
-          border: Border.all(color: c.line),
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 22,
-              height: 22,
-              child: _busy
-                  ? CircularProgressIndicator(strokeWidth: 2, color: c.gold)
-                  : Icon(
-                      _failed
-                          ? Icons.volume_off_rounded
-                          : (_playing
-                              ? Icons.pause_circle_filled_rounded
-                              : Icons.play_circle_fill_rounded),
-                      size: 22,
-                      color: _failed ? c.muted : c.goldDeep,
-                    ),
-            ),
-            const SizedBox(width: BxSpace.xs),
-            Expanded(
-              child: Text(
-                _failed ? 'This audio would not play here.' : widget.label,
-                style: BxType.smallStrong(_failed ? c.muted : c.ink),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}

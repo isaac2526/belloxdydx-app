@@ -1,18 +1,18 @@
 import 'dart:async';
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
-import 'package:just_audio/just_audio.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/local_store.dart';
+import '../../data/backend.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart';
+import '../../data/repositories.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
 import 'viewer_screen.dart';
@@ -116,7 +116,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
   }
 
   Future<void> _checkVault() async {
-    final ok = await ref.read(localStoreProvider).vaultSupported;
+    final ok = ref.read(offlineStoreProvider) != null;
     if (mounted) setState(() => _vaultOk = ok);
   }
 
@@ -197,33 +197,90 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
 
     setState(() => _busy = true);
     try {
-      final store = ref.read(localStoreProvider);
+      final store = ref.read(offlineStoreProvider);
       final repo = ref.read(contentRepoProvider);
+      if (store == null) {
+        if (!mounted) return;
+        bxToast(context, 'This device cannot hold offline copies.', error: true);
+        return;
+      }
 
       // A note travels as its body. If a PDF is clipped to it, the bytes
       // ride along too, so the whole thing opens with no network at all.
-      final pdf = _firstPdf(m);
-      var entry = pdf == null
-          ? null
-          : await _savePdf(store, repo.fileUrl(pdf.url), m, code);
-      entry ??= await store.saveHtmlToVault(
-        materialId: m.id,
-        title: m.title,
-        courseCode: code,
-        html: m.contentHtml,
-      );
+      // Its pictures and voice notes come as well — a note whose diagram
+      // is missing is half-saved, and half-saved is what made the vault
+      // feel like a lie.
+      String? failure;
+      try {
+        final pdf = _firstPdf(m);
+        final bytes =
+            pdf == null ? null : await fetchDocumentBytes(repo.fileUrl(pdf.url));
+        if (bytes != null) {
+          await store.putDocument(
+            id: m.id,
+            title: m.title,
+            courseCode: code,
+            courseId: m.courseId,
+            kind: 'note',
+            bytes: bytes,
+            extension: 'pdf',
+            sig: m.updatedAt?.toIso8601String() ?? m.url,
+            html: m.contentHtml,
+          );
+        } else {
+          await store.putNote(
+            id: m.id,
+            title: m.title,
+            courseCode: code,
+            courseId: m.courseId,
+            html: m.contentHtml,
+            sig: m.updatedAt?.toIso8601String() ?? m.url,
+            pinned: true,
+          );
+        }
+        await _keepMedia(store, m, repo);
+        await store.flush();
+      } catch (e) {
+        // Only a genuine ENOSPC says "free up space". This used to say
+        // it for every failure, on any phone, however empty.
+        failure = ref.read(backendProvider).faultFor(e).message;
+      }
 
       ref.read(vaultProvider.notifier).refresh();
       if (!mounted) return;
       bxToast(
         context,
-        entry == null
-            ? 'Could not save this one. Free up a little space and try again.'
-            : 'Saved. This note now opens with no data.',
-        error: entry == null,
+        failure ?? 'Saved. This note now opens with no data.',
+        error: failure != null,
       );
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Pulls down every picture and voice note the body points at.
+  Future<void> _keepMedia(
+    OfflineStore store,
+    StudyMaterial m,
+    ContentRepository repo,
+  ) async {
+    final urls = <String>{
+      for (final match in kEmbeddedStorageUrl.allMatches(m.contentHtml))
+        match.group(0)!,
+      for (final a in m.attachments)
+        if (a.kind == 'image' || a.kind == 'audio') a.url,
+    };
+    for (final raw in urls) {
+      final url = repo.fileUrl(raw);
+      if (url.isEmpty || store.hasAsset(url)) continue;
+      try {
+        final bytes = await fetchDocumentBytes(url);
+        if (bytes != null && bytes.isNotEmpty) {
+          await store.putAsset(url, bytes);
+        }
+      } catch (_) {
+        // One missing picture is not a reason to fail the save.
+      }
     }
   }
 
@@ -234,24 +291,6 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     return null;
   }
 
-  Future<VaultEntry?> _savePdf(
-    LocalStore store,
-    String url,
-    StudyMaterial m,
-    String code,
-  ) async {
-    final bytes = await fetchDocumentBytes(url);
-    if (bytes == null) return null;
-    return store.saveToVault(
-      materialId: m.id,
-      title: m.title,
-      courseCode: code,
-      kind: 'note',
-      bytes: bytes,
-      extension: 'pdf',
-      html: m.contentHtml,
-    );
-  }
 
   // ----------------------------------------------------------
   // Build
@@ -262,7 +301,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final c = context.bx;
     final async = ref.watch(materialProvider(widget.id));
     final activated = ref.watch(profileProvider).isActivated;
-    final saved = ref.watch(vaultProvider).any((v) => v.materialId == widget.id);
+    final saved = ref.watch(vaultProvider).any((v) => v.id == widget.id);
     final material = async.valueOrNull;
 
     final code = material == null
@@ -437,7 +476,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
             children: [
               Text(m.title, style: BxType.h2(ink)),
               const SizedBox(height: BxSpace.md),
-              HtmlWidget(
+              BxHtml(
                 m.contentHtml,
                 textStyle: _readerStyle(ink),
                 onTapUrl: _openLink,
@@ -493,7 +532,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                     top: Radius.circular(BxRadius.md)),
                 child: Stack(
                   children: [
-                    CachedNetworkImage(
+                    BxImage(
                       imageUrl: url,
                       width: double.infinity,
                       fit: BoxFit.cover,
@@ -520,7 +559,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
         );
 
       case 'audio':
-        return _AudioRow(title: a.title, url: url);
+        return BxAudio(url: url, label: a.title);
 
       case 'pdf':
         return BxListRow(
@@ -809,180 +848,3 @@ class _ReaderSheetState extends State<_ReaderSheet> {
 /// A compact player for an audio clip clipped to a note. Audio is polish,
 /// not the lesson, so every call is guarded: if the platform refuses, the
 /// row quietly becomes a link that opens elsewhere.
-class _AudioRow extends StatefulWidget {
-  final String title;
-  final String url;
-  const _AudioRow({required this.title, required this.url});
-
-  @override
-  State<_AudioRow> createState() => _AudioRowState();
-}
-
-class _AudioRowState extends State<_AudioRow> {
-  AudioPlayer? _player;
-  StreamSubscription<PlayerState>? _stateSub;
-  StreamSubscription<Duration>? _posSub;
-  StreamSubscription<Duration?>? _durSub;
-
-  bool _ready = false;
-  bool _failed = false;
-  bool _playing = false;
-  Duration _position = Duration.zero;
-  Duration? _duration;
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_load());
-  }
-
-  @override
-  void dispose() {
-    _stateSub?.cancel();
-    _posSub?.cancel();
-    _durSub?.cancel();
-    unawaited(_player?.dispose());
-    super.dispose();
-  }
-
-  Future<void> _load() async {
-    if (widget.url.isEmpty) {
-      if (mounted) setState(() => _failed = true);
-      return;
-    }
-    try {
-      final p = AudioPlayer();
-      _player = p;
-      _stateSub = p.playerStateStream.listen((s) {
-        if (mounted) setState(() => _playing = s.playing);
-      });
-      _posSub = p.positionStream.listen((d) {
-        if (mounted) setState(() => _position = d);
-      });
-      _durSub = p.durationStream.listen((d) {
-        if (mounted) setState(() => _duration = d);
-      });
-      await p.setUrl(widget.url);
-      if (mounted) setState(() => _ready = true);
-    } catch (_) {
-      if (mounted) setState(() => _failed = true);
-    }
-  }
-
-  Future<void> _toggle() async {
-    final p = _player;
-    if (p == null) return;
-    try {
-      if (p.playing) {
-        await p.pause();
-      } else {
-        if (_duration != null && _position >= _duration!) {
-          await p.seek(Duration.zero);
-        }
-        await p.play();
-      }
-    } catch (_) {
-      if (mounted) setState(() => _failed = true);
-    }
-  }
-
-  /// The last resort when the platform will not play the clip in-app.
-  Future<void> _openExternally() async {
-    final uri = Uri.tryParse(widget.url);
-    var ok = false;
-    if (uri != null) {
-      try {
-        ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      } catch (_) {
-        ok = false;
-      }
-    }
-    if (!mounted || ok) return;
-    bxToast(context, 'Nothing on this phone could play it.', error: true);
-  }
-
-  static String _clock(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$m:$s';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.bx;
-
-    if (_failed) {
-      return BxListRow(
-        title: widget.title,
-        subtitle: 'Audio · opens outside the app',
-        leading: Icon(Icons.headphones_rounded, color: c.muted),
-        trailing: Icon(Icons.open_in_new_rounded, size: 18, color: c.muted),
-        onTap: _openExternally,
-      );
-    }
-
-    final total = _duration;
-    final progress = (total == null || total.inMilliseconds == 0)
-        ? 0.0
-        : (_position.inMilliseconds / total.inMilliseconds)
-            .clamp(0.0, 1.0)
-            .toDouble();
-
-    return BxCard(
-      padding: const EdgeInsets.symmetric(
-          horizontal: BxSpace.sm, vertical: BxSpace.sm),
-      child: Row(
-        children: [
-          BxScaleTap(
-            scale: 0.9,
-            onTap: _ready ? _toggle : null,
-            child: Container(
-              width: 38,
-              height: 38,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: c.goldTint,
-                shape: BoxShape.circle,
-                border: Border.all(color: c.gold.withValues(alpha: 0.42)),
-              ),
-              child: _ready
-                  ? Icon(
-                      _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                      size: 20,
-                      color: c.goldDeep,
-                    )
-                  : SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: c.gold),
-                    ),
-            ),
-          ),
-          const SizedBox(width: BxSpace.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(widget.title,
-                    style: BxType.smallStrong(c.ink),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 6),
-                BxProgressBar(progress, height: 4),
-              ],
-            ),
-          ),
-          const SizedBox(width: BxSpace.sm),
-          Text(
-            total == null
-                ? _clock(_position)
-                : '${_clock(_position)} / ${_clock(total)}',
-            style: BxType.mono(c.muted, size: 11.5),
-          ),
-        ],
-      ),
-    );
-  }
-}

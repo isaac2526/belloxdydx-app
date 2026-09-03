@@ -212,7 +212,7 @@ class LocalStore {
     } catch (e) {
       // Deliberately rethrown. Swallowing this into a null is what
       // made every failure look like a full disk to the caller.
-      debugPrint('[vault] save failed: \$e');
+      debugPrint('[vault] save failed: $e');
       rethrow;
     }
   }
@@ -245,7 +245,7 @@ class LocalStore {
     } catch (e) {
       // Deliberately rethrown. Swallowing this into a null is what
       // made every failure look like a full disk to the caller.
-      debugPrint('[vault] save failed: \$e');
+      debugPrint('[vault] save failed: $e');
       rethrow;
     }
   }
@@ -381,6 +381,11 @@ abstract final class BxKeys {
   static const readerSize = 'bx_reader_size';
   static const dailyAnswerPrefix = 'bx_daily_';
   static const installPinged = 'bx_install_pinged';
+  static const autoDownloadDocs = 'bx_auto_docs';
+  static const legacyVaultIndex = 'bx_vault_index_v2';
+  static const screenshotPolicy = 'bx_screens';
+  static const deviceTrusted = 'bx_device_trusted';
+  static const lockAfterMs = 'bx_lock_after';
   static const cachedProfile = 'profile';
   static const cachedContent = 'content';
   static const cachedDashboard = 'dashboard';

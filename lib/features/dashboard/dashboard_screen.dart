@@ -1,10 +1,8 @@
 import 'dart:async';
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
@@ -556,8 +554,8 @@ class _DailyCardState extends ConsumerState<_DailyCard> {
           ),
           const SizedBox(height: BxSpace.md),
           if (q.questionHtml.trim().isNotEmpty)
-            HtmlWidget(q.questionHtml, textStyle: BxType.body(c.ink)),
-          if (q.questionImageUrl != null) ...[
+            BxHtml(q.questionHtml, textStyle: BxType.body(c.ink)),
+          if ((q.questionImageUrl ?? '').isNotEmpty) ...[
             const SizedBox(height: BxSpace.sm),
             _RemoteImage(q.questionImageUrl!),
           ],
@@ -589,9 +587,9 @@ class _DailyCardState extends ConsumerState<_DailyCard> {
               const BxEyebrow('Why'),
               const SizedBox(height: BxSpace.xs),
               if ((q.explanationHtml ?? '').trim().isNotEmpty)
-                HtmlWidget(q.explanationHtml!,
+                BxHtml(q.explanationHtml!,
                     textStyle: BxType.small(c.inkSoft)),
-              if (q.explanationImageUrl != null) ...[
+              if ((q.explanationImageUrl ?? '').isNotEmpty) ...[
                 const SizedBox(height: BxSpace.sm),
                 _RemoteImage(q.explanationImageUrl!),
               ],
@@ -694,8 +692,8 @@ class _OptionRow extends StatelessWidget {
                   // Options are stored as HTML like the question itself,
                   // so a unit written &middot; must not reach the screen
                   // spelled out.
-                  HtmlWidget(option.text, textStyle: BxType.body(c.ink)),
-                if (option.imageUrl != null) ...[
+                  BxHtml(option.text, textStyle: BxType.body(c.ink)),
+                if ((option.imageUrl ?? '').isNotEmpty) ...[
                   if (option.text.isNotEmpty) const SizedBox(height: BxSpace.xs),
                   _RemoteImage(option.imageUrl!, height: 120),
                 ],
@@ -723,7 +721,7 @@ class _RemoteImage extends StatelessWidget {
     final c = context.bx;
     return ClipRRect(
       borderRadius: BorderRadius.circular(BxRadius.sm),
-      child: CachedNetworkImage(
+      child: BxImage(
         imageUrl: url,
         height: height,
         fit: BoxFit.contain,

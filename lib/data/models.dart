@@ -37,6 +37,18 @@ bool _bool(dynamic v, [bool fallback = false]) {
   return fallback;
 }
 
+/// Nullable variant. `bool?` fields used to be filled by a plain
+/// `j['is_correct']`, which is an implicit downcast from dynamic: fine
+/// on the web, where dart2js drops the check in release, and a throw on
+/// Android and iOS the moment a backend sends the flag as 0/1 or "t".
+bool? _boolOrNull(dynamic v) {
+  if (v == null) return null;
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  if (v is String) return v == 'true' || v == 't' || v == '1';
+  return null;
+}
+
 String _str(dynamic v, [String fallback = '']) =>
     v == null ? fallback : v.toString();
 
@@ -369,8 +381,8 @@ class Question {
 
   bool get hasExplanation =>
       (explanationHtml ?? '').trim().isNotEmpty ||
-      explanationImageUrl != null ||
-      explanationAudioUrl != null;
+      (explanationImageUrl ?? '').isNotEmpty ||
+      (explanationAudioUrl ?? '').isNotEmpty;
 
   factory Question.fromJson(Map<String, dynamic> j) => Question(
         id: _str(j['id']),
@@ -662,11 +674,48 @@ class GivenAnswer {
   factory GivenAnswer.fromJson(Map<String, dynamic> j) => GivenAnswer(
         choice: _str(j['choice']),
         answerText: _pick(j, ['answer_text', 'answerText'])?.toString(),
-        isCorrect: j['is_correct'] ?? j['isCorrect'] ?? j['correct'],
+        isCorrect: _boolOrNull(
+            j['is_correct'] ?? j['isCorrect'] ?? j['correct']),
       );
 }
 
 /// What the server returns after a practice answer is committed.
+/// Attempt ids the app minted itself, for a round taken with no signal.
+const String kLocalAttemptPrefix = 'offline-';
+
+bool isLocalAttempt(String id) => id.startsWith(kLocalAttemptPrefix);
+
+/// The server's own comparison, transcribed.
+///
+/// `normalizeShortAnswer` in the website's src/lib/attempts.ts:114 —
+/// lowercase, collapse runs of whitespace, strip surrounding
+/// punctuation. Marking offline has to agree with marking online to the
+/// letter, or the same typed answer is right on Wi-Fi and wrong on the
+/// bus, and a student loses faith in the whole thing.
+String normalizeShortAnswer(String v) => v
+    .toLowerCase()
+    .replaceAll(RegExp(r'\s+'), ' ')
+    .replaceAll(RegExp('^[\\s.,;:!?\'"()-]+|[\\s.,;:!?\'"()-]+\$'), '')
+    .trim();
+
+/// Marks one answer on the device. Mirrors `isAnswerCorrect`
+/// (src/lib/attempts.ts:122): a typed answer matches any of the
+/// pipe-separated accepted spellings; everything else compares the key.
+bool gradeLocally(Question q, {String choice = '', String answerText = ''}) {
+  if (q.type == QuestionType.shortAnswer) {
+    final given = normalizeShortAnswer(answerText);
+    if (given.isEmpty) return false;
+    return (q.answerText ?? '')
+        .split('|')
+        .map(normalizeShortAnswer)
+        .where((a) => a.isNotEmpty)
+        .contains(given);
+  }
+  final key = q.correctKey ?? '';
+  if (key.isEmpty) return false;
+  return choice == key;
+}
+
 @immutable
 class AnswerVerdict {
   final bool correct;

@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/config.dart';
 import 'failures.dart';
+import 'offline/offline_store.dart';
 import 'models.dart';
 
 /// ============================================================
@@ -262,12 +263,19 @@ class Backend {
     // page, and Dart's HttpClient throws "No host specified in URI" —
     // which is why every CBT, millionaire and practice-explanation
     // image failed. Give it an origin whoever sent it.
-    if (raw.startsWith('/')) return '${BxConfig.siteUrl}$raw';
+    final absolute = raw.startsWith('/') ? '${BxConfig.siteUrl}$raw' : raw;
 
-    if (!raw.contains('/storage/v1/object/public/')) return raw;
-    if (isDirect) return raw;
-    final b64 = base64Url.encode(utf8.encode(raw)).replaceAll('=', '');
-    return '${BxConfig.siteUrl}/api/file?u=$b64';
+    // …then unwrap it. /api/file is a 302 to the public storage URL and
+    // nothing else: it carries no bytes, holds no secret, and checks no
+    // session. Going through it costs one Vercel invocation and one
+    // extra round trip per picture, and it is the reason media clients
+    // struggled — ExoPlayer and AVPlayer have to follow a redirect
+    // before they can even ask for a byte range. The app talks to
+    // storage directly. Supabase serves exactly the same bytes either
+    // way, so this is pure saving.
+    final direct = canonicalAssetUrl(absolute);
+    if (direct.contains('/storage/v1/object/public/')) return direct;
+    return absolute;
   }
 
   /// Walks a decoded payload and rewrites every storage URL it finds.

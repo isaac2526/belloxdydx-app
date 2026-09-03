@@ -8,6 +8,7 @@ import 'core/providers.dart';
 import 'core/router.dart';
 import 'core/theme/app_theme.dart';
 import 'data/local_store.dart';
+import 'data/offline/bootstrap.dart';
 
 /// ============================================================
 /// BELLOXDYDX
@@ -29,7 +30,12 @@ Future<void> main() async {
     DeviceOrientation.portraitDown,
   ]);
 
-  await LocalStore.init();
+  final prefs = await LocalStore.init();
+
+  // Opened before the first frame on purpose: the hook that lets a
+  // picture inside a note body be drawn from disk is synchronous, so the
+  // catalogue has to already be in memory when the first widget builds.
+  await openOfflineStore(prefs);
 
   try {
     await Supabase.initialize(

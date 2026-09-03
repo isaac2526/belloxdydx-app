@@ -1,8 +1,6 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/providers.dart';
@@ -324,7 +322,7 @@ class _MistakesScreenState extends ConsumerState<MistakesScreen> {
                     style: BxType.body(c.muted),
                   )
                 else
-                  HtmlWidget(q.questionHtml, textStyle: BxType.bodyLg(c.ink)),
+                  BxHtml(q.questionHtml, textStyle: BxType.bodyLg(c.ink)),
                 if ((q.questionImageUrl ?? '').isNotEmpty) ...[
                   const SizedBox(height: BxSpace.md),
                   _image(q.questionImageUrl!),
@@ -457,7 +455,7 @@ class _MistakesScreenState extends ConsumerState<MistakesScreen> {
                   if (o.text.trim().isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 3),
-                      child: HtmlWidget(o.text, textStyle: BxType.body(ink)),
+                      child: BxHtml(o.text, textStyle: BxType.body(ink)),
                     ),
                   if ((o.imageUrl ?? '').isNotEmpty) ...[
                     if (o.text.trim().isNotEmpty)
@@ -509,7 +507,7 @@ class _MistakesScreenState extends ConsumerState<MistakesScreen> {
             if (q.hasExplanation) ...[
               const SizedBox(height: BxSpace.sm),
               if ((q.explanationHtml ?? '').trim().isNotEmpty)
-                HtmlWidget(q.explanationHtml!,
+                BxHtml(q.explanationHtml!,
                     textStyle: BxType.body(c.inkSoft)),
               if ((q.explanationImageUrl ?? '').isNotEmpty) ...[
                 const SizedBox(height: BxSpace.sm),
@@ -610,7 +608,7 @@ class _MistakesScreenState extends ConsumerState<MistakesScreen> {
           border: Border.all(color: c.line),
           borderRadius: BorderRadius.circular(BxRadius.sm),
         ),
-        child: CachedNetworkImage(
+        child: BxImage(
           imageUrl: url,
           fit: BoxFit.contain,
           placeholder: (_, __) =>

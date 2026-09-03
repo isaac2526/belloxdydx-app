@@ -8,7 +8,6 @@ import 'package:pdfx/pdfx.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-import '../../data/local_store.dart';
 
 import '../../core/providers.dart';
 import '../../core/router.dart';
@@ -122,7 +121,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   /// Decides what this document is and gets it in hand — once per
   /// material. A vaulted copy always wins: it is instant and free.
   Future<void> _prepare(StudyMaterial m) async {
-    final store = ref.read(localStoreProvider);
+    final store = ref.read(offlineStoreProvider);
     final url = _sourceUrl(m);
 
     // A slide or past question that was typed instead of uploaded has no
@@ -139,13 +138,11 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     var offline = false;
     String? error;
 
-    final entry = store.vaultEntry(widget.id);
-    if (entry != null &&
-        entry.filePath.isNotEmpty &&
-        await store.vaultFileExists(widget.id)) {
-      final local = _kindFromExtension(documentExtension(entry.filePath));
+    final saved = await store?.documentPath(widget.id);
+    if (saved != null) {
+      final local = _kindFromExtension(documentExtension(saved));
       if (local == _DocKind.pdf || (local == null && kind == _DocKind.pdf)) {
-        path = entry.filePath;
+        path = saved;
         offline = true;
         kind = _DocKind.pdf;
       }
@@ -183,8 +180,8 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      final store = ref.read(localStoreProvider);
-      if (!await store.vaultSupported) {
+      final store = ref.read(offlineStoreProvider);
+      if (store == null) {
         if (!mounted) return;
         bxToast(context, 'This device cannot hold offline copies.',
             error: true);
@@ -207,20 +204,19 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       // returned null on any exception — so a student on a brand new
       // 256 GB phone was told to clear room for an error that had
       // nothing to do with storage. Only a genuine ENOSPC says that now.
-      VaultEntry? entry;
       String? failure;
       try {
-        entry = await store.saveToVault(
-          materialId: m.id,
+        await store.putDocument(
+          id: m.id,
           title: m.title,
           courseCode: code,
+          courseId: m.courseId,
           kind: m.kind.name,
           bytes: bytes,
           extension: ext,
+          sig: m.updatedAt?.toIso8601String() ?? m.url,
         );
-        if (entry == null) {
-          failure = 'This device will not let the app keep offline copies.';
-        }
+        await store.flush();
       } catch (e) {
         failure = ref.read(backendProvider).faultFor(e).message;
       }
@@ -260,7 +256,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     final c = context.bx;
     final async = ref.watch(materialProvider(widget.id));
     final activated = ref.watch(profileProvider).isActivated;
-    final saved = ref.watch(vaultProvider).any((v) => v.materialId == widget.id);
+    final saved = ref.watch(vaultProvider).any((v) => v.id == widget.id);
     final material = async.valueOrNull;
 
     final code = material == null

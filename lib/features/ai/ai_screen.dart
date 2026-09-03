@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/providers.dart';
@@ -430,7 +429,7 @@ class _Bubble extends StatelessWidget {
     final ink = message.isUser ? c.ink : c.inkSoft;
     return _BubbleShell(
       isUser: message.isUser,
-      child: HtmlWidget(
+      child: BxHtml(
         _toHtml(message.text),
         textStyle: BxType.body(ink),
       ),

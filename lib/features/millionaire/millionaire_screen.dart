@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/html_text.dart';
@@ -978,7 +976,7 @@ class _HotSeatState extends ConsumerState<_HotSeat>
               style: BxType.body(c.muted),
             )
           else
-            HtmlWidget(q.questionHtml, textStyle: BxType.bodyLg(c.ink)),
+            BxHtml(q.questionHtml, textStyle: BxType.bodyLg(c.ink)),
           if ((q.questionImageUrl ?? '').isNotEmpty) ...[
             const SizedBox(height: BxSpace.sm),
             _image(q.questionImageUrl!),
@@ -1000,7 +998,7 @@ class _HotSeatState extends ConsumerState<_HotSeat>
           border: Border.all(color: c.line),
           borderRadius: BorderRadius.circular(BxRadius.sm),
         ),
-        child: CachedNetworkImage(
+        child: BxImage(
           imageUrl: url,
           fit: BoxFit.contain,
           placeholder: (_, __) =>
@@ -1601,7 +1599,7 @@ class _Hexagon extends StatelessWidget {
                   if (hasImage) ...[
                     ClipRRect(
                       borderRadius: BorderRadius.circular(BxRadius.xs),
-                      child: CachedNetworkImage(
+                      child: BxImage(
                         imageUrl: imageUrl!,
                         width: 38,
                         height: 38,

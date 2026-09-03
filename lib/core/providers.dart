@@ -9,6 +9,8 @@ import 'native_bridge.dart';
 import '../data/backend.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
+import '../data/offline/offline_store.dart';
+import '../data/offline/sync_engine.dart';
 import '../data/repositories.dart';
 
 /// ============================================================
@@ -36,8 +38,55 @@ final contentRepoProvider = Provider<ContentRepository>(
 );
 
 final assessmentRepoProvider = Provider<AssessmentRepository>(
-  (ref) => AssessmentRepository(ref.watch(backendProvider)),
+  (ref) => AssessmentRepository(ref.watch(backendProvider), Offline.store),
 );
+
+/// The offline root. Opened once in main() before runApp, so a widget
+/// can ask it a question during build without awaiting anything.
+final offlineStoreProvider = Provider<OfflineStore?>((_) => Offline.store);
+
+final syncEngineProvider = Provider<SyncEngine>((ref) {
+  final engine = SyncEngine(
+    backend: ref.watch(backendProvider),
+    content: ref.watch(contentRepoProvider),
+    store: Offline.store,
+  );
+  engine.autoDocuments =
+      ref.watch(localStoreProvider).getBool(BxKeys.autoDownloadDocs);
+  ref.onDispose(() => unawaited(engine.dispose()));
+  return engine;
+});
+
+/// What the Vault screen and the dashboard banner watch.
+final syncStatusProvider = StateNotifierProvider<SyncStatusNotifier, SyncStatus>(
+  (ref) => SyncStatusNotifier(ref.watch(syncEngineProvider)),
+);
+
+class SyncStatusNotifier extends StateNotifier<SyncStatus> {
+  SyncStatusNotifier(this._engine) : super(_engine.status) {
+    _sub = _engine.updates.listen((s) {
+      if (mounted) state = s;
+    });
+  }
+
+  final SyncEngine _engine;
+  StreamSubscription<SyncStatus>? _sub;
+
+  Future<void> start({bool now = false, String? level}) => _engine.run(
+        minInterval: now ? Duration.zero : const Duration(hours: 6),
+        level: level,
+      );
+
+  void cancel() => _engine.cancel();
+
+  set autoDocuments(bool v) => _engine.autoDocuments = v;
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+}
 
 final engageRepoProvider = Provider<EngageRepository>(
   (ref) =>
@@ -90,6 +139,27 @@ class SessionNotifier extends StateNotifier<SessionState> {
 
     state = p.isFrozen ? SessionState.frozen(p) : SessionState.active(p);
     _listenForSupersede();
+    unawaited(_prepareOffline(p));
+  }
+
+  /// Ties the offline root to this student and starts filling it.
+  ///
+  /// Deliberately not awaited and deliberately after the state write:
+  /// the student is already inside the app while their notes come down
+  /// behind them. Nothing here can fail a sign-in.
+  Future<void> _prepareOffline(Profile p) async {
+    try {
+      final store = Offline.store;
+      if (store == null) return;
+      // Somebody else's downloads are not this student's to see.
+      await store.claim(p.id);
+      if (p.isFrozen) return;
+      await _ref
+          .read(syncStatusProvider.notifier)
+          .start(level: p.currentLevel);
+    } catch (e) {
+      debugPrint('[offline] first sync skipped: $e');
+    }
   }
 
   /// Watches for another device taking the session.
@@ -317,30 +387,83 @@ final backendModeProvider = Provider<BackendMode>(
 // Vault
 // ------------------------------------------------------------
 
-class VaultNotifier extends StateNotifier<List<VaultEntry>> {
-  VaultNotifier(this._store) : super(_store.vaultItems()) {
+/// The Offline Vault's contents.
+///
+/// It reads the offline root rather than the old SharedPreferences blob.
+/// The blob held absolute paths, which is a real defect on iOS — the app
+/// container is a UUID that changes on restore — and it was also the
+/// reason the vault could only ever contain whole documents a student
+/// had remembered to tap Save on. It now contains everything the sync
+/// put there too.
+class VaultNotifier extends StateNotifier<List<OfflineItem>> {
+  VaultNotifier(this._store) : super(_store?.readable ?? const []) {
     _reconcile();
   }
 
-  final LocalStore _store;
+  final OfflineStore? _store;
 
   Future<void> _reconcile() async {
-    await _store.reconcileVault();
-    if (mounted) state = _store.vaultItems();
+    final store = _store;
+    if (store == null) return;
+    await store.reconcile();
+    if (mounted) state = store.readable;
   }
 
-  void refresh() => state = _store.vaultItems();
+  void refresh() {
+    final store = _store;
+    if (store != null && mounted) state = store.readable;
+  }
 
-  bool isSaved(String materialId) =>
-      state.any((v) => v.materialId == materialId);
+  bool isSaved(String materialId) => state.any((v) => v.id == materialId);
 
   Future<void> remove(String materialId) async {
-    await _store.removeFromVault(materialId);
+    await _store?.removeItem(materialId);
     refresh();
   }
 }
 
-final vaultProvider =
-    StateNotifierProvider<VaultNotifier, List<VaultEntry>>(
-  (ref) => VaultNotifier(ref.watch(localStoreProvider)),
+final vaultProvider = StateNotifierProvider<VaultNotifier, List<OfflineItem>>(
+  (ref) => VaultNotifier(ref.watch(offlineStoreProvider)),
 );
+
+/// How much is on the phone, in one line for the Vault header.
+final offlineSummaryProvider = FutureProvider.autoDispose<OfflineSummary>(
+  (ref) async {
+    // Recomputed whenever the catalogue or a sync changes.
+    ref.watch(vaultProvider);
+    ref.watch(syncStatusProvider);
+    final store = ref.watch(offlineStoreProvider);
+    if (store == null) return const OfflineSummary();
+    final questions = await store.allQuestions();
+    return OfflineSummary(
+      items: store.readable.length,
+      questions: questions.length,
+      pictures: store.assetCount,
+      bytes: store.totalBytes,
+      syncedAtMs: store.syncedAtMs,
+    );
+  },
+);
+
+@immutable
+class OfflineSummary {
+  final int items;
+  final int questions;
+  final int pictures;
+  final int bytes;
+  final int syncedAtMs;
+
+  const OfflineSummary({
+    this.items = 0,
+    this.questions = 0,
+    this.pictures = 0,
+    this.bytes = 0,
+    this.syncedAtMs = 0,
+  });
+
+  bool get isEmpty => items == 0 && questions == 0;
+
+  DateTime? get syncedAt => syncedAtMs == 0
+      ? null
+      : DateTime.fromMillisecondsSinceEpoch(syncedAtMs);
+}

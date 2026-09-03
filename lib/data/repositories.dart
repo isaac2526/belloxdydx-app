@@ -7,6 +7,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../core/config.dart';
 import 'backend.dart';
 import 'local_store.dart';
+import 'offline/offline_store.dart';
 import 'models.dart';
 
 /// ============================================================
@@ -508,31 +509,61 @@ class ContentRepository {
   /// Full material including the note body. Activation is enforced by
   /// the database policy on the direct path, and by the route on legacy.
   Future<StudyMaterial> material(String id) async {
-    // An offline copy always wins — it is instant and costs nothing.
-    final offlineHtml = await _store.readVaultHtml(id);
+    final offline = Offline.store;
+    final savedHtml = await offline?.readNote(id);
 
     try {
+      final StudyMaterial m;
       if (_b.isDirect) {
         final r = await _b.rpc('bx_material', params: {'p_id': id});
         if (r['error'] == 'not_activated') throw BxError.notActivated;
         final raw = r['material'] is Map
             ? Map<String, dynamic>.from(r['material'])
             : r;
-        return StudyMaterial.fromJson(_b.shieldDeep(raw));
+        m = StudyMaterial.fromJson(_b.shieldDeep(raw));
+      } else {
+        final r = await _b.apiGet('/api/mobile/material/$id');
+        final raw =
+            r['material'] is Map ? Map<String, dynamic>.from(r['material']) : r;
+        m = StudyMaterial.fromJson(_b.shieldDeep(raw));
       }
-      final r = await _b.apiGet('/api/mobile/material/$id');
-      final raw =
-          r['material'] is Map ? Map<String, dynamic>.from(r['material']) : r;
-      return StudyMaterial.fromJson(_b.shieldDeep(raw));
+
+      // Reading a note is the moment to keep it. Nothing about that
+      // costs the student anything — the bytes are already down.
+      if (offline != null && m.hasBody) {
+        final header = _materials.where((h) => h.id == id).firstOrNull;
+        final sig = m.updatedAt?.toIso8601String() ??
+            header?.updatedAt?.toIso8601String() ??
+            m.url;
+        if (!offline.isCurrent(id, sig)) {
+          unawaited(() async {
+            try {
+              await offline.putNote(
+                id: id,
+                title: m.title.isEmpty ? (header?.title ?? '') : m.title,
+                html: m.contentHtml,
+                courseCode: courseById(m.courseId)?.code ?? '',
+                courseId: m.courseId,
+                sig: sig,
+              );
+              await offline.flush();
+            } catch (e) {
+              debugPrint('[offline] could not keep note $id: $e');
+            }
+          }());
+        }
+      }
+      return m;
     } catch (e) {
-      if (offlineHtml != null) {
+      if (savedHtml != null) {
         final header = _materials.where((m) => m.id == id).firstOrNull;
+        final saved = offline?.item(id);
         return StudyMaterial(
           id: id,
-          courseId: header?.courseId ?? '',
+          courseId: header?.courseId ?? saved?.courseId ?? '',
           kind: header?.kind ?? MaterialKind.note,
-          title: header?.title ?? 'Saved note',
-          contentHtml: offlineHtml,
+          title: header?.title ?? saved?.title ?? 'Saved note',
+          contentHtml: savedHtml,
         );
       }
       rethrow;
@@ -561,8 +592,16 @@ class ContentRepository {
 // ============================================================
 
 class AssessmentRepository {
-  AssessmentRepository(this._b);
+  AssessmentRepository(this._b, [this._offline]);
   final Backend _b;
+
+  /// Where every question the student has already been shown is kept.
+  /// Nothing about questions was cached before this — not the text, not
+  /// the options, not the pictures — so "questions work offline" was a
+  /// claim with no code behind it.
+  final OfflineStore? _offline;
+
+  OfflineStore? get _store => _offline ?? Offline.store;
 
   Future<List<StudyTest>> testsFor(String courseId) async {
     if (_b.isDirect) {
@@ -648,6 +687,28 @@ class AssessmentRepository {
       };
 
   Future<AttemptSession> openAttempt(String attemptId) async {
+    // A round taken with no signal never reaches a server.
+    if (attemptId.startsWith(kLocalAttemptPrefix)) {
+      final session = await _localSession(attemptId);
+      if (session != null) return session;
+      throw const BxError('That practice round is no longer on this phone.');
+    }
+    try {
+      final live = await _openAttemptOnline(attemptId);
+      await _remember(live);
+      return live;
+    } catch (e) {
+      // Offline, or the server refused. If we hold this exact attempt
+      // from an earlier open, the student carries on where they were
+      // instead of losing the round.
+      if (e is BxError && e.code == 'submitted') rethrow;
+      final saved = await _savedSession(attemptId);
+      if (saved != null) return saved;
+      rethrow;
+    }
+  }
+
+  Future<AttemptSession> _openAttemptOnline(String attemptId) async {
     if (_b.isDirect) {
       final r =
           await _b.rpc('bx_open_attempt', params: {'p_attempt_id': attemptId});
@@ -688,6 +749,10 @@ class AssessmentRepository {
     String choice = '',
     String answerText = '',
   }) async {
+    if (isLocalAttempt(attemptId)) {
+      return answerOffline(attemptId, questionId,
+          choice: choice, answerText: answerText);
+    }
     if (_b.isDirect) {
       final r = await _b.rpc('bx_answer', params: {
         'p_attempt_id': attemptId,
@@ -721,7 +786,7 @@ class AssessmentRepository {
         'p_choice': choice.isEmpty ? null : choice,
         'p_answer_text': answerText.isEmpty ? null : answerText,
       });
-      return AnswerVerdict.fromJson(r);
+      return AnswerVerdict.fromJson(_b.shieldDeep(r));
     }
     final r = await _b.apiSend('/api/cbt/answer', body: {
       'attemptId': attemptId,
@@ -729,10 +794,14 @@ class AssessmentRepository {
       'choice': choice,
       'answerText': answerText,
     });
-    return AnswerVerdict.fromJson(r);
+    // Shielded like every other payload. This one was not, so a CBT
+    // explanation picture arrived as a bare storage URL while the
+    // identical field on the practice route arrived resolved.
+    return AnswerVerdict.fromJson(_b.shieldDeep(r));
   }
 
   Future<void> submit(String attemptId) async {
+    if (isLocalAttempt(attemptId)) return finishOffline(attemptId);
     if (_b.isDirect) {
       await _b.rpc('bx_submit_attempt', params: {'p_attempt_id': attemptId});
       return;
@@ -746,6 +815,7 @@ class AssessmentRepository {
   }
 
   Future<void> finishPractice(String attemptId) async {
+    if (isLocalAttempt(attemptId)) return finishOffline(attemptId);
     if (_b.isDirect) {
       await _b.rpc('bx_submit_attempt', params: {'p_attempt_id': attemptId});
       return;
@@ -755,16 +825,83 @@ class AssessmentRepository {
   }
 
   Future<ResultReview> result(String attemptId) async {
-    if (_b.isDirect) {
-      final r =
-          await _b.rpc('bx_attempt_result', params: {'p_attempt_id': attemptId});
-      if (r['error'] != null) {
-        throw const BxError('That result could not be opened.');
-      }
-      return ResultReview.fromJson(_b.shieldDeep(r));
+    if (isLocalAttempt(attemptId)) {
+      final local = await offlineResult(attemptId);
+      if (local != null) return local;
+      throw const BxError('That practice round is no longer on this phone.');
     }
-    final r = await _b.apiGet('/api/mobile/cbt-result/$attemptId');
-    return ResultReview.fromJson(_b.shieldDeep(r));
+    try {
+      final ResultReview review;
+      if (_b.isDirect) {
+        final r = await _b
+            .rpc('bx_attempt_result', params: {'p_attempt_id': attemptId});
+        if (r['error'] != null) {
+          throw const BxError('That result could not be opened.');
+        }
+        review = ResultReview.fromJson(_b.shieldDeep(r));
+      } else {
+        final r = await _b.apiGet('/api/mobile/cbt-result/$attemptId');
+        review = ResultReview.fromJson(_b.shieldDeep(r));
+      }
+      // A review carries the explanation for every question, which is
+      // the most useful thing in the app to have offline.
+      if (!review.mode.isTimed) {
+        await rememberQuestions(
+          review.courseId.isEmpty ? 'general' : review.courseId,
+          review.items.map((i) => i.question).toList(),
+        );
+      }
+      await _rememberReview(review);
+      return review;
+    } catch (e) {
+      final saved = await _savedReview(attemptId);
+      if (saved != null) return saved;
+      rethrow;
+    }
+  }
+
+  Future<void> _rememberReview(ResultReview r) async {
+    final store = _store;
+    if (store == null || r.mode.isTimed) return;
+    try {
+      await store.putAttempt('review-${r.attemptId}', {
+        'at': DateTime.now().millisecondsSinceEpoch,
+        'kind': 'review',
+        'status': 'submitted',
+        'course_id': r.courseId,
+        'score': r.score,
+        'total': r.total,
+        'title': r.title,
+        'questions': r.items.map((i) => i.question.toJson()).toList(),
+        'answers': {
+          for (final i in r.items)
+            i.question.id: {
+              'choice': i.yourKey ?? '',
+              'answer_text': i.yourText ?? '',
+              'is_correct': i.isCorrect,
+            }
+        },
+      });
+    } catch (e) {
+      debugPrint('[offline] could not keep review ${r.attemptId}: $e');
+    }
+  }
+
+  Future<ResultReview?> _savedReview(String attemptId) async {
+    final store = _store;
+    if (store == null) return null;
+    if (await store.attempt('review-$attemptId') == null) return null;
+    final r = await offlineResult('review-$attemptId');
+    if (r == null) return null;
+    return ResultReview(
+      attemptId: attemptId,
+      score: r.score,
+      total: r.total,
+      mode: r.mode,
+      title: r.title,
+      courseId: r.courseId,
+      items: r.items,
+    );
   }
 
   void reportViolation(String attemptId, String kind) {
@@ -829,17 +966,39 @@ class AssessmentRepository {
   }
 
   Future<List<Question>> mistakes() async {
-    if (_b.isDirect) {
-      final rows = await _b.rpcList('bx_mistakes');
-      return rows.map((e) => Question.fromJson(_b.shieldDeep(e))).toList();
+    try {
+      final List<Question> list;
+      if (_b.isDirect) {
+        final rows = await _b.rpcList('bx_mistakes');
+        list = rows.map((e) => Question.fromJson(_b.shieldDeep(e))).toList();
+      } else {
+        final r = await _b.apiGet('/api/mistakes');
+        final rows = (r['items'] as List?) ?? const [];
+        list = rows
+            .whereType<Map>()
+            .map((e) =>
+                Question.fromJson(_b.shieldDeep(Map<String, dynamic>.from(e))))
+            .toList();
+      }
+      await rememberQuestions('mistakes', list);
+      return list;
+    } catch (e) {
+      // The revision list is exactly what a student wants on a bus with
+      // no signal, so the saved copy answers when the network cannot.
+      final saved = await _savedQuestions('mistakes');
+      if (saved.isNotEmpty) return saved;
+      rethrow;
     }
-    final r = await _b.apiGet('/api/mistakes');
-    final rows = (r['items'] as List?) ?? const [];
-    return rows
-        .whereType<Map>()
-        .map((e) =>
-            Question.fromJson(_b.shieldDeep(Map<String, dynamic>.from(e))))
-        .toList();
+  }
+
+  Future<List<Question>> _savedQuestions(String bucket) async {
+    final store = _store;
+    if (store == null) return const [];
+    try {
+      return (await store.questions(bucket)).map(Question.fromJson).toList();
+    } catch (_) {
+      return const [];
+    }
   }
 
   Future<List<AttemptSummary>> recentResults({int limit = 20}) async {
@@ -858,6 +1017,276 @@ class AssessmentRepository {
       return const [];
     }
   }
+
+  // ============================================================
+  // OFFLINE
+  //
+  // Everything below exists because "questions work offline" was not
+  // true. Nothing about a question was written to disk anywhere in the
+  // app: not the text, not the options, not the explanation, not the
+  // pictures. The Offline Vault held only whole documents a student had
+  // remembered to tap Save on, which is why it looked empty.
+  //
+  // What is kept, and what deliberately is not:
+  //
+  //   · **Practice, smart revision, saved questions and mistakes** are
+  //     kept in full — text, options, marks, the answer key, the
+  //     explanation, and every picture and voice note they reference.
+  //     The key is already on the device the moment an attempt opens on
+  //     both backend paths (the legacy route selects `*`, and the direct
+  //     RPC returns it for untimed modes), so keeping it discloses
+  //     nothing new. It is what lets a round be marked with no signal.
+  //
+  //   · **Tests and exams are never kept.** Both paths deliberately
+  //     strip the key for timed modes, and a cached exam paper would be
+  //     a leak whatever we did with it. `_cacheable` is the gate, and it
+  //     is checked on every write.
+  // ============================================================
+
+  /// Only untimed work is ever written to disk.
+  static bool _cacheable(AttemptMode mode) => !mode.isTimed;
+
+  Future<void> _remember(AttemptSession s) async {
+    final store = _store;
+    if (store == null || !_cacheable(s.mode)) return;
+    try {
+      await store.putQuestions(
+        s.courseId.isEmpty ? 'general' : s.courseId,
+        s.questions.map((q) => q.toJson()).toList(),
+      );
+      // The session itself, so a resume works with the radio off.
+      await store.putAttempt(s.id, {
+        'at': DateTime.now().millisecondsSinceEpoch,
+        'kind': 'server',
+        'session': _sessionToJson(s),
+      });
+    } catch (e) {
+      debugPrint('[offline] could not keep attempt ${s.id}: $e');
+    }
+  }
+
+  /// Files a batch of questions that did not arrive inside an attempt —
+  /// the mistakes list, the millionaire deal, a result review.
+  Future<void> rememberQuestions(String bucket, List<Question> questions) async {
+    final store = _store;
+    if (store == null || questions.isEmpty) return;
+    try {
+      await store.putQuestions(
+          bucket, questions.map((q) => q.toJson()).toList());
+    } catch (e) {
+      debugPrint('[offline] could not keep $bucket: $e');
+    }
+  }
+
+  Future<AttemptSession?> _savedSession(String attemptId) async {
+    final store = _store;
+    if (store == null) return null;
+    final raw = await store.attempt(attemptId);
+    final session = raw?['session'];
+    if (session is! Map) return null;
+    try {
+      return AttemptSession.fromJson(Map<String, dynamic>.from(session));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Map<String, dynamic> _sessionToJson(AttemptSession s) => {
+        'id': s.id,
+        'mode': s.mode.name,
+        'status': s.status,
+        'questions': s.questions.map((q) => q.toJson()).toList(),
+        'answers': {
+          for (final e in s.answers.entries)
+            e.key: {
+              'choice': e.value.choice,
+              'answer_text': e.value.answerText,
+              'is_correct': e.value.isCorrect,
+            }
+        },
+        'bookmarks': s.bookmarks.toList(),
+        'title': s.title,
+        'course_code': s.courseCode,
+        'course_title': s.courseTitle,
+        'course_id': s.courseId,
+      };
+
+  // ---- a round taken with no signal ---------------------------
+
+  /// How many questions are available to practise offline right now.
+  Future<int> offlineQuestionCount({String? courseId}) async {
+    final store = _store;
+    if (store == null) return 0;
+    final rows = await store.allQuestions();
+    if (courseId == null || courseId.isEmpty) return rows.length;
+    return rows.where((r) => '${r['course_id'] ?? ''}' == courseId).length;
+  }
+
+  /// Starts a practice round from what is already on the phone.
+  ///
+  /// It is deliberately NOT replayed to the server afterwards. Minting a
+  /// server attempt from the device and answering it programmatically
+  /// would put points, streaks and leaderboard positions into the
+  /// database that no server ever saw being earned, and there is no way
+  /// to verify it did the right thing. So an offline round is revision:
+  /// it marks itself, it shows the explanations, it feeds the local
+  /// mistakes list, and it says plainly that it is not on the record.
+  Future<String> startOfflinePractice({String? courseId, int count = 20}) async {
+    final store = _store;
+    if (store == null) {
+      throw const BxError('This device cannot keep offline questions.');
+    }
+    var rows = await store.allQuestions();
+    if (courseId != null && courseId.isNotEmpty) {
+      final forCourse =
+          rows.where((r) => '${r['course_id'] ?? ''}' == courseId).toList();
+      if (forCourse.isNotEmpty) rows = forCourse;
+    }
+    if (rows.isEmpty) {
+      throw const BxError(
+          'No saved questions yet. Do one round with data and they save '
+          'themselves.');
+    }
+    rows.shuffle();
+    final picked = rows.take(count.clamp(1, rows.length)).toList();
+
+    final id = '$kLocalAttemptPrefix${DateTime.now().millisecondsSinceEpoch}';
+    await store.putAttempt(id, {
+      'at': DateTime.now().millisecondsSinceEpoch,
+      'kind': 'local',
+      'status': 'in_progress',
+      'course_id': courseId ?? '',
+      'questions': picked,
+      'answers': <String, dynamic>{},
+    });
+    return id;
+  }
+
+  Future<AttemptSession?> _localSession(String id) async {
+    final store = _store;
+    if (store == null) return null;
+    final raw = await store.attempt(id);
+    if (raw == null) return null;
+    final questions = (raw['questions'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Question.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    if (questions.isEmpty) return null;
+    final answers = <String, GivenAnswer>{};
+    final rawAnswers = raw['answers'];
+    if (rawAnswers is Map) {
+      rawAnswers.forEach((k, v) {
+        if (v is Map) {
+          answers['$k'] = GivenAnswer.fromJson(Map<String, dynamic>.from(v));
+        }
+      });
+    }
+    return AttemptSession(
+      id: id,
+      mode: AttemptMode.practice,
+      status: '${raw['status'] ?? 'in_progress'}',
+      questions: questions,
+      answers: answers,
+      title: 'Offline practice',
+      courseId: '${raw['course_id'] ?? ''}',
+    );
+  }
+
+  /// Marks an answer on the device, using the key that came down with
+  /// the question. Same comparison the server does.
+  Future<AnswerVerdict> answerOffline(
+    String attemptId,
+    String questionId, {
+    String choice = '',
+    String answerText = '',
+  }) async {
+    final store = _store;
+    if (store == null) throw const BxError('That round is no longer here.');
+    final raw = await store.attempt(attemptId);
+    if (raw == null) throw const BxError('That round is no longer here.');
+
+    final row = (raw['questions'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .firstWhere((e) => '${e['id']}' == questionId,
+            orElse: () => <String, dynamic>{});
+    if (row.isEmpty) throw const BxError('That question is not in this round.');
+
+    final q = Question.fromJson(row);
+    final correct = gradeLocally(q, choice: choice, answerText: answerText);
+
+    final answers = Map<String, dynamic>.from(
+        (raw['answers'] as Map?)?.cast<String, dynamic>() ?? {});
+    answers[questionId] = {
+      'choice': choice,
+      'answer_text': answerText,
+      'is_correct': correct,
+    };
+    raw['answers'] = answers;
+    await store.putAttempt(attemptId, raw);
+
+    return AnswerVerdict(
+      correct: correct,
+      correctKey: q.correctKey,
+      acceptedAnswer: q.acceptedAnswer.isEmpty ? null : q.acceptedAnswer,
+      explanationHtml: q.explanationHtml,
+      explanationImageUrl: q.explanationImageUrl,
+      explanationAudioUrl: q.explanationAudioUrl,
+    );
+  }
+
+  Future<void> finishOffline(String attemptId) async {
+    final store = _store;
+    if (store == null) return;
+    final raw = await store.attempt(attemptId);
+    if (raw == null) return;
+    raw['status'] = 'submitted';
+    raw['finished_at'] = DateTime.now().millisecondsSinceEpoch;
+    await store.putAttempt(attemptId, raw);
+  }
+
+  Future<ResultReview?> offlineResult(String attemptId) async {
+    final store = _store;
+    if (store == null) return null;
+    final raw = await store.attempt(attemptId);
+    if (raw == null) return null;
+    final answers = (raw['answers'] as Map?) ?? const {};
+    final rows = (raw['questions'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+
+    var score = 0;
+    final items = <ReviewItem>[];
+    for (var i = 0; i < rows.length; i++) {
+      final q = Question.fromJson(rows[i]);
+      final given = answers[q.id];
+      final choice = given is Map ? '${given['choice'] ?? ''}' : '';
+      final text = given is Map ? '${given['answer_text'] ?? ''}' : '';
+      final ok = given is Map && given['is_correct'] == true;
+      if (ok) score += 1;
+      items.add(ReviewItem(
+        n: i + 1,
+        question: q,
+        yourKey: choice.isEmpty ? null : choice,
+        yourText: text.isEmpty ? null : text,
+        isCorrect: ok,
+        answered: choice.isNotEmpty || text.trim().isNotEmpty,
+      ));
+    }
+
+    final title = '${raw['title'] ?? ''}';
+    return ResultReview(
+      attemptId: attemptId,
+      score: score,
+      total: rows.length,
+      mode: AttemptMode.practice,
+      title: title.isEmpty ? 'Offline practice' : title,
+      courseId: '${raw['course_id'] ?? ''}',
+      items: items,
+    );
+  }
+
 }
 
 // ============================================================

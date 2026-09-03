@@ -6,18 +6,27 @@ import 'package:intl/intl.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/local_store.dart';
+import '../../data/offline/offline_store.dart';
+import '../../data/offline/sync_engine.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
 
 /// ============================================================
 /// THE OFFLINE VAULT
 ///
-/// The website kept saved material in the browser's Cache API, which
-/// the browser is free to evict under storage pressure — the index
-/// survived, the files did not, and "Open" led nowhere. Here the files
-/// are real files in the app's private directory, the index is
-/// reconciled against them on every visit, and nothing but the student
-/// removes them.
+/// This screen used to be almost always empty, and the reason was
+/// structural rather than cosmetic: the only thing that could ever put
+/// something in it was a student remembering to open a material and tap
+/// "Save for offline". Nothing arrived by itself. Notes were not kept.
+/// Questions were not kept anywhere at all — not the text, not the
+/// options, not the pictures — so "works offline" meant a cached
+/// dashboard and nothing else.
+///
+/// Now the app fills it while the student uses it, and this screen shows
+/// what is actually there: the notes, the pictures and voice notes, the
+/// questions, and the documents. It also owns the one decision that
+/// cannot be made for the student — whether to spend their data bundle
+/// on whole PDFs — and it is off until they say so.
 /// ============================================================
 
 class VaultScreen extends ConsumerStatefulWidget {
@@ -28,104 +37,82 @@ class VaultScreen extends ConsumerStatefulWidget {
 }
 
 class _VaultScreenState extends ConsumerState<VaultScreen> {
-  /// Null while we are still asking the platform whether it can hold
-  /// files at all — web cannot.
-  bool? _supported;
-  bool _failed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _check();
-  }
-
-  Future<void> _check() async {
-    try {
-      final ok = await ref.read(localStoreProvider).vaultSupported;
-      if (!mounted) return;
-      setState(() {
-        _supported = ok;
-        _failed = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _failed = true);
-    }
-  }
-
   Future<void> _refresh() async {
     ref.read(vaultProvider.notifier).refresh();
-    await _check();
+    ref.invalidate(offlineSummaryProvider);
   }
 
-  void _open(VaultEntry e) {
-    context.push(
-      e.kind == 'note' ? Routes.note(e.materialId) : Routes.view(e.materialId),
-    );
+  Future<void> _syncNow() async {
+    final level = ref.read(sessionProvider).profile?.currentLevel;
+    await ref.read(syncStatusProvider.notifier).start(now: true, level: level);
+    if (!mounted) return;
+    await _refresh();
   }
 
-  Future<void> _remove(VaultEntry e) async {
+  void _open(OfflineItem e) {
+    context.push(e.kind == 'note' ? Routes.note(e.id) : Routes.view(e.id));
+  }
+
+  Future<void> _remove(OfflineItem e) async {
     final sure = await bxConfirm(
       context,
       title: 'Remove from your vault?',
-      message:
-          '"${e.title}" leaves this phone and frees ${e.sizeLabel.isEmpty ? 'its space' : e.sizeLabel}. '
-          'You can save it again any time you have data.',
+      message: '"${e.title}" leaves this phone and frees ${e.sizeLabel}. '
+          'The next sync will bring it back unless you turned syncing off.',
       confirmLabel: 'Remove',
       destructive: true,
     );
     if (!sure || !mounted) return;
-    await ref.read(vaultProvider.notifier).remove(e.materialId);
+    await ref.read(vaultProvider.notifier).remove(e.id);
     if (!mounted) return;
+    ref.invalidate(offlineSummaryProvider);
     bxToast(context, 'Removed. That space is yours again.');
+  }
+
+  Future<void> _setAutoDocs(bool on) async {
+    await ref.read(localStoreProvider).setBool(BxKeys.autoDownloadDocs, on);
+    ref.read(syncStatusProvider.notifier).autoDocuments = on;
+    if (!mounted) return;
+    setState(() {});
+    if (on) {
+      bxToast(context, 'PDFs will come down on Wi-Fi from the next sync.');
+    }
   }
 
   // ---------------------------------------------------------- build
 
   @override
   Widget build(BuildContext context) {
+    final status = ref.watch(syncStatusProvider);
     return Scaffold(
-      appBar: const BxAppBar(
+      appBar: BxAppBar(
         title: 'Offline Vault',
         subtitle: 'Zero-data reading',
+        actions: [
+          IconButton(
+            onPressed: status.isRunning ? null : _syncNow,
+            tooltip: 'Sync now',
+            icon: status.isRunning
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.sync_rounded, size: 20),
+          ),
+        ],
       ),
       body: BxPage(
         onRefresh: _refresh,
-        child: BxSwitcher(child: _body()),
+        child: BxSwitcher(child: _body(status)),
       ),
     );
   }
 
-  Widget _body() {
+  Widget _body(SyncStatus status) {
     final entries = ref.watch(vaultProvider);
-
-    if (_failed && _supported == null) {
-      return Padding(
-        key: const ValueKey('error'),
-        padding: const EdgeInsets.only(top: BxSpace.xs),
-        child: BxErrorState(
-          title: 'Your shelf did not open',
-          message:
-              'We could not read what is stored on this phone just now. Try '
-              'again in a moment.',
-          onRetry: _check,
-        ),
-      );
-    }
-
-    if (_supported == null) {
-      return const Column(
-        key: ValueKey('loading'),
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          BxSkeleton(height: 76, radius: BxRadius.md),
-          SizedBox(height: BxSpace.md),
-          BxSkeletonList(count: 4, itemHeight: 78),
-        ],
-      );
-    }
-
-    final supported = _supported!;
+    final summary = ref.watch(offlineSummaryProvider);
+    final supported = ref.watch(offlineStoreProvider) != null;
 
     return Column(
       key: const ValueKey('content'),
@@ -142,26 +129,29 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
             accent: BxAccent.warning,
           )
         else
-          const BxBanner(
-            title: 'Materials you saved open with your data off',
-            message: 'Only you can remove them — nothing here expires on its own.',
-            icon: Icons.wifi_off_rounded,
-            accent: BxAccent.info,
-          ),
-        if (entries.isNotEmpty) ...[
-          const SizedBox(height: BxSpace.sm),
-          _totals(entries),
-        ],
+          _SyncCard(status: status, onSync: _syncNow),
         const SizedBox(height: BxSpace.md),
+        if (supported) ...[
+          summary.when(
+            loading: () => const BxSkeleton(height: 86, radius: BxRadius.md),
+            error: (_, __) => const SizedBox.shrink(),
+            data: _counts,
+          ),
+          const SizedBox(height: BxSpace.md),
+          _autoDocsSwitch(),
+          const SizedBox(height: BxSpace.md),
+        ],
         if (entries.isEmpty)
           BxEmptyState(
             icon: Icons.inventory_2_outlined,
-            title: 'Nothing saved yet',
-            message:
-                'Open any material and tap Save for offline — it will live '
-                'here, readable anywhere, even with no signal.',
-            actionLabel: 'Browse courses',
-            onAction: () => context.go(Routes.courses),
+            title: status.isRunning ? 'Filling your vault…' : 'Nothing saved yet',
+            message: status.isRunning
+                ? 'Your notes are coming down now. You can keep using the app '
+                    '— this finishes in the background.'
+                : 'Tap sync above and every note on your shelf saves itself. '
+                    'Open a material and tap Save to keep the big documents too.',
+            actionLabel: status.isRunning ? null : 'Sync now',
+            onAction: status.isRunning ? null : _syncNow,
           )
         else
           BxStagger(
@@ -172,31 +162,91 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     );
   }
 
-  Widget _totals(List<VaultEntry> entries) {
+  Widget _counts(OfflineSummary s) {
     final c = context.bx;
-    final bytes = entries.fold<int>(0, (sum, e) => sum + e.sizeBytes);
-    return Row(
-      children: [
-        Icon(Icons.sd_storage_outlined, size: 15, color: c.muted),
-        const SizedBox(width: BxSpace.xs),
-        Expanded(
-          child: Text(
-            '${entries.length} item${entries.length == 1 ? '' : 's'} on this phone',
-            style: BxType.tiny(c.muted),
+    return Container(
+      padding: const EdgeInsets.all(BxSpace.sm),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(BxRadius.md),
+        border: Border.all(color: c.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              _Stat(label: 'Materials', value: '${s.items}'),
+              _Stat(label: 'Questions', value: '${s.questions}'),
+              _Stat(label: 'Pictures', value: '${s.pictures}'),
+            ],
           ),
-        ),
-        Text(_sizeLabel(bytes), style: BxType.mono(c.inkSoft, size: 12)),
-      ],
+          const SizedBox(height: BxSpace.xs),
+          Divider(height: 1, color: c.line),
+          const SizedBox(height: BxSpace.xs),
+          Row(
+            children: [
+              Icon(Icons.sd_storage_outlined, size: 15, color: c.muted),
+              const SizedBox(width: BxSpace.xs),
+              Expanded(
+                child: Text(
+                  s.syncedAt == null
+                      ? 'Not synced yet'
+                      : 'Last synced ${DateFormat('d MMM, h:mm a').format(s.syncedAt!)}',
+                  style: BxType.tiny(c.muted),
+                ),
+              ),
+              Text(formatBytes(s.bytes), style: BxType.mono(c.inkSoft, size: 12)),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _row(VaultEntry e) {
+  Widget _autoDocsSwitch() {
+    final c = context.bx;
+    final on = ref.watch(localStoreProvider).getBool(BxKeys.autoDownloadDocs);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+          horizontal: BxSpace.sm, vertical: BxSpace.xs),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(BxRadius.md),
+        border: Border.all(color: c.line),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.wifi_rounded, size: 18, color: c.goldDeep),
+          const SizedBox(width: BxSpace.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Also download PDFs on Wi-Fi', style: BxType.smallStrong(c.ink)),
+                Text(
+                  'Notes, pictures and questions always save themselves. '
+                  'Whole documents are big, so they only come down when you '
+                  'ask and only on Wi-Fi.',
+                  style: BxType.tiny(c.muted),
+                ),
+              ],
+            ),
+          ),
+          Switch(value: on, onChanged: _setAutoDocs),
+        ],
+      ),
+    );
+  }
+
+  Widget _row(OfflineItem e) {
     final c = context.bx;
     final saved = DateFormat('d MMM').format(e.savedAt);
     final parts = <String>[
       if (e.courseCode.isNotEmpty) e.courseCode,
       'saved $saved',
-      if (e.sizeLabel.isNotEmpty) e.sizeLabel,
+      if (e.bytes > 0) e.sizeLabel,
+      if (e.pinned) 'kept',
     ];
 
     return BxListRow(
@@ -241,11 +291,108 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
       child: Icon(icon, size: 17, color: accent.ink(c)),
     );
   }
+}
 
-  static String _sizeLabel(int bytes) {
-    if (bytes <= 0) return '—';
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
-    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+class _Stat extends StatelessWidget {
+  final String label;
+  final String value;
+  const _Stat({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.bx;
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(value, style: BxType.h2(c.ink)),
+          Text(label, style: BxType.tiny(c.muted)),
+        ],
+      ),
+    );
+  }
+}
+
+/// What the sync is doing, in words. A progress bar that says nothing is
+/// how "background downloading" turns into a rumour.
+class _SyncCard extends StatelessWidget {
+  final SyncStatus status;
+  final Future<void> Function() onSync;
+
+  const _SyncCard({required this.status, required this.onSync});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.bx;
+
+    final (icon, accent, title, message) = switch (status.phase) {
+      SyncPhase.running => (
+          Icons.cloud_download_outlined,
+          BxAccent.info,
+          status.total > 0
+              ? '${status.label} · ${status.done} of ${status.total}'
+              : status.label,
+          'Keep using the app. This finishes on its own.',
+        ),
+      SyncPhase.failed => (
+          Icons.cloud_off_rounded,
+          BxAccent.warning,
+          'Sync stopped',
+          status.message ?? 'Try again when you have a steadier connection.',
+        ),
+      SyncPhase.unsupported => (
+          Icons.phonelink_off_rounded,
+          BxAccent.warning,
+          'This device cannot keep offline copies',
+          'Everything still works online.',
+        ),
+      SyncPhase.done => (
+          Icons.offline_pin_rounded,
+          BxAccent.success,
+          'Your material is on this phone',
+          'Notes, pictures and questions open with your data off.',
+        ),
+      SyncPhase.idle => (
+          Icons.wifi_off_rounded,
+          BxAccent.gold,
+          'Ready to save your material',
+          'Tap sync and your notes come down in the background.',
+        ),
+    };
+
+    return Container(
+      padding: const EdgeInsets.all(BxSpace.sm),
+      decoration: BoxDecoration(
+        color: accent.fill(c),
+        borderRadius: BorderRadius.circular(BxRadius.md),
+        border: Border.all(color: accent.stroke(c)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: accent.ink(c)),
+              const SizedBox(width: BxSpace.xs),
+              Expanded(child: Text(title, style: BxType.smallStrong(c.ink))),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(message, style: BxType.tiny(c.inkSoft)),
+          if (status.isRunning) ...[
+            const SizedBox(height: BxSpace.xs),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(BxRadius.pill),
+              child: LinearProgressIndicator(
+                value: status.total > 0 ? status.progress : null,
+                minHeight: 4,
+                backgroundColor: c.line,
+                valueColor: AlwaysStoppedAnimation(c.gold),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
