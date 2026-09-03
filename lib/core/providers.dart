@@ -289,6 +289,17 @@ class SessionNotifier extends StateNotifier<SessionState>
     }
   }
 
+  /// Re-reads the backend's switches without waiting for a resume.
+  /// Used by the journey test to prove a policy change reaches the
+  /// phone; the app itself calls [applyPolicy] on resume.
+  @visibleForTesting
+  Future<void> applyPolicyForTest() async {
+    await _ref
+        .read(contentRepoProvider)
+        .loadContent(level: state.profile?.currentLevel ?? '100', force: true);
+    await applyPolicy();
+  }
+
   Future<void> onSignedIn() => refreshProfile();
 
   Future<void> signOut({String? reason}) async {

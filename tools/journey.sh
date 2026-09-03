@@ -50,8 +50,15 @@ for pid in /proc/[0-9]*; do
 done
 sleep 1
 
-echo "==> mock backend on :$PORT"
-BX_PROD_SIM=1 node tools/mock_backend.js "$PORT" > "$WORK/mock.log" 2>&1 &
+# BX_PROD_SIM hides the bx_* RPCs, which is what makes the app fall back
+# to the website API -- the shape production is actually in today. The
+# --direct run leaves them exposed so the Supabase path is exercised.
+echo "==> mock backend on :$PORT (prod-sim=$LEGACY)"
+if [[ "$LEGACY" == "true" ]]; then
+  BX_PROD_SIM=1 node tools/mock_backend.js "$PORT" > "$WORK/mock.log" 2>&1 &
+else
+  node tools/mock_backend.js "$PORT" > "$WORK/mock.log" 2>&1 &
+fi
 MOCK_PID=$!
 sleep 2
 
@@ -67,7 +74,8 @@ xvfb-run -a --server-args="-screen 0 1200x2400x24" \
   --dart-define=BX_SUPABASE_URL="http://127.0.0.1:$PORT" \
   --dart-define=BX_SUPABASE_ANON_KEY=mock-anon-key \
   --dart-define=BX_SITE_URL="http://127.0.0.1:$PORT" \
-  --dart-define=BX_FORCE_LEGACY_API=$LEGACY 2>&1 | tee "$WORK/run.log" \
+  --dart-define=BX_FORCE_LEGACY_API=$LEGACY \
+  --dart-define=BX_MOCK_PID="$MOCK_PID" 2>&1 | tee "$WORK/run.log" \
   | grep -E "journey\]|overflowed|EXCEPTION|Expected|Actual|MUST|All tests|Some tests" \
   | cut -c1-400
 

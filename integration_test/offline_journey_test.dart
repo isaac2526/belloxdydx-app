@@ -1,11 +1,13 @@
 import 'dart:io';
 
 import 'package:belloxdydx/data/backend.dart';
+import 'package:belloxdydx/core/providers.dart';
 import 'package:belloxdydx/data/models.dart';
 import 'package:belloxdydx/data/offline/offline_store.dart';
 import 'package:belloxdydx/features/shell/app_drawer.dart';
 import 'package:belloxdydx/main.dart' as app;
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -89,6 +91,14 @@ void main() {
 
     app.main();
     await tester.pump(const Duration(seconds: 2));
+
+    // The app's own container, so the test asks the same providers the
+    // screens do rather than reaching around them.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(MaterialApp)),
+    );
+    const backend = String.fromEnvironment('BX_SITE_URL',
+        defaultValue: 'http://127.0.0.1:54321');
 
     // ---- through onboarding and into the login form ----------------
     //
@@ -327,9 +337,28 @@ void main() {
       final refreshed = await store.allQuestions();
       final nowMarkable = refreshed.where(isMarkableOffline).length;
       debugPrint('[journey] markable after answering: $nowMarkable');
-      expect(nowMarkable, greaterThan(markable.length),
+
+      // The two paths differ and both are correct:
+      //
+      //   legacy (what production runs) — /api/practice/[id] does
+      //     select("*"), so every question in the round arrives ready to
+      //     mark offline before the student has answered anything.
+      //   direct — bx_open_attempt strips the key and hands it over
+      //     only once an answer is committed, so the pool becomes
+      //     markable one question at a time.
+      //
+      // What must hold either way: answering never LOSES a key, and
+      // after one answer at least one question can be marked offline.
+      expect(nowMarkable, greaterThanOrEqualTo(markable.length),
+          reason: 'a cached key must never be lost by a later write');
+      expect(nowMarkable, greaterThan(0),
           reason: 'answering a question must leave it markable offline — '
               'otherwise an offline round marks everything wrong');
+      if (markable.isEmpty) {
+        expect(nowMarkable, greaterThan(0),
+            reason: 'on a path that withholds the key, answering is what '
+                'hands it over');
+      }
     }
 
     // Every picture and voice note those questions carry is on the
@@ -355,19 +384,104 @@ void main() {
               '"questions work offline" mean text only');
     }
 
+    // ---- the backend policy reaches the phone ------------------------
+    // "No new build" is a claim, so it gets tested rather than stated.
+    // The setting is flipped on the server and the app is made to
+    // resume; it must be obeying the new value afterwards.
+    expect(container.read(appPolicyProvider).allowScreenshots, isFalse,
+        reason: 'screen capture is blocked unless the backend says otherwise');
+
+    await tester.runAsync(() async {
+      final client = HttpClient();
+      final req = await client.postUrl(Uri.parse('$backend/__test/settings'));
+      req.headers.contentType = ContentType.json;
+      req.write('{"allowScreenshots":true}');
+      await (await req.close()).drain<void>();
+      client.close();
+    });
+
+    await tester.runAsync(() =>
+        container.read(sessionProvider.notifier).applyPolicyForTest());
+    await tester.pump(const Duration(seconds: 1));
+    expect(container.read(appPolicyProvider).allowScreenshots, isTrue,
+        reason: 'a switch Tutor Bello flips must reach the phone with no '
+            'new build');
+
     // ---- the server disappears ----------------------------------------
-    // Everything above could be explained by a warm cache. This cannot.
+    // Everything above could be explained by a warm cache. This cannot:
+    // the backend is killed outright and the app has to stand on its own.
+    final mockPid = const String.fromEnvironment('BX_MOCK_PID');
+    if (mockPid.isNotEmpty) {
+      await tester.runAsync(() => Process.run('kill', [mockPid]));
+      await tester.pump(const Duration(seconds: 2));
+
+      final stillDown = await tester.runAsync(() async {
+        try {
+          final s = await Socket.connect('127.0.0.1', 54321,
+              timeout: const Duration(seconds: 2));
+          s.destroy();
+          return false;
+        } catch (_) {
+          return true;
+        }
+      });
+      expect(stillDown, isTrue, reason: 'the backend must really be gone');
+      debugPrint('[journey] backend killed');
+
+      // A saved note still opens, read through the app's own repository
+      // rather than the store directly — which is what a student
+      // tapping it actually goes through.
+      final offlineNote = await tester.runAsync(
+          () => container.read(contentRepoProvider).material(firstNote.id));
+      expect(offlineNote, isNotNull);
+      expect(offlineNote!.contentHtml.trim(), isNotEmpty,
+          reason: 'A SAVED NOTE MUST OPEN WITH THE SERVER GONE');
+      debugPrint('[journey] note opened offline: '
+          '${offlineNote.contentHtml.length} chars');
+
+      // And its pictures are still found on disk.
+      for (final url in embedded) {
+        expect(store.assetPath(url), isNotNull,
+            reason: 'a saved picture must still be found offline');
+      }
+
+      // The question pool is readable with nothing but the phone.
+      final offlineQuestions =
+          await tester.runAsync(() => store.allQuestions()) ?? const [];
+      expect(offlineQuestions, isNotEmpty,
+          reason: 'QUESTIONS MUST BE READABLE WITH THE SERVER GONE');
+      debugPrint('[journey] ${offlineQuestions.length} questions readable '
+          'offline');
+
+      // And a round can be started from them, marked on the device.
+      final markableNow = offlineQuestions.where(isMarkableOffline).toList();
+      if (markableNow.isNotEmpty) {
+        final id = await tester.runAsync(() =>
+            container.read(assessmentRepoProvider).startOfflinePractice());
+        expect(id, isNotNull);
+        expect(id!.startsWith(kLocalAttemptPrefix), isTrue);
+
+        final session = await tester.runAsync(() =>
+            container.read(assessmentRepoProvider).openAttempt(id));
+        expect(session!.questions, isNotEmpty,
+            reason: 'AN OFFLINE ROUND MUST HAVE QUESTIONS IN IT');
+
+        final q = session.questions.first;
+        final verdict = await tester.runAsync(() => container
+            .read(assessmentRepoProvider)
+            .answerPractice(id, q.id, choice: q.correctKey ?? ''));
+        expect(verdict!.correct, isTrue,
+            reason: 'an offline round must mark the right answer right');
+        debugPrint('[journey] offline round: ${session.questions.length} '
+            'questions, marked on the device');
+      }
+    }
+
     await store.flush();
-    final reopened = await OfflineStore.open();
+    final reopened = await tester.runAsync(OfflineStore.open);
     expect(reopened, isNotNull);
     expect(reopened!.readable, isNotEmpty,
         reason: 'the catalogue must survive being read back from scratch');
-    expect(await reopened.readNote(firstNote.id), isNotNull,
-        reason: 'a saved note must be readable with nothing in memory');
-    for (final url in embedded) {
-      expect(reopened.assetPath(url), isNotNull,
-          reason: 'a saved picture must be findable with nothing in memory');
-    }
 
     debugPrint('[journey] ${store.readable.length} items, '
         '${store.assetCount} pictures, ${questions.length} questions, '

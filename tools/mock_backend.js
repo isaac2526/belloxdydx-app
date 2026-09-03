@@ -938,6 +938,11 @@ const server = http.createServer(async (req, res) => {
   const body = await readBody(req);
   LOG_PATH = `${req.method} ${path}${url.search}`;
 
+  if (path === '/__test/settings') {
+    if (req.method === 'POST') Object.assign(MOCK_SETTINGS, body);
+    return send(res, 200, MOCK_SETTINGS);
+  }
+
   // ---- real bytes for the offline sync -----------------------
   // A 1x1 PNG and a silent MP3 frame. The point is not the content:
   // it is that the sync fetches, stores and re-reads REAL files, and
@@ -1038,11 +1043,6 @@ const server = http.createServer(async (req, res) => {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
       return send(res, 200, RPC.bx_dashboard(u, {}));
     }
-    if (path === '/__test/settings') {
-      if (req.method === 'POST') Object.assign(MOCK_SETTINGS, body);
-      return send(res, 200, MOCK_SETTINGS);
-    }
-
     if (path === '/api/mobile/settings') {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
       return send(res, 200, RPC.bx_app_settings(u, {}));
@@ -1128,7 +1128,23 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, RPC.bx_submit_attempt(u, { p_attempt_id: body.attemptId }));
       }
       if (req.method === 'GET') {
-        return send(res, 200, RPC.bx_open_attempt(u, { p_attempt_id: tail }));
+        const opened = RPC.bx_open_attempt(u, { p_attempt_id: tail });
+        // The website's own /api/practice/[id] does `select("*")` and
+        // ships the questions WHOLE for untimed modes -- key, accepted
+        // answers, explanation and all -- while the direct RPC withholds
+        // the key until a question has been answered. That difference is
+        // real and the app has to cope with both, so the mock reproduces
+        // it rather than smoothing it over. Exams stay sealed on both.
+        if (!opened.error && path.startsWith('/api/practice/')) {
+          const a = state.attempts[tail];
+          if (a && a.mode !== 'test' && a.mode !== 'exam') {
+            opened.questions = a.question_ids.map((qid) => {
+              const q = QUESTIONS.find((x) => x.id === qid);
+              return publicQuestion(q, { withAnswer: true });
+            });
+          }
+        }
+        return send(res, 200, opened);
       }
       return send(res, 200, RPC.bx_submit_attempt(u, { p_attempt_id: tail }));
     }
