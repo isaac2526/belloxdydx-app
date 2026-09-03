@@ -39,6 +39,50 @@ import 'ui.dart';
 /// Whoever is currently making noise. Starting a clip stops the last one.
 _BxAudioState? _current;
 
+/// Where a voice note's bytes should come from.
+@immutable
+class BxAudioSource {
+  /// A file already on the phone. Always preferred.
+  final String? path;
+
+  /// The network, when there is no saved copy.
+  final String? url;
+
+  const BxAudioSource({this.path, this.url});
+
+  bool get isLocal => path != null;
+  bool get isMissing => path == null && url == null;
+
+  static const nothing = BxAudioSource();
+}
+
+/// Chooses between the saved copy and the network.
+///
+/// A saved copy always wins: it is instant, it costs the student
+/// nothing, and it works with the radio off — which is the entire
+/// reason the sync bothered to fetch it. A cached path that has since
+/// been deleted falls through to the network rather than failing, so a
+/// stale catalogue entry cannot silence a voice note.
+///
+/// Top level and pure so it can be tested without a running audio
+/// engine — just_audio has no Linux implementation, so the widget's own
+/// playback cannot be exercised anywhere but a device, and the decision
+/// this function makes is the part that was actually missing.
+Future<BxAudioSource> resolveAudioSource(String url) async {
+  final local = Offline.pathFor(url);
+  if (local != null) {
+    try {
+      if (await File(local).exists()) return BxAudioSource(path: local);
+    } catch (_) {
+      // An unreadable cache entry is not a reason to give up on the
+      // clip; the network copy is still there.
+    }
+  }
+  return url.trim().isEmpty
+      ? BxAudioSource.nothing
+      : BxAudioSource(url: url.trim());
+}
+
 class BxAudio extends StatefulWidget {
   /// The remote URL. May be empty when [localPath] is given.
   final String url;
@@ -84,17 +128,7 @@ class _BxAudioState extends State<BxAudio> {
     super.dispose();
   }
 
-  /// Where the bytes should come from. A saved copy always wins: it is
-  /// instant, it costs nothing, and it works with the radio off.
-  Future<({String? path, String? url})> _source() async {
-    final local = Offline.pathFor(widget.url);
-    if (local != null) {
-      try {
-        if (await File(local).exists()) return (path: local, url: null);
-      } catch (_) {}
-    }
-    return (path: null, url: widget.url.isEmpty ? null : widget.url);
-  }
+  Future<BxAudioSource> _source() => resolveAudioSource(widget.url);
 
   Future<bool> _prepare() async {
     if (_player != null && _stage == _Stage.ready) return true;
@@ -105,7 +139,7 @@ class _BxAudioState extends State<BxAudio> {
     });
 
     final src = await _source();
-    if (src.path == null && src.url == null) {
+    if (src.isMissing) {
       if (mounted) {
         setState(() {
           _stage = _Stage.failed;
@@ -157,14 +191,14 @@ class _BxAudioState extends State<BxAudio> {
       if (!mounted) return false;
       setState(() {
         _duration = d ?? _duration;
-        _fromDisk = src.path != null;
+        _fromDisk = src.isLocal;
         _stage = _Stage.ready;
       });
       return true;
     } catch (e) {
       // A saved copy that will not open is worse than none: fall back to
       // the network once before giving up.
-      if (src.path != null && widget.url.isNotEmpty) {
+      if (src.isLocal && widget.url.isNotEmpty) {
         try {
           final d = await player
               .setUrl(widget.url)
