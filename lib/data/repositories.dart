@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/config.dart';
@@ -865,7 +866,9 @@ class AssessmentRepository {
         'p_choice': choice.isEmpty ? null : choice,
         'p_answer_text': answerText.isEmpty ? null : answerText,
       });
-      return AnswerVerdict.fromJson(_b.shieldDeep(r));
+      final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
+      await _rememberVerdict(questionId, verdict);
+      return verdict;
     }
     final r = await _b.apiSend('/api/practice/answer', body: {
       'attemptId': attemptId,
@@ -873,7 +876,48 @@ class AssessmentRepository {
       'choice': choice,
       'answerText': answerText,
     });
-    return AnswerVerdict.fromJson(_b.shieldDeep(r));
+    final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
+    await _rememberVerdict(questionId, verdict);
+    return verdict;
+  }
+
+  /// Folds what the server just revealed back into the cached question.
+  ///
+  /// The direct path opens an attempt with the answer key STRIPPED and
+  /// only discloses it once the student has committed an answer. That is
+  /// the right call for the server and it means the cached copy of a
+  /// question is incomplete until this runs. Without it, a question
+  /// practised online would still be unmarkable offline.
+  Future<void> _rememberVerdict(String questionId, AnswerVerdict v) async {
+    final store = _store;
+    if (store == null) return;
+    if ((v.correctKey ?? '').isEmpty &&
+        (v.acceptedAnswer ?? '').isEmpty &&
+        (v.explanationHtml ?? '').isEmpty) {
+      return;
+    }
+    try {
+      for (final item in store.items.where((i) => i.kind == 'questions')) {
+        final rows = await store.questions(item.courseId);
+        if (!rows.any((r) => '${r['id']}' == questionId)) continue;
+        await store.putQuestions(item.courseId, [
+          {
+            'id': questionId,
+            if ((v.correctKey ?? '').isNotEmpty) 'correct_key': v.correctKey,
+            if ((v.acceptedAnswer ?? '').isNotEmpty)
+              'answer_text': v.acceptedAnswer,
+            if ((v.explanationHtml ?? '').isNotEmpty)
+              'explanation_html': v.explanationHtml,
+            if ((v.explanationImageUrl ?? '').isNotEmpty)
+              'explanation_image_url': v.explanationImageUrl,
+            if ((v.explanationAudioUrl ?? '').isNotEmpty)
+              'explanation_audio_url': v.explanationAudioUrl,
+          }
+        ]);
+      }
+    } catch (e) {
+      debugPrint('[offline] could not fold in the verdict: $e');
+    }
   }
 
   /// Test/exam answer. Never returns correctness. Always returns the
@@ -1151,6 +1195,51 @@ class AssessmentRepository {
   /// Only untimed work is ever written to disk.
   static bool _cacheable(AttemptMode mode) => !mode.isTimed;
 
+  /// Pulls down the pictures and voice notes a set of questions points
+  /// at, right now rather than at the next sync.
+  ///
+  /// Without this there is a chicken and egg: the sync prefetches media
+  /// for questions it already holds, and it only holds questions after
+  /// a round has been opened — so the first round's diagrams would not
+  /// be on the phone until a sync that happens later. A student who
+  /// practises once and then loses signal would have the text and a
+  /// grey box.
+  Future<void> _keepQuestionMedia(Iterable<Question> questions) async {
+    final store = _store;
+    if (store == null) return;
+    final urls = <String>{};
+    for (final q in questions) {
+      for (final raw in [
+        q.questionImageUrl,
+        q.questionAudioUrl,
+        q.explanationImageUrl,
+        q.explanationAudioUrl,
+      ]) {
+        if (raw != null && raw.trim().isNotEmpty) urls.add(raw);
+      }
+      for (final body in [q.questionHtml, q.explanationHtml ?? '']) {
+        for (final m in kEmbeddedStorageUrl.allMatches(body)) {
+          urls.add(m.group(0)!);
+        }
+      }
+    }
+    for (final raw in urls) {
+      final url = _b.fileUrl(raw);
+      if (url.isEmpty || store.hasAsset(url)) continue;
+      try {
+        final res = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 30));
+        if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+          await store.putAsset(url, res.bodyBytes);
+        }
+      } catch (_) {
+        // One missing diagram is not worth failing a round over.
+      }
+    }
+    await store.flush();
+  }
+
   Future<void> _remember(AttemptSession s) async {
     final store = _store;
     if (store == null || !_cacheable(s.mode)) return;
@@ -1159,6 +1248,7 @@ class AssessmentRepository {
         s.courseId.isEmpty ? 'general' : s.courseId,
         s.questions.map((q) => q.toJson()).toList(),
       );
+      unawaited(_keepQuestionMedia(s.questions));
       // The session itself, so a resume works with the radio off.
       await store.putAttempt(s.id, {
         'at': DateTime.now().millisecondsSinceEpoch,
@@ -1178,6 +1268,7 @@ class AssessmentRepository {
     try {
       await store.putQuestions(
           bucket, questions.map((q) => q.toJson()).toList());
+      unawaited(_keepQuestionMedia(questions));
     } catch (e) {
       debugPrint('[offline] could not keep $bucket: $e');
     }
@@ -1252,6 +1343,18 @@ class AssessmentRepository {
           'No saved questions yet. Do one round with data and they save '
           'themselves.');
     }
+
+    // Only questions that can actually be MARKED. A round where every
+    // answer comes back wrong because the key was never on the phone is
+    // worse than no round at all, and the direct path deliberately
+    // withholds the key until a question has been answered once.
+    final markable = rows.where(isMarkableOffline).toList();
+    if (markable.isEmpty) {
+      throw const BxError(
+          'Your saved questions cannot be marked without data yet. Answer a '
+          'few with your data on and they will be ready offline.');
+    }
+    rows = markable;
     rows.shuffle();
     final picked = rows.take(count.clamp(1, rows.length)).toList();
 

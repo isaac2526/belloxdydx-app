@@ -727,6 +727,23 @@ String normalizeShortAnswer(String v) => v
     .replaceAll(RegExp('^[\\s.,;:!?\'"()-]+|[\\s.,;:!?\'"()-]+\$'), '')
     .trim();
 
+/// Whether a cached question carries enough to be marked with no signal.
+///
+/// A multiple-choice or true/false question needs its key; a typed one
+/// needs at least one accepted spelling. Anything else can still be
+/// READ offline — the text, the picture, the explanation — but it must
+/// not be put into a round that claims to mark itself, because every
+/// answer would come back wrong.
+bool isMarkableOffline(Map<String, dynamic> row) {
+  final type = '${row['question_type'] ?? row['questionType'] ?? 'mcq'}';
+  if (type == 'short_answer') {
+    final accepted = '${row['answer_text'] ?? row['answerText'] ?? ''}';
+    return accepted.trim().isNotEmpty;
+  }
+  final key = '${row['correct_key'] ?? row['correctKey'] ?? ''}';
+  return key.trim().isNotEmpty;
+}
+
 /// Marks one answer on the device. Mirrors `isAnswerCorrect`
 /// (src/lib/attempts.ts:122): a typed answer matches any of the
 /// pipe-separated accepted spellings; everything else compares the key.

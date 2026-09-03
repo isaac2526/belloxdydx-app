@@ -46,3 +46,8 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# The Linux desktop shell exists only so the integration test can drive
+# the real app against a real filesystem. It is generated on demand by
+# `flutter create --platforms=linux .` and is not part of the product.
+/linux/

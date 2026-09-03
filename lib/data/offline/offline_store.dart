@@ -309,7 +309,21 @@ class OfflineStore {
     });
   }
 
-  Future<void> flush() async {
+  Future<void>? _flushing;
+
+  Future<void> flush() {
+    // Serialised. A sync has three workers touching the catalogue and
+    // several callers of flush(); two overlapping writes would each
+    // stage their own file and the loser's rename would fail on a file
+    // the winner had already moved.
+    final running = _flushing;
+    if (running != null) return running.then((_) => _dirty ? flush() : null);
+    final next = _flushOnce().whenComplete(() => _flushing = null);
+    _flushing = next;
+    return next;
+  }
+
+  Future<void> _flushOnce() async {
     if (!_dirty) return;
     _dirty = false;
     _flush?.cancel();
@@ -324,11 +338,36 @@ class OfflineStore {
       });
       // Written aside and renamed: a kill mid-write leaves the previous
       // catalogue intact instead of a truncated one.
-      final tmp = File('${_indexFile.path}.part');
-      await tmp.writeAsString(payload, flush: true);
-      await tmp.rename(_indexFile.path);
+      await _atomicWrite(_indexFile, (f) => f.writeAsString(payload, flush: true));
     } catch (e) {
       debugPrint('[offline] index write failed: $e');
+    }
+  }
+
+  /// Stages a file next to its target and renames it into place.
+  ///
+  /// The staging name carries a counter, which is not decoration. The
+  /// sync runs three workers, and the same picture is referenced by
+  /// several notes, so two of them routinely download it at once. With
+  /// one shared `<target>.part` the first rename moved the file and the
+  /// second failed with ENOENT — which is exactly what happened the
+  /// first time this ran against a real filesystem, and what no
+  /// single-threaded test would ever have shown.
+  ///
+  /// rename(2) onto an existing path is an atomic replace, so the loser
+  /// of the race simply overwrites identical bytes.
+  static int _stage = 0;
+
+  Future<void> _atomicWrite(File target, Future<void> Function(File) write) async {
+    final tmp = File('${target.path}.${_stage++}.part');
+    try {
+      await write(tmp);
+      await tmp.rename(target.path);
+    } catch (e) {
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+      rethrow;
     }
   }
 
@@ -405,19 +444,19 @@ class OfflineStore {
   /// Writes bytes into a bucket atomically and returns the relative path.
   Future<String> _write(String bucket, String name, List<int> bytes) async {
     final dir = await _bucket(bucket);
-    final target = File('${dir.path}/$name');
-    final tmp = File('${target.path}.part');
-    await tmp.writeAsBytes(bytes, flush: true);
-    await tmp.rename(target.path);
+    await _atomicWrite(
+      File('${dir.path}/$name'),
+      (f) => f.writeAsBytes(bytes, flush: true),
+    );
     return '$bucket/$name';
   }
 
   Future<String> _writeText(String bucket, String name, String text) async {
     final dir = await _bucket(bucket);
-    final target = File('${dir.path}/$name');
-    final tmp = File('${target.path}.part');
-    await tmp.writeAsString(text, flush: true);
-    await tmp.rename(target.path);
+    await _atomicWrite(
+      File('${dir.path}/$name'),
+      (f) => f.writeAsString(text, flush: true),
+    );
     return '$bucket/$name';
   }
 
@@ -646,10 +685,49 @@ class OfflineStore {
   Future<void> putQuestions(String bucket, List<Map<String, dynamic>> rows) async {
     if (rows.isEmpty) return;
     final safe = _safeName(bucket);
+
+    // MERGED, not replaced, and merged field by field.
+    //
+    // The same question arrives in different states of undress
+    // depending on when it is seen. On the direct path an attempt opens
+    // with the answer key stripped and only fills it in once the
+    // student has answered; a result review carries the explanation; a
+    // second attempt on the same course carries neither. Overwriting
+    // the bucket with whichever copy arrived last would strip a key we
+    // already held — and a cached question with no key cannot be marked
+    // offline, which is the whole point of keeping it.
+    final merged = <String, Map<String, dynamic>>{};
+    for (final existing in await questions(bucket)) {
+      final id = '${existing['id'] ?? ''}';
+      if (id.isNotEmpty) merged[id] = existing;
+    }
+    for (final row in rows) {
+      final id = '${row['id'] ?? ''}';
+      if (id.isEmpty) continue;
+      final before = merged[id];
+      if (before == null) {
+        merged[id] = row;
+        continue;
+      }
+      final out = Map<String, dynamic>.from(before);
+      row.forEach((k, v) {
+        final incomingIsEmpty =
+            v == null || (v is String && v.trim().isEmpty) || (v is List && v.isEmpty);
+        final heldIsEmpty = out[k] == null ||
+            (out[k] is String && (out[k] as String).trim().isEmpty) ||
+            (out[k] is List && (out[k] as List).isEmpty);
+        if (!incomingIsEmpty || heldIsEmpty) out[k] = v;
+      });
+      merged[id] = out;
+    }
+
     await _writeText(
       'questions',
       '$safe.json',
-      jsonEncode({'at': DateTime.now().millisecondsSinceEpoch, 'rows': rows}),
+      jsonEncode({
+        'at': DateTime.now().millisecondsSinceEpoch,
+        'rows': merged.values.toList(),
+      }),
     );
     final bytes = await _sizeOf('questions/$safe.json');
     _items['q:$safe'] = OfflineItem(
@@ -660,7 +738,7 @@ class OfflineStore {
       htmlRel: 'questions/$safe.json',
       bytes: bytes,
       savedAtMs: DateTime.now().millisecondsSinceEpoch,
-      sig: '${rows.length}',
+      sig: '${merged.length}',
     );
     _touch();
   }

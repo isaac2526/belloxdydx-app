@@ -72,8 +72,20 @@ const COURSES = [
   { id: uid(108), code: 'GST 111', title: 'Communication in English', semester: 2, sort_order: 3, level_code: '100' },
 ];
 
+// The storage origin the app's shield recognises. Served for real by
+// this mock (see /storage/v1/object/public below) so a sync downloads
+// actual bytes and an offline reader has something to draw.
+const STORAGE = `http://127.0.0.1:${PORT}/storage/v1/object/public`;
+
 const NOTE_BODY = `
 <h2>Newton's Laws of Motion</h2>
+<figure>
+  <img src="${STORAGE}/materials/images/newton-diagram.png"
+       alt="A free body diagram">
+  <figcaption>A free body diagram</figcaption>
+</figure>
+<audio controls src="${STORAGE}/materials/audio/tutor-note.mp3"
+       title="Tutor Bello walks through this"></audio>
 <p>Momentum is the product of an object's <strong>mass</strong> and its
 <strong>velocity</strong>. It is a vector quantity, so direction matters.</p>
 <h3>First law</h3>
@@ -146,12 +158,15 @@ for (const c of COURSES) {
 const QUESTION_BANK = [
   {
     html: 'The SI unit of <strong>momentum</strong> is:',
+    image: `${STORAGE}/questions/momentum.png`,
+    audio: `${STORAGE}/questions/momentum.mp3`,
     options: [['A', 'Newton'], ['B', 'kg&middot;m/s'], ['C', 'Joule'], ['D', 'Watt']],
     correct: 'B',
     why: '<p>Momentum is mass &times; velocity, so its unit is kg&middot;m/s. A newton is the unit of <em>force</em>, which is the rate of change of momentum.</p>',
   },
   {
     html: 'Which of these is a <strong>vector</strong> quantity?',
+    image: `${STORAGE}/questions/vector.png`,
     options: [['A', 'Speed'], ['B', 'Mass'], ['C', 'Velocity'], ['D', 'Temperature']],
     correct: 'C',
     why: '<p>Velocity carries a direction; speed is only its magnitude.</p>',
@@ -195,8 +210,8 @@ for (const c of COURSES) {
       question_html: isShort
         ? `State the SI unit of momentum. <em>(${c.code}, question ${i + 1})</em>`
         : `${t.html} <em>(${c.code}, question ${i + 1})</em>`,
-      question_image_url: null,
-      question_audio_url: null,
+      question_image_url: isShort ? null : (t.image || null),
+      question_audio_url: isShort ? null : (t.audio || null),
       options: isTF
         ? []
         : isShort
@@ -206,8 +221,8 @@ for (const c of COURSES) {
       correct_key: isTF ? 'T' : isShort ? '' : t.correct,
       answer_text: isShort ? 'kgm/s|kg m/s|kilogram metre per second' : null,
       explanation_html: t.why,
-      explanation_image_url: null,
-      explanation_audio_url: null,
+      explanation_image_url: t.image ? `${STORAGE}/questions/why-${i % 3}.png` : null,
+      explanation_audio_url: `${STORAGE}/questions/why-${i % 3}.mp3`,
       marks: 1,
       course: c.code,
     });
@@ -363,7 +378,51 @@ function gradeOne(q, choice, answerText) {
 // RPC implementations
 // ------------------------------------------------------------
 
+// The device register, exactly as 0011_app_security.sql defines it:
+// the FIRST device a student signs in from is trusted on sight, every
+// one after it must prove itself.
+const DEVICES = [];
+
+// Flipped at runtime by the driver through /__test/settings, which is
+// how the "no new build" claim gets exercised rather than asserted.
+const MOCK_SETTINGS = {
+  allowScreenshots: false,
+  deviceVerification: true,
+  lockMinutes: 5,
+};
+
 const RPC = {
+  bx_app_settings: () => ({
+    allowScreenshots: MOCK_SETTINGS.allowScreenshots,
+    deviceVerification: MOCK_SETTINGS.deviceVerification,
+    lockMinutes: MOCK_SETTINGS.lockMinutes,
+  }),
+
+  bx_device_seen: (u, p) => {
+    const id = String(p.p_device_id || '');
+    if (id.length < 8) return { error: 'bad_device' };
+    const mine = DEVICES.filter((d) => d.user_id === u.id);
+    const found = mine.find((d) => d.device_id === id);
+    const now = new Date().toISOString();
+    if (found) {
+      found.last_seen_at = now;
+      if (!found.trusted_at && p.p_verified) found.trusted_at = now;
+      return { known: true, trusted: !!found.trusted_at, total: mine.length };
+    }
+    const isFirst = mine.length === 0;
+    const trusted = isFirst || !!p.p_verified;
+    DEVICES.push({
+      user_id: u.id,
+      device_id: id,
+      platform: p.p_platform || 'unknown',
+      label: p.p_label || '',
+      first_seen_at: now,
+      last_seen_at: now,
+      trusted_at: trusted ? now : null,
+    });
+    return { known: false, trusted, first: isFirst, total: mine.length + 1 };
+  },
+
   bx_capabilities: () => ({ version: 1, direct: true, features: ['content', 'attempts', 'grading'] }),
 
   bx_email_for_username: (_u, p) => {
@@ -409,6 +468,8 @@ const RPC = {
         { code: '200', title: '200 Level', owned: false },
       ],
       level,
+      // Carried on the bootstrap, exactly as the real route does.
+      settings: RPC.bx_app_settings(u, {}),
     };
   },
 
@@ -877,6 +938,29 @@ const server = http.createServer(async (req, res) => {
   const body = await readBody(req);
   LOG_PATH = `${req.method} ${path}${url.search}`;
 
+  // ---- real bytes for the offline sync -----------------------
+  // A 1x1 PNG and a silent MP3 frame. The point is not the content:
+  // it is that the sync fetches, stores and re-reads REAL files, and
+  // that an offline reader draws from disk instead of the network.
+  if (path.startsWith('/storage/v1/object/public/')) {
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const mp3 = Buffer.from('SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA', 'base64');
+    const isAudio = /\.mp3$/.test(path);
+    const body = isAudio ? mp3 : png;
+    res.writeHead(200, {
+      'content-type': isAudio ? 'audio/mpeg' : 'image/png',
+      'content-length': body.length,
+      'cache-control': 'public, max-age=86400',
+    });
+    process.stdout.write(`200 ${req.method} ${path}  (${body.length} bytes)\n`);
+    return res.end(req.method === 'HEAD' ? undefined : body);
+  }
+
+
+
   // ---------- Supabase Auth ----------
   if (path === '/auth/v1/token') {
     const grant = url.searchParams.get('grant_type');
@@ -954,6 +1038,36 @@ const server = http.createServer(async (req, res) => {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
       return send(res, 200, RPC.bx_dashboard(u, {}));
     }
+    if (path === '/__test/settings') {
+      if (req.method === 'POST') Object.assign(MOCK_SETTINGS, body);
+      return send(res, 200, MOCK_SETTINGS);
+    }
+
+    if (path === '/api/mobile/settings') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, RPC.bx_app_settings(u, {}));
+    }
+    if (path === '/api/mobile/device') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      if (req.method === 'GET') {
+        const id = url.searchParams.get('deviceId') || '';
+        const rows = DEVICES.filter((d) => d.user_id === u.id);
+        const mine = rows.find((d) => d.device_id === id);
+        return send(res, 200, {
+          known: !!mine,
+          trusted: !!(mine && mine.trusted_at),
+          total: rows.length,
+          devices: rows,
+        });
+      }
+      return send(res, 200, RPC.bx_device_seen(u, {
+        p_device_id: body.deviceId,
+        p_platform: body.platform,
+        p_label: body.label,
+        p_verified: body.verified === true,
+      }));
+    }
+
     if (path === '/api/mobile/content') {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
       return send(res, 200, RPC.bx_content(u, {}));

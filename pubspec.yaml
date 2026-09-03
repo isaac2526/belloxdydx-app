@@ -58,6 +58,12 @@ dev_dependencies:
   # the real OfflineStore against a real temporary folder.
   path_provider_platform_interface: ^2.1.0
   plugin_platform_interface: ^2.1.0
+
+  # Drives the REAL app on a real desktop target: a real filesystem, a
+  # real HTTP stack, real files on disk. The widget tests cannot prove
+  # the offline layer works end to end; this can.
+  integration_test:
+    sdk: flutter
   flutter_launcher_icons: ^0.14.1
 
 flutter:

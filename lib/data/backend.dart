@@ -123,13 +123,30 @@ class Backend {
 
   void watchConnectivity() {
     if (_connWatch != null) return;
-    final conn = Connectivity();
+
     void apply(List<ConnectivityResult> r) {
-      _hasConnection = !(r.isEmpty || r.every((x) => x == ConnectivityResult.none));
+      _hasConnection =
+          !(r.isEmpty || r.every((x) => x == ConnectivityResult.none));
     }
 
-    unawaited(conn.checkConnectivity().then(apply).catchError((_) {}));
-    _connWatch = conn.onConnectivityChanged.listen(apply, onError: (_) {});
+    // Wrapped whole, and each call wrapped again inside.
+    //
+    // connectivity_plus reaches the platform differently on each OS, and
+    // on some of them the failure does not arrive as a rejected future
+    // at all — on Linux it surfaces as an unhandled SocketException from
+    // a dbus connection deep inside the plugin, which takes down the
+    // zone rather than the call. Knowing whether the radio is on is a
+    // nicety; it decides which of two sentences a student is shown. It
+    // may never be the reason the app stops.
+    try {
+      final conn = Connectivity();
+      runZonedGuarded(() {
+        unawaited(conn.checkConnectivity().then(apply).catchError((_) {}));
+        _connWatch = conn.onConnectivityChanged.listen(apply, onError: (_) {});
+      }, (e, _) => debugPrint('[net] connectivity unavailable: $e'));
+    } catch (e) {
+      debugPrint('[net] connectivity unavailable: $e');
+    }
   }
 
   // ------------------------------------------------------------

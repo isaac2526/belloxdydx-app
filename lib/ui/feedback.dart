@@ -70,32 +70,57 @@ class BxSkeletonList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.bx;
-    return Column(
-      children: List.generate(
-        count,
-        (i) => Padding(
-          padding: const EdgeInsets.only(bottom: BxSpace.sm),
-          child: Container(
-            height: itemHeight,
-            padding: const EdgeInsets.all(BxSpace.md),
-            decoration: BoxDecoration(
-              color: c.surface,
-              borderRadius: BxRadius.card,
-              border: Border.all(color: c.line),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                BxSkeleton(width: 160 + (i % 3) * 40, height: 13),
-                const SizedBox(height: BxSpace.xs),
-                BxSkeleton(width: 100 + (i % 2) * 60, height: 10),
-              ],
+    // Draws only as many rows as it has room for.
+    //
+    // A skeleton is what a student looks at while they WAIT, so it is
+    // the one thing in the app that must not be able to fail. Dropped
+    // into a box too short for every row — the loading state of a
+    // bottom sheet, a short card, a split view — a plain Column drew a
+    // black-and-yellow overflow stripe across it, which is the app
+    // telling the student it is broken while it loads.
+    //
+    // Clipping alone does not fix that: the flex still asserts, it just
+    // hides the evidence. So the count is decided from the box instead.
+    // Given room for four rows it draws four, and nobody can tell the
+    // difference between four grey bars and six.
+    return LayoutBuilder(builder: (context, box) {
+      final rows = box.hasBoundedHeight
+          ? ((box.maxHeight + BxSpace.sm) / (itemHeight + BxSpace.sm))
+              .floor()
+              .clamp(1, count)
+          : count;
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(
+          rows,
+          (i) => Padding(
+            padding: const EdgeInsets.only(bottom: BxSpace.sm),
+            child: Container(
+              // A MINIMUM, not a fixed height. It was fixed, and a
+              // caller asking for a shorter row than the two bars plus
+              // the padding need overflowed by exactly the difference.
+              constraints: BoxConstraints(minHeight: itemHeight),
+              padding: const EdgeInsets.all(BxSpace.md),
+              decoration: BoxDecoration(
+                color: c.surface,
+                borderRadius: BxRadius.card,
+                border: Border.all(color: c.line),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  BxSkeleton(width: 160 + (i % 3) * 40, height: 13),
+                  const SizedBox(height: BxSpace.xs),
+                  BxSkeleton(width: 100 + (i % 2) * 60, height: 10),
+                ],
+              ),
             ),
           ),
         ),
-      ),
-    );
+      );
+    });
   }
 }
 

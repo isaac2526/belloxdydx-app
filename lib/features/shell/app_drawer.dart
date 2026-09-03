@@ -39,7 +39,11 @@ final shellScaffoldKey = Provider<GlobalKey<ScaffoldState>>(
 /// button rather than offer one that does nothing.
 bool openAppDrawer(WidgetRef ref) {
   final state = ref.read(shellScaffoldKey).currentState;
-  if (state == null || !state.hasDrawer) return false;
+  if (state == null || !state.hasDrawer) {
+    debugPrint('[drawer] no shell scaffold to open '
+        '(state: ${state == null ? 'null' : 'present'})');
+    return false;
+  }
   state.openDrawer();
   return true;
 }
@@ -52,14 +56,27 @@ class AppDrawer extends ConsumerWidget {
     final c = context.bx;
     final profile = ref.watch(profileProvider);
 
+    // Captured BEFORE anything closes the drawer.
+    //
+    // The obvious spelling — `Navigator.of(context).pop(); context.push(…)`
+    // — reads fine and is wrong: once the drawer has popped, its own
+    // element is being torn down, and looking a Navigator or a Router
+    // up through it is an ancestor lookup on a deactivated widget. In a
+    // debug build that asserts; in a release build it silently resolves
+    // to the wrong tree, which is how a bottom sheet ends up parented
+    // inside the drawer that opened it and drawn 274 pixels wide.
+    final router = GoRouter.of(context);
+    final navigator = Navigator.of(context);
+    final rootContext = navigator.context;
+
     void go(String route) {
-      Navigator.of(context).pop();
-      context.push(route);
+      navigator.pop();
+      router.push(route);
     }
 
     void goTab(String route) {
-      Navigator.of(context).pop();
-      context.go(route);
+      navigator.pop();
+      router.go(route);
     }
 
     return Drawer(
@@ -78,8 +95,8 @@ class AppDrawer extends ConsumerWidget {
                     label: 'Practice a course',
                     hint: 'Pick any course and start a round',
                     onTap: () {
-                      Navigator.of(context).pop();
-                      showCoursePicker(context, ref);
+                      navigator.pop();
+                      showCoursePicker(rootContext, ref);
                     },
                   ),
                   _Row(
@@ -248,6 +265,8 @@ class _Foot extends ConsumerWidget {
               tooltip: 'Lock now',
               onPressed: () {
                 Navigator.of(context).pop();
+                // Read from the provider, not from `context`, precisely
+                // because the drawer is on its way out.
                 ref.read(appLockProvider.notifier).lock();
               },
               icon: Icon(Icons.lock_outline_rounded, size: 20, color: c.inkSoft),
@@ -406,7 +425,7 @@ class _CoursePickerState extends ConsumerState<_CoursePicker> {
               child: content.when(
                 loading: () => const Padding(
                   padding: EdgeInsets.symmetric(horizontal: BxSpace.md),
-                  child: BxSkeletonList(count: 6, itemHeight: 58),
+                  child: BxSkeletonList(count: 6),
                 ),
                 error: (_, __) => Padding(
                   padding: const EdgeInsets.all(BxSpace.md),

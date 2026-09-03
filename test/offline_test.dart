@@ -234,6 +234,64 @@ void main() {
   });
 
   // ------------------------------------------------------------
+  group('parallel writers do not trip over each other', () {
+    // Found by running the real app against a real filesystem, not by
+    // reading the code. The sync uses three workers and the same
+    // picture is referenced by several notes, so two of them routinely
+    // download it at once. With one shared "<target>.part" staging
+    // name, the first rename moved the file and the second failed with
+    // ENOENT — silently losing that file from the vault.
+    test('the same asset fetched concurrently lands exactly once', () async {
+      final store = await open();
+      const url = 'https://p.supabase.co/storage/v1/object/public/x/same.png';
+
+      await Future.wait([
+        for (var i = 0; i < 12; i++) store.putAsset(url, [i, i, i, i]),
+      ]);
+      await store.flush();
+
+      expect(store.assetCount, 1);
+      final path = store.assetPath(url);
+      expect(path, isNotNull);
+      expect(File(path!).existsSync(), isTrue);
+
+      // No staging files left lying around.
+      final leftovers = Directory('${docs.path}/offline/assets')
+          .listSync()
+          .where((f) => f.path.contains('.part'))
+          .toList();
+      expect(leftovers, isEmpty, reason: 'staged files must be cleaned up');
+    });
+
+    test('the same note written twice at once survives', () async {
+      final store = await open();
+      await Future.wait([
+        store.putNote(id: 'n1', title: 'A', html: '<p>one</p>'),
+        store.putNote(id: 'n1', title: 'A', html: '<p>one</p>'),
+        store.putNote(id: 'n1', title: 'A', html: '<p>one</p>'),
+      ]);
+      await store.flush();
+      expect(await store.readNote('n1'), '<p>one</p>');
+    });
+
+    test('overlapping flushes all complete and the index is valid', () async {
+      final store = await open();
+      for (var i = 0; i < 20; i++) {
+        await store.putNote(id: 'n$i', title: 'T$i', html: '<p>$i</p>');
+      }
+      await Future.wait([store.flush(), store.flush(), store.flush()]);
+
+      final raw =
+          await File('${docs.path}/offline/index.json').readAsString();
+      expect(() => jsonDecode(raw), returnsNormally,
+          reason: 'a half-written catalogue is worse than none');
+
+      final reopened = await open();
+      expect(reopened.readable.length, 20);
+    });
+  });
+
+  // ------------------------------------------------------------
   group('one student never sees another one\'s downloads', () {
     test('a different owner wipes the store', () async {
       final store = await open();
