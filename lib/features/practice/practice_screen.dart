@@ -77,11 +77,15 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
         return;
       }
 
-      // Resume where the student stopped, not at the top.
+      // Resume where the student stopped, not at the top — and not one
+      // PAST it either, which is what guessing "the first unanswered
+      // question" did. Somebody who answers and then stops to read the
+      // explanation is sitting on an ANSWERED question; the guess moved
+      // them on and took the explanation away. startIndexFor() prefers
+      // the position the server actually recorded and falls back to the
+      // guess only when there is none.
       final questions = List<Question>.of(session.questions);
-      var start = questions
-          .indexWhere((q) => !(session.answers[q.id]?.isAnswered ?? false));
-      if (start < 0) start = questions.isEmpty ? 0 : questions.length - 1;
+      final start = session.startIndexFor();
 
       final old = _pages;
       for (final c in _typed.values) {
@@ -406,6 +410,12 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
             onPageChanged: (i) {
               FocusScope.of(context).unfocus();
               setState(() => _index = i);
+              // Recorded so the round can be met again exactly here,
+              // whether the app is killed, the phone dies, or the
+              // student comes back on a different day.
+              ref
+                  .read(assessmentRepoProvider)
+                  .reportPosition(widget.attemptId, i);
             },
             itemCount: _total,
             itemBuilder: (_, i) => _questionPage(_questions[i], i),

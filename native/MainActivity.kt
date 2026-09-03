@@ -54,6 +54,48 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    // ============================================================
+    // THE RECENTS THUMBNAIL
+    //
+    // FLAG_SECURE also suppresses the task snapshot Android takes when
+    // an app leaves the foreground - the picture you see in the recents
+    // switcher and during the animation back into the app. With the flag
+    // held permanently there is no snapshot, so returning after even one
+    // second animates from a blank card into a cold-looking app.
+    //
+    // A student described that as "for one second, and the app has
+    // already refreshed". Nothing had refreshed. There was simply no
+    // thumbnail, and the eye reads a blank card as a restart.
+    //
+    // So the flag is dropped for the instant the snapshot is taken and
+    // put straight back. What that costs is precisely: the recents card
+    // may show the last screen. What it buys is an app that looks alive.
+    // Screenshots and screen RECORDING - the thing that actually carries
+    // a question bank away - stay blocked the entire time the app is in
+    // front of the student, which is the only time they can read it.
+    //
+    // onStop rather than onPause: onPause fires for a dialog or a
+    // permission prompt too, and dropping the flag there would leave a
+    // real window of exposure while the student is still looking at the
+    // screen.
+    // ============================================================
+    override fun onStop() {
+        if (!screenshotsAllowed()) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        super.onStop()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Re-applied before the first frame the student can see.
+        applyScreenshotPolicy(screenshotsAllowed())
+    }
+
+    private fun screenshotsAllowed(): Boolean =
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ALLOW_SCREENSHOTS, false)
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 

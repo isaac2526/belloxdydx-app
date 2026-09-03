@@ -1018,6 +1018,57 @@ class AssessmentRepository {
     return AnswerVerdict.fromJson(_b.shieldDeep(r));
   }
 
+  /// Tells the backend which question the student is looking at.
+  ///
+  /// Fire and forget, and deliberately so: this is a bookmark, not a
+  /// commitment. It must never block a swipe, never show an error, and
+  /// never be the reason a page turn feels slow. The website has
+  /// accepted this since it was written (/api/practice/[id] PATCH,
+  /// action "index") and the app simply never sent it.
+  void reportPosition(String attemptId, int index) {
+    if (isLocalAttempt(attemptId)) {
+      unawaited(_rememberPosition(attemptId, index));
+      return;
+    }
+    unawaited(() async {
+      try {
+        if (_b.isDirect) {
+          await _b.rpc('bx_set_attempt_index', params: {
+            'p_attempt_id': attemptId,
+            'p_index': index,
+          });
+        } else {
+          await _b.apiSend('/api/practice/$attemptId',
+              method: 'PATCH', body: {'action': 'index', 'index': index});
+        }
+      } catch (_) {
+        // Offline. The local copy below is what resume will read.
+      }
+      await _rememberPosition(attemptId, index);
+    }());
+  }
+
+  /// Keeps the position on the phone too, so a resume with no signal
+  /// lands in the same place a resume with signal would.
+  Future<void> _rememberPosition(String attemptId, int index) async {
+    final store = _store;
+    if (store == null) return;
+    try {
+      final raw = await store.attempt(attemptId);
+      if (raw == null) return;
+      if (raw['session'] is Map) {
+        final session = Map<String, dynamic>.from(raw['session'] as Map);
+        session['current_index'] = index;
+        raw['session'] = session;
+      } else {
+        raw['current_index'] = index;
+      }
+      await store.putAttempt(attemptId, raw);
+    } catch (e) {
+      debugPrint('[offline] could not keep the position: $e');
+    }
+  }
+
   Future<void> submit(String attemptId) async {
     if (isLocalAttempt(attemptId)) return finishOffline(attemptId);
     if (_b.isDirect) {
@@ -1374,6 +1425,10 @@ class AssessmentRepository {
         'course_code': s.courseCode,
         'course_title': s.courseTitle,
         'course_id': s.courseId,
+        // Without this the position is lost the moment the round is
+        // resumed from disk instead of from the server, which is
+        // precisely the case offline resume exists for.
+        'current_index': s.currentIndex,
       };
 
   // ---- a round taken with no signal ---------------------------

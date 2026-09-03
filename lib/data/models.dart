@@ -41,6 +41,13 @@ bool _bool(dynamic v, [bool fallback = false]) {
 /// `j['is_correct']`, which is an implicit downcast from dynamic: fine
 /// on the web, where dart2js drops the check in release, and a throw on
 /// Android and iOS the moment a backend sends the flag as 0/1 or "t".
+int? _intOrNull(dynamic v) {
+  if (v == null) return null;
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  return int.tryParse('$v');
+}
+
 bool? _boolOrNull(dynamic v) {
   if (v == null) return null;
   if (v is bool) return v;
@@ -594,6 +601,21 @@ class AttemptSession {
   final String courseId;
   final int violations;
 
+  /// Where the student actually was, as the server recorded it.
+  ///
+  /// This is the difference between "meet it back" working and merely
+  /// appearing to. The server has always kept it — attempts.current_index
+  /// is advanced on every committed answer and can be set directly — and
+  /// the app never read it, guessing the position as "the first
+  /// unanswered question" instead. Those are not the same place: a
+  /// student who answers a question and stops to read the explanation is
+  /// sitting ON an answered question, so the guess put them one further
+  /// on and they lost the explanation they had stopped for.
+  ///
+  /// Null means the backend did not tell us, and only then is the guess
+  /// used.
+  final int? currentIndex;
+
   const AttemptSession({
     required this.id,
     required this.mode,
@@ -608,7 +630,19 @@ class AttemptSession {
     this.courseTitle = '',
     this.courseId = '',
     this.violations = 0,
+    this.currentIndex,
   });
+
+  /// The question to open on. Server truth first, the old guess second.
+  int startIndexFor() {
+    if (questions.isEmpty) return 0;
+    final saved = currentIndex;
+    if (saved != null && saved >= 0 && saved < questions.length) return saved;
+    final firstUnanswered =
+        questions.indexWhere((q) => !(answers[q.id]?.isAnswered ?? false));
+    if (firstUnanswered >= 0) return firstUnanswered;
+    return questions.length - 1;
+  }
 
   bool get isSubmitted => status == 'submitted';
 
@@ -651,6 +685,12 @@ class AttemptSession {
           : <String>{},
       endsAt: _date(_pick(j, ['endsAt', 'ends_at'])),
       serverNow: _date(_pick(j, ['serverNow', 'server_now'])),
+      // The website returns it on the attempt object
+      // (/api/practice/[id]:61); the direct RPC and the local snapshot
+      // both put it at the top level.
+      currentIndex: _intOrNull(
+        _pick(j, ['currentIndex', 'current_index']) ?? attempt['current_index'],
+      ),
       title: _str(test['title'] ?? j['title']),
       courseCode: _str(course['code'] ?? _pick(j, ['course_code'])),
       courseTitle: _str(course['title'] ?? _pick(j, ['course_title'])),

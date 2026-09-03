@@ -6,11 +6,18 @@ back here.
 
 Three things:
 
-  1. USE_BIOMETRIC. Without it local_auth cannot use the fingerprint or
-     face sensor at all, isDeviceSupported() reports the phone as
-     incapable, and the app lock quietly marks itself unavailable and
-     never fires. That is why the lock "wasn't working": there was
-     nothing wrong with the lock.
+  1. USE_BIOMETRIC and USE_FINGERPRINT. Belt and braces: the CI workflow
+     already adds USE_BIOMETRIC with a sed, and USE_FINGERPRINT is the
+     pre-Android-9 spelling that an Infinix on Android 8 still wants.
+
+     NOT the reason the app lock failed. An earlier version of this
+     docstring said it was, and that was wrong twice over: neither
+     isDeviceSupported() nor authenticate() consults a manifest
+     permission, and the permission was in the shipped manifest anyway.
+     The lock failed because it starts in the OPEN state on every launch
+     and only engages after five minutes of no touches — see
+     lib/core/security.dart. Leaving the wrong explanation here would
+     have sent the next person looking in the wrong place.
   2. The https deep links for /cbt, /test and /exam.
   3. A check that the Activity really does declare the configChanges
      Flutter needs. If it does not, Android destroys and recreates the

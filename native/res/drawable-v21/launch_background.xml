@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  THE SAME FLAT GROUND, FOR THE QUALIFIER THAT ACTUALLY APPLIES.
+
+  There is a drawable/launch_background.xml next to this one saying the
+  same thing, and for a long time it was the only one — which meant the
+  branded launch colour never appeared on any phone made this decade.
+  Android resolves drawable-v21 ahead of plain drawable on API 21 and
+  above, and the generated project ships a drawable-v21 variant whose
+  item is `?android:colorBackground`. So the file with the brand colour
+  in it was being shadowed by the one that follows the system theme.
+
+  What a student saw: on a phone set to dark mode, a BLACK launch window
+  handing over to a light app. The fix that was supposed to make the
+  handoff invisible was inert, and worse than inert on a dark phone.
+
+  Both qualifiers now carry the same flat colour, so whichever one
+  Android picks is right.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/bx_ground" />
+</layer-list>
