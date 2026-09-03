@@ -680,6 +680,35 @@ class GivenAnswer {
 }
 
 /// What the server returns after a practice answer is committed.
+/// Where a phone stands with an account.
+@immutable
+class DeviceStanding {
+  final bool known;
+  final bool trusted;
+  final int total;
+
+  /// True when we could not ask. The app treats this as "let them in":
+  /// a device check that fails must never keep a paying student out.
+  final bool indeterminate;
+
+  const DeviceStanding({
+    required this.known,
+    required this.trusted,
+    this.total = 0,
+    this.indeterminate = false,
+  });
+
+  static const unknown = DeviceStanding(
+    known: true,
+    trusted: true,
+    indeterminate: true,
+  );
+
+  /// The only case that stops and asks: a phone this account has used
+  /// before on some OTHER device, arriving somewhere new and unproved.
+  bool get mustVerify => !indeterminate && !trusted && total > 1;
+}
+
 /// Attempt ids the app minted itself, for a round taken with no signal.
 const String kLocalAttemptPrefix = 'offline-';
 

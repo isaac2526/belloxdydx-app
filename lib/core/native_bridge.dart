@@ -40,11 +40,32 @@ class ScreenshotPolicy {
 abstract final class NativeBridge {
   static const _channel = MethodChannel('belloxdydx/native');
 
-  /// Only Android carries a native side today. Everything else falls
-  /// through to a no-op, which is why each call is wrapped rather than
-  /// guarded by a platform check at every call site.
+  /// Android and iOS both answer on this channel. They answer
+  /// DIFFERENTLY, on purpose: Android reports true from
+  /// [setAllowScreenshots] because FLAG_SECURE really did take effect,
+  /// and iOS reports false because no iOS API can refuse a screenshot
+  /// and returning a success the platform did not deliver is how a
+  /// settings toggle becomes a lie.
   static bool get _hasNative =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  /// Fires when a student takes a screenshot on iOS. There is no way to
+  /// stop the shot — only to know it happened, after the fact.
+  static void onScreenshot(void Function() taken,
+      {void Function(bool recording)? capturing}) {
+    if (!_hasNative) return;
+    _channel.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'screenshotTaken':
+          taken();
+        case 'screenCaptureChanged':
+          capturing?.call(call.arguments == true);
+      }
+      return null;
+    });
+  }
 
   /// Remembers the theme for the NEXT cold start, so the window Android
   /// paints before Flutter has started already matches what the student

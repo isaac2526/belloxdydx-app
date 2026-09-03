@@ -151,6 +151,17 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :NSFaceIDUsageDescription string 'Unlock Belloxdydx with Face ID so only you can open your account.'" "$P" || true
           /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string 'Attach an image to a question report.'" "$P" || true
 
+      - name: Capture handling for iOS
+        run: |
+          # iOS cannot refuse a screenshot -- no API exists. What this
+          # AppDelegate does is what Apple actually allows: cover the
+          # content while the screen is being RECORDED or mirrored, and
+          # tell Dart after a still shot was taken so it can be
+          # reported. native/ios is the source of truth; the generated
+          # shell's own file is replaced each build.
+          cp native/ios/AppDelegate.swift ios/Runner/AppDelegate.swift
+          test -s ios/Runner/AppDelegate.swift
+
       - run: flutter pub get
 
       - name: Brand icon

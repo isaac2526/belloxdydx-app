@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/providers.dart';
 import '../../data/models.dart';
 import '../../ui/ui.dart';
+import 'app_drawer.dart';
 
 /// ============================================================
 /// THE SHELL
@@ -48,8 +49,16 @@ class AppShell extends ConsumerWidget {
     // width, which is what a startup "drift" looks like.
     final wide = !context.sizeUnknown && context.isWide;
 
+    // The drawer hangs here, on the SHELL's Scaffold, and is opened by
+    // key from inside the tabs — each of which builds its own Scaffold,
+    // so Scaffold.of() from a tab would find the inner one and never
+    // see a drawer hung on this outer one.
+    final key = ref.watch(shellScaffoldKey);
+
     if (wide) {
       return Scaffold(
+        key: key,
+        drawer: const AppDrawer(),
         body: Row(
           children: [
             NavigationRail(
@@ -73,6 +82,8 @@ class AppShell extends ConsumerWidget {
     }
 
     return Scaffold(
+      key: key,
+      drawer: const AppDrawer(),
       body: shell,
       bottomNavigationBar: DecoratedBox(
         decoration: BoxDecoration(
@@ -98,12 +109,16 @@ class AppShell extends ConsumerWidget {
 
 /// The bar every inner screen uses, so titles, back buttons and actions
 /// line up across the whole app.
-class BxAppBar extends StatelessWidget implements PreferredSizeWidget {
+class BxAppBar extends ConsumerWidget implements PreferredSizeWidget {
   final String title;
   final String? subtitle;
   final List<Widget> actions;
   final bool showBack;
   final Widget? bottom;
+
+  /// Offers the drawer when there is nothing to go back to. Turned off
+  /// on a screen that owns its own leading control.
+  final bool showMenu;
 
   const BxAppBar({
     super.key,
@@ -111,6 +126,7 @@ class BxAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.subtitle,
     this.actions = const [],
     this.showBack = true,
+    this.showMenu = true,
     this.bottom,
   });
 
@@ -118,9 +134,17 @@ class BxAppBar extends StatelessWidget implements PreferredSizeWidget {
   Size get preferredSize => Size.fromHeight(bottom == null ? 56 : 104);
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.bx;
     final canPop = showBack && Navigator.of(context).canPop();
+
+    // Back always wins. The drawer is an ADDITIONAL way in, offered
+    // only where the slot is free — so nothing that worked before
+    // changes, and the deeper screens keep their back button.
+    final menu = !canPop &&
+        showMenu &&
+        ref.watch(shellScaffoldKey).currentState?.hasDrawer == true;
+
     return AppBar(
       automaticallyImplyLeading: false,
       leading: canPop
@@ -129,8 +153,14 @@ class BxAppBar extends StatelessWidget implements PreferredSizeWidget {
               tooltip: 'Back',
               onPressed: () => Navigator.of(context).maybePop(),
             )
-          : null,
-      titleSpacing: canPop ? 0 : 16,
+          : menu
+              ? IconButton(
+                  icon: const Icon(Icons.menu_rounded),
+                  tooltip: 'More',
+                  onPressed: () => openAppDrawer(ref),
+                )
+              : null,
+      titleSpacing: (canPop || menu) ? 0 : 16,
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,

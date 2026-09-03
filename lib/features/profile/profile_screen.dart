@@ -12,6 +12,7 @@ import '../../core/router.dart';
 import '../../data/local_store.dart';
 import '../../data/models.dart';
 import '../../ui/ui.dart';
+import '../shell/app_drawer.dart';
 import '../shell/app_shell.dart';
 
 /// ============================================================
@@ -53,7 +54,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     _surname.text = p.surname;
     _phone.text = p.phone;
     _matric.text = p.matricNo;
-    _biometric = ref.read(localStoreProvider).getBool(BxKeys.biometricOn);
+    // Matches the lock's own default: on wherever the phone can
+    // honour it, because a question bank on a borrowed phone is the
+    // thing this exists to stop.
+    _biometric = ref.read(localStoreProvider)
+        .getBool(BxKeys.biometricOn, fallback: true);
   }
 
   @override
@@ -148,18 +153,26 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     }
   }
 
-  /// Quick unlock is only offered when the phone can actually do it, and
-  /// the student is told plainly when it cannot.
+  /// The lock is only offered where the phone can actually honour it,
+  /// and the student is told plainly when it cannot.
+  ///
+  /// What it controls is now a real thing, which it was not before: the
+  /// app closes itself after a few minutes of NOT BEING TOUCHED, or
+  /// after being left in the background, and the phone's own
+  /// fingerprint, face or screen PIN opens it again. Never the account
+  /// password — that was proved at sign-in, and asking for it every few
+  /// minutes only teaches a student to type it in a crowded lecture
+  /// hall.
   Future<void> _setBiometric(bool on) async {
     if (_bioBusy) return;
-    final store = ref.read(localStoreProvider);
+    final lock = ref.read(appLockProvider.notifier);
 
     if (!on) {
       setState(() {
         _biometric = false;
         _bioNote = null;
       });
-      await store.setBool(BxKeys.biometricOn, false);
+      await lock.setEnabled(false);
       return;
     }
 
@@ -169,22 +182,27 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     });
 
     try {
-      final auth = LocalAuthentication();
-      final supported = await auth.isDeviceSupported();
-      if (!supported) {
+      if (!lock.isCapable) {
         if (!mounted) return;
         setState(() {
           _bioBusy = false;
           _biometric = false;
           _bioNote =
-              'This device has no fingerprint or face unlock set up, so we will keep asking for your password.';
+              'This phone has no fingerprint, face unlock or screen PIN set '
+              'up, so there is nothing to lock it with. Set a screen lock in '
+              'your phone settings and this will work.';
         });
+        await lock.setEnabled(false);
         return;
       }
 
-      final ok = await auth.authenticate(
-        localizedReason: 'Confirm it is you before turning on quick unlock.',
-        options: const AuthenticationOptions(stickyAuth: true),
+      // Prove it works before promising it will.
+      final ok = await LocalAuthentication().authenticate(
+        localizedReason: 'Confirm it is you before turning the lock on.',
+        options: const AuthenticationOptions(
+          biometricOnly: false,
+          stickyAuth: true,
+        ),
       );
       if (!mounted) return;
       setState(() {
@@ -192,16 +210,16 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
         _biometric = ok;
         _bioNote = ok ? null : 'We could not confirm it was you. Nothing changed.';
       });
-      await store.setBool(BxKeys.biometricOn, ok);
+      await lock.setEnabled(ok);
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _bioBusy = false;
         _biometric = false;
         _bioNote =
-            'Your device did not let us check that. Quick unlock stays off.';
+            'Your device did not let us check that. The lock stays off.';
       });
-      await store.setBool(BxKeys.biometricOn, false);
+      await lock.setEnabled(false);
     }
   }
 
@@ -231,7 +249,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        titleSpacing: BxSpace.md,
+        leading: const BxDrawerButton(),
+        titleSpacing: 0,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -590,10 +609,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             value: _biometric,
             onChanged: _bioBusy ? null : _setBiometric,
             contentPadding: EdgeInsets.zero,
-            title: Text('Biometric unlock', style: BxType.bodyStrong(c.ink)),
+            title: Text('Lock when idle', style: BxType.bodyStrong(c.ink)),
             subtitle: Text(
-              'Open the app with your fingerprint or face instead of typing '
-              'your password.',
+              'Closes the app after ${ref.watch(appPolicyProvider).lockMinutes} '
+              'minutes of not touching it, or after you switch away. Your '
+              'fingerprint, face or screen PIN opens it — never your password. '
+              'Reading a long note never triggers it.',
               style: BxType.tiny(c.muted),
             ),
             secondary: _mark(Icons.fingerprint_rounded, BxAccent.info),
@@ -604,8 +625,77 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
               padding: const EdgeInsets.only(top: BxSpace.xxs),
               child: Text(_bioNote!, style: BxType.tiny(c.danger)),
             ),
+          const BxDivider(height: BxSpace.xl),
+          _capture(),
         ],
       ),
+    );
+  }
+
+  /// What this phone actually does about screen capture.
+  ///
+  /// Stated rather than implied, because the honest answer differs by
+  /// platform and a setting that quietly does nothing on half the
+  /// phones is worse than no setting.
+  Widget _capture() {
+    final c = context.bx;
+    final policy = ref.watch(appPolicyProvider);
+    final native = ref.watch(screenshotPolicyProvider);
+
+    return native.when(
+      loading: () => const BxSkeleton(height: 64, radius: BxRadius.md),
+      error: (_, __) => const SizedBox.shrink(),
+      data: (p) {
+        final (title, body, accent) = switch ((p.enforceable, policy.allowScreenshots)) {
+          (true, false) => (
+              'Screenshots are blocked on this phone',
+              'The operating system refuses the capture, so a screenshot or '
+                  'screen recording comes out black. Tutor Bello sets this.',
+              BxAccent.success,
+            ),
+          (true, true) => (
+              'Screenshots are allowed',
+              'Tutor Bello has opened this up. Please do not share the '
+                  'questions.',
+              BxAccent.warning,
+            ),
+          (false, _) when p.mechanism == 'capture-detection' => (
+              'This iPhone cannot block screenshots',
+              'Apple gives no app a way to refuse one. What we do instead: '
+                  'the app covers itself while the screen is being recorded '
+                  'or mirrored, and a still screenshot is reported.',
+              BxAccent.info,
+            ),
+          _ => (
+              'Screen capture is not controlled here',
+              'This platform gives the app no say over screenshots.',
+              BxAccent.neutral,
+            ),
+        };
+
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _mark(
+              p.enforceable && !policy.allowScreenshots
+                  ? Icons.no_photography_outlined
+                  : Icons.photo_camera_outlined,
+              accent,
+            ),
+            const SizedBox(width: BxSpace.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: BxType.bodyStrong(c.ink)),
+                  const SizedBox(height: 2),
+                  Text(body, style: BxType.tiny(c.muted)),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 

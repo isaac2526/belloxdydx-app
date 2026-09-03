@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'native_bridge.dart';
+import 'security.dart';
 import '../data/backend.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
@@ -40,6 +41,24 @@ final contentRepoProvider = Provider<ContentRepository>(
 final assessmentRepoProvider = Provider<AssessmentRepository>(
   (ref) => AssessmentRepository(ref.watch(backendProvider), Offline.store),
 );
+
+/// The lock. One per app, and it watches the lifecycle itself.
+final appLockProvider = StateNotifierProvider<AppLockNotifier, BxLockState>(
+  (ref) => AppLockNotifier(ref.watch(localStoreProvider)),
+);
+
+/// What Tutor Bello has switched on for every phone. Read from the
+/// content bootstrap, so it costs no extra call.
+final appPolicyProvider = StateProvider<AppPolicy>((_) => const AppPolicy());
+
+/// What the platform underneath can actually enforce — which is not the
+/// same question, and answering them as if they were is how a settings
+/// toggle ends up lying to a student.
+final screenshotPolicyProvider =
+    FutureProvider.autoDispose<ScreenshotPolicy>((ref) {
+  ref.watch(appPolicyProvider);
+  return ScreenCapture.describe();
+});
 
 /// The offline root. Opened once in main() before runApp, so a widget
 /// can ask it a question during build without awaiting anything.
@@ -99,13 +118,43 @@ final engageRepoProvider = Provider<EngageRepository>(
 
 /// The signed-in student's profile, or null when signed out. This is the
 /// single source of truth the router reads to decide what to show.
-class SessionNotifier extends StateNotifier<SessionState> {
+class SessionNotifier extends StateNotifier<SessionState>
+    with WidgetsBindingObserver {
   SessionNotifier(this._ref) : super(const SessionState.unknown()) {
+    WidgetsBinding.instance.addObserver(this);
     _boot();
   }
 
   final Ref _ref;
   StreamSubscription<bool>? _sessionWatch;
+  DateTime _lastResumeWork = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Coming back to the app is when the backend's switches are re-read
+  /// and the offline sync is nudged. This is what makes "no new build"
+  /// literally true: a policy Tutor Bello changes this morning is being
+  /// obeyed by lunchtime, and new material a student did not have keeps
+  /// arriving without them asking.
+  ///
+  /// Throttled, because Android delivers `resumed` for things as small
+  /// as dismissing a notification shade.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
+    if (lifecycle != AppLifecycleState.resumed) return;
+    if (!state.isSignedIn) return;
+    final now = DateTime.now();
+    if (now.difference(_lastResumeWork) < const Duration(minutes: 2)) return;
+    _lastResumeWork = now;
+    unawaited(() async {
+      try {
+        await _ref
+            .read(syncStatusProvider.notifier)
+            .start(level: state.profile?.currentLevel);
+        await applyPolicy();
+      } catch (e) {
+        debugPrint('[resume] refresh skipped: $e');
+      }
+    }());
+  }
 
   AuthRepository get _auth => _ref.read(authRepoProvider);
   Backend get _backend => _ref.read(backendProvider);
@@ -140,6 +189,36 @@ class SessionNotifier extends StateNotifier<SessionState> {
     state = p.isFrozen ? SessionState.frozen(p) : SessionState.active(p);
     _listenForSupersede();
     unawaited(_prepareOffline(p));
+    unawaited(_checkDevice(p));
+  }
+
+  /// Stops a phone this account has never been opened on, once.
+  ///
+  /// Runs AFTER the state is already active, deliberately: a check that
+  /// cannot reach the server must never be the thing that keeps a
+  /// paying student out of the app. It fails open, and the
+  /// single-live-session rule still stands behind it.
+  Future<void> _checkDevice(Profile p) async {
+    if (p.isFrozen) return;
+    try {
+      final standing = await _auth.deviceStanding();
+      if (!mounted) return;
+      if (standing.mustVerify &&
+          _ref.read(contentRepoProvider).policy.deviceVerification &&
+          state.status == SessionStatus.active) {
+        state = SessionState.deviceCheck(p);
+      }
+    } catch (e) {
+      debugPrint('[device] check skipped: $e');
+    }
+  }
+
+  /// Called by the device-check screen once the code has been proved.
+  Future<void> markDeviceTrusted() async {
+    final p = state.profile;
+    if (p == null) return;
+    state = SessionState.active(p);
+    await _ref.read(localStoreProvider).setBool(BxKeys.deviceTrusted, true);
   }
 
   /// Ties the offline root to this student and starts filling it.
@@ -157,6 +236,7 @@ class SessionNotifier extends StateNotifier<SessionState> {
       await _ref
           .read(syncStatusProvider.notifier)
           .start(level: p.currentLevel);
+      await applyPolicy();
     } catch (e) {
       debugPrint('[offline] first sync skipped: $e');
     }
@@ -192,6 +272,23 @@ class SessionNotifier extends StateNotifier<SessionState> {
     }
   }
 
+  /// Pushes the backend's switches onto the phone.
+  ///
+  /// Runs after the content bootstrap because that is what carries
+  /// them, and again on every resume — which is what makes "no new
+  /// build" true: a policy Tutor Bello changes this morning is being
+  /// obeyed by lunchtime without anybody downloading anything.
+  Future<void> applyPolicy() async {
+    try {
+      final policy = _ref.read(contentRepoProvider).policy;
+      _ref.read(appPolicyProvider.notifier).state = policy;
+      _ref.read(appLockProvider.notifier).policy = policy;
+      await ScreenCapture.apply(policy);
+    } catch (e) {
+      debugPrint('[policy] not applied: $e');
+    }
+  }
+
   Future<void> onSignedIn() => refreshProfile();
 
   Future<void> signOut({String? reason}) async {
@@ -217,11 +314,24 @@ class SessionNotifier extends StateNotifier<SessionState> {
   @override
   void dispose() {
     _sessionWatch?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 }
 
-enum SessionStatus { unknown, signedOut, active, frozen }
+enum SessionStatus {
+  unknown,
+  signedOut,
+
+  /// Signed in, but on a phone this account has never been opened on.
+  /// Nothing inside is reachable until the student proves they hold the
+  /// account's email — a shared password does not come with a shared
+  /// inbox, which is the whole point.
+  deviceCheck,
+
+  active,
+  frozen,
+}
 
 @immutable
 class SessionState {
@@ -234,10 +344,14 @@ class SessionState {
   const SessionState.signedOut({String? message})
       : this._(SessionStatus.signedOut, null, message);
   const SessionState.active(Profile p) : this._(SessionStatus.active, p, null);
+  const SessionState.deviceCheck(Profile p)
+      : this._(SessionStatus.deviceCheck, p, null);
   const SessionState.frozen(Profile p) : this._(SessionStatus.frozen, p, null);
 
   bool get isSignedIn =>
-      status == SessionStatus.active || status == SessionStatus.frozen;
+      status == SessionStatus.active ||
+      status == SessionStatus.frozen ||
+      status == SessionStatus.deviceCheck;
   bool get isActivated => profile?.isActivated ?? false;
   bool get isReady => status != SessionStatus.unknown;
 }

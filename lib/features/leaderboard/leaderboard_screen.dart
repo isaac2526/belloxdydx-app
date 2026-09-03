@@ -7,6 +7,7 @@ import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
 import '../../ui/ui.dart';
+import '../shell/app_drawer.dart';
 import '../shell/app_shell.dart';
 
 /// ============================================================
@@ -42,7 +43,8 @@ class LeaderboardScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        titleSpacing: BxSpace.md,
+        leading: const BxDrawerButton(),
+        titleSpacing: 0,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,

@@ -7,6 +7,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../core/config.dart';
 import 'backend.dart';
 import 'local_store.dart';
+import '../core/security.dart';
 import 'offline/offline_store.dart';
 import 'models.dart';
 
@@ -213,6 +214,87 @@ class AuthRepository {
     } catch (e) {
       throw _b.faultFor(e);
     }
+  }
+
+  // ------------------------------------------------------------
+  // Devices
+  // ------------------------------------------------------------
+
+  /// Has this account been used from this phone before?
+  ///
+  /// The first device a student ever signs in from is trusted on sight.
+  /// There is nothing to compare it against, and challenging it would
+  /// only lock out the person who just paid. Every device after that
+  /// arrives untrusted and is asked to prove the student holds the
+  /// account's email.
+  ///
+  /// Never throws. A device check that fails must not keep a paying
+  /// student out of the app they paid for — it fails open, and the
+  /// single-live-session rule still stands behind it.
+  Future<DeviceStanding> deviceStanding({bool verified = false}) async {
+    try {
+      if (_b.isDirect) {
+        final r = await _b.rpc('bx_device_seen', params: {
+          'p_device_id': deviceId(),
+          'p_platform': defaultTargetPlatform.name,
+          'p_label': _deviceLabel(),
+          'p_verified': verified,
+        });
+        if (r['error'] != null) return DeviceStanding.unknown;
+        return DeviceStanding(
+          known: r['known'] == true,
+          trusted: r['trusted'] == true,
+          total: (r['total'] as num?)?.toInt() ?? 0,
+        );
+      }
+      final r = await _b.apiSend('/api/mobile/device', body: {
+        'deviceId': deviceId(),
+        'platform': defaultTargetPlatform.name,
+        'label': _deviceLabel(),
+        'verified': verified,
+      });
+      return DeviceStanding(
+        known: r['known'] == true,
+        trusted: r['trusted'] == true,
+        total: (r['total'] as num?)?.toInt() ?? 0,
+      );
+    } catch (e) {
+      debugPrint('[device] standing unavailable: $e');
+      return DeviceStanding.unknown;
+    }
+  }
+
+  /// Sends the six-digit code to the account's email.
+  ///
+  /// Supabase's own mailer, the same channel that already carries
+  /// password resets. Its rate limit is real and low unless custom SMTP
+  /// is configured, which is why [DeviceStanding.unknown] fails open and
+  /// why an admin can trust a device by hand.
+  Future<void> sendDeviceCode(String email) async {
+    try {
+      await _b.auth.signInWithOtp(email: email, shouldCreateUser: false);
+    } catch (e) {
+      throw _b.faultFor(e);
+    }
+  }
+
+  /// Proves the code, which mints a session with a fresh `iat` — the
+  /// thing the server actually checks before trusting the device.
+  Future<void> verifyDeviceCode(String email, String code) async {
+    try {
+      await _b.auth.verifyOTP(
+        email: email,
+        token: code.trim(),
+        type: OtpType.email,
+      );
+    } catch (e) {
+      throw _b.faultFor(e);
+    }
+  }
+
+  String _deviceLabel() {
+    final p = defaultTargetPlatform.name;
+    return '${p[0].toUpperCase()}${p.substring(1)}';
   }
 
   Future<Profile> loadProfile({bool force = false}) async {
@@ -426,6 +508,14 @@ class ContentRepository {
   List<StudyMaterial> get materials => _materials;
   List<StudyLevel> get levels => _levels;
 
+  /// The switches Tutor Bello sets from the admin panel. They ride on
+  /// the bootstrap the app already makes, so obeying them costs no
+  /// extra round trip, and they are cached with it so a phone that
+  /// opens offline still enforces the last policy it was told rather
+  /// than falling open.
+  AppPolicy _policy = const AppPolicy();
+  AppPolicy get policy => _policy;
+
   /// One bootstrap that fills the course shelf and every material header.
   /// Falls back to the last good copy on disk so the app opens offline.
   Future<void> loadContent({required String level, bool force = false}) async {
@@ -433,6 +523,17 @@ class ContentRepository {
     try {
       if (_b.isDirect) {
         final r = await _b.rpc('bx_content', params: {'p_level': level});
+        // bx_content predates the app policy, so it is asked for
+        // separately rather than by changing a function that may not
+        // have been deployed yet.
+        if (r['settings'] is! Map) {
+          try {
+            final s = await _b.rpc('bx_app_settings');
+            r['settings'] = s;
+          } catch (e) {
+            debugPrint('[policy] bx_app_settings unavailable: $e');
+          }
+        }
         _ingest(r);
         await _store.writeJson(BxKeys.cachedContent, r);
         return;
@@ -465,6 +566,10 @@ class ContentRepository {
           .whereType<Map>()
           .map((e) => StudyMaterial.fromJson(Map<String, dynamic>.from(e)))
           .toList();
+    }
+    final rawSettings = r['settings'];
+    if (rawSettings is Map) {
+      _policy = AppPolicy.fromJson(Map<String, dynamic>.from(rawSettings));
     }
     final rawLevels = r['levels'];
     if (rawLevels is List) {

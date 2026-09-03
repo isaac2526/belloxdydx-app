@@ -9,6 +9,7 @@ import '../features/auth/forgot_screen.dart';
 import '../features/auth/frozen_screen.dart';
 import '../features/auth/login_screen.dart';
 import '../features/auth/onboarding_screen.dart';
+import '../features/security/device_check_screen.dart';
 import '../features/auth/register_screen.dart';
 import '../features/auth/reset_screen.dart';
 import '../features/auth/welcome_screen.dart';
@@ -56,6 +57,7 @@ abstract final class Routes {
   static const reset = '/reset-password';
   static const activate = '/activate';
   static const frozen = '/frozen';
+  static const deviceCheck = '/new-device';
 
   static const home = '/';
   static const courses = '/courses';
@@ -136,6 +138,12 @@ final routerProvider = Provider<GoRouter>((ref) {
         return isPublic ? null : Routes.welcome;
       }
 
+      // A phone this account has never been opened on proves itself
+      // before anything else is reachable.
+      if (session.status == SessionStatus.deviceCheck) {
+        return loc == Routes.deviceCheck ? null : Routes.deviceCheck;
+      }
+
       // A frozen account sees only the cold room.
       if (session.status == SessionStatus.frozen) {
         return loc == Routes.frozen ? null : Routes.frozen;
@@ -147,6 +155,7 @@ final routerProvider = Provider<GoRouter>((ref) {
           loc == Routes.welcome ||
           loc == Routes.login ||
           loc == Routes.register ||
+          loc == Routes.deviceCheck ||
           loc == Routes.frozen) {
         return Routes.home;
       }
@@ -165,6 +174,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.forgot, builder: (_, __) => const ForgotScreen()),
       GoRoute(path: Routes.reset, builder: (_, __) => const ResetScreen()),
       GoRoute(path: Routes.frozen, builder: (_, __) => const FrozenScreen()),
+      GoRoute(
+          path: Routes.deviceCheck,
+          builder: (_, __) => const DeviceCheckScreen()),
       GoRoute(path: Routes.activate, builder: (_, __) => const ActivateScreen()),
       GoRoute(path: Routes.cgpa, builder: (_, __) => const CgpaScreen()),
 

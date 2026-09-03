@@ -9,6 +9,7 @@ import 'core/router.dart';
 import 'core/theme/app_theme.dart';
 import 'data/local_store.dart';
 import 'data/offline/bootstrap.dart';
+import 'features/security/lock_screen.dart';
 
 /// ============================================================
 /// BELLOXDYDX
@@ -79,7 +80,11 @@ class BelloxdydxApp extends ConsumerWidget {
               maxScaleFactor: 1.35,
             ),
           ),
-          child: child ?? const SizedBox.shrink(),
+          // Wraps the router rather than sitting inside it, so nothing
+          // can navigate around the lock and the screen underneath
+          // keeps its state — a student who steps away mid-question
+          // comes back to the same question.
+          child: LockOverlay(child: child ?? const SizedBox.shrink()),
         );
       },
     );
