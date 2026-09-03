@@ -215,13 +215,22 @@ class CourseDownloader {
   })  : _b = backend,
         _content = content,
         _store = store,
-        _http = httpClient ?? http.Client();
+        _given = httpClient;
 
   final Backend _b;
   final ContentRepository _content;
   final OfflineStore? _store;
-  final http.Client _http;
   final String courseId;
+
+  /// Built on the first transfer, not on construction.
+  ///
+  /// Every tile on the course shelf watches its own downloader so it
+  /// can show a chip, so a twenty-two course shelf builds twenty-two of
+  /// these — and twenty-one of them will never fetch anything. A client
+  /// nobody uses should not cost a client.
+  final http.Client? _given;
+  http.Client? _made;
+  http.Client get _http => _given ?? (_made ??= http.Client());
 
   final _controller = StreamController<CourseDownloadState>.broadcast();
   Stream<CourseDownloadState> get updates => _controller.stream;
@@ -276,7 +285,7 @@ class CourseDownloader {
 
   Future<void> dispose() async {
     _cancelled = true;
-    _http.close();
+    _made?.close();
     await _controller.close();
   }
 

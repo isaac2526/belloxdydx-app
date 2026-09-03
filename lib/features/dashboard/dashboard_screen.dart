@@ -240,6 +240,13 @@ class _DashboardBody extends ConsumerWidget {
             onAction: () => context.push(Routes.activate),
           ),
 
+        // "it should say that, there's a change in course, download now"
+        //
+        // Here rather than only on the course itself, because a student
+        // who does not open CHM 101 for a week is exactly the one who
+        // needs telling that CHM 101 changed.
+        if (activated) const _CourseUpdatesBanner(),
+
         if (d.resume != null) _ResumeCard(d.resume!, activated: activated),
 
         // ---- the three figures that matter ----
@@ -1140,6 +1147,34 @@ class _ReferralCard extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The "download now" nudge, on the screen a student opens first.
+///
+/// Only ever counts courses this phone has ALREADY downloaded — a
+/// course that was never taken offline is not an update, it is simply
+/// not downloaded, which is a different sentence and a different
+/// button. Draws nothing at all when there is nothing to say.
+class _CourseUpdatesBanner extends ConsumerWidget {
+  const _CourseUpdatesBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final n = ref.watch(coursesWithUpdatesProvider);
+    if (n == 0) return const SizedBox.shrink();
+    return BxBanner(
+      title: n == 1
+          ? "There's a change in one of your courses"
+          : "There's a change in $n of your courses",
+      message: 'Tutor Bello has added or changed material since you last '
+          'downloaded. Open the course and tap Update — then it works '
+          'without data again.',
+      icon: Icons.sync_problem_rounded,
+      accent: BxAccent.warning,
+      actionLabel: 'Open my courses',
+      onAction: () => context.go(Routes.courses),
     );
   }
 }
