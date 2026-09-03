@@ -1,6 +1,10 @@
 import 'dart:async';
 
+import 'package:belloxdydx/core/providers.dart';
+import 'package:belloxdydx/data/local_store.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// The single-session watcher shipped broken and stopped every student
 /// on the legacy path from finishing a login. The mechanism was small
@@ -13,6 +17,9 @@ import 'package:flutter_test/flutter_test.dart';
 /// not at the first tick, which is what made it look like a timing
 /// problem rather than a certainty.
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  themeDefaults();
+
   group('Stream.periodic, the shape that broke login', () {
     test('a non-nullable stream with no computation throws immediately', () {
       expect(
@@ -83,6 +90,55 @@ void main() {
 
     test('the new shape keeps the student signed in', () async {
       expect(await newShape(), 'active');
+    });
+  });
+}
+
+/// A first install opens light, whatever the phone is set to. This is a
+/// product decision, not a bug: Belloxdydx is white and gold, and the
+/// first thing a student sees should be the product rather than their
+/// own night setting. "System" stays available and is honoured the
+/// moment it is chosen.
+///
+/// These drive the real ThemeNotifier against a real LocalStore. A test
+/// that re-implemented the switch would pass forever while the app read
+/// something else entirely.
+void themeDefaults() {
+  group('the theme a fresh install opens in', () {
+    Future<ThemeNotifier> notifierWith(Map<String, Object> stored) async {
+      SharedPreferences.setMockInitialValues(stored);
+      LocalStore.resetForTest();
+      final store = await LocalStore.init();
+      return ThemeNotifier(store);
+    }
+
+    test('nothing stored means light, not system', () async {
+      final n = await notifierWith({});
+      expect(n.state, ThemeMode.light);
+    });
+
+    test('a stored choice is honoured exactly, including system', () async {
+      expect((await notifierWith({BxKeys.themeMode: 'dark'})).state,
+          ThemeMode.dark);
+      expect((await notifierWith({BxKeys.themeMode: 'light'})).state,
+          ThemeMode.light);
+      expect((await notifierWith({BxKeys.themeMode: 'system'})).state,
+          ThemeMode.system);
+    });
+
+    test('an unrecognised value falls back to light rather than crashing',
+        () async {
+      expect((await notifierWith({BxKeys.themeMode: 'midnight'})).state,
+          ThemeMode.light);
+    });
+
+    test('choosing a theme persists it for the next launch', () async {
+      final n = await notifierWith({});
+      await n.set(ThemeMode.dark);
+      expect(n.state, ThemeMode.dark);
+      // A fresh notifier over the same store must come back dark.
+      final store = LocalStore.instance;
+      expect(ThemeNotifier(store).state, ThemeMode.dark);
     });
   });
 }

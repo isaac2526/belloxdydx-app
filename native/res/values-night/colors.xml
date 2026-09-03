@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Mirrors BxColors.dark.ground in lib/core/theme/tokens.dart. -->
-<resources>
-    <color name="bx_ground">#FF0A1120</color>
-</resources>

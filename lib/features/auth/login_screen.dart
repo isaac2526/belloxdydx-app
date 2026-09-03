@@ -10,6 +10,7 @@ import '../../data/local_store.dart';
 import '../../data/models.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
+import 'auth_brand.dart';
 import 'intro_3d.dart';
 
 /// ============================================================
@@ -150,6 +151,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // The mark, then the heading. This screen used to carry
+                // no logo at all — the second screen of the product
+                // showed none of the product.
+                const Center(child: BxAuthBrand(size: 64)),
+                const SizedBox(height: BxSpace.xl),
                 const _AuthHeader(
                   eyebrow: 'Welcome back',
                   title: 'Log in',

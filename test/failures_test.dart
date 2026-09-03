@@ -159,6 +159,48 @@ void main() {
     });
   });
 
+  group('storage failures are classified honestly', () {
+    // The app used to tell a student on a brand new 256 GB phone to
+    // "free up a little space" because saveToVault returned null for
+    // ANY exception and the caller assumed a full disk.
+    test('a real out-of-space error says so', () {
+      const e = FileSystemException(
+        'Cannot write file',
+        '/data/user/0/app/vault/x.pdf',
+        OSError('No space left on device', 28),
+      );
+      expect(classify(e), BxFault.outOfSpace);
+      expect(classify(e).message, contains('out of space'));
+    });
+
+    test('any other write failure does NOT blame the student\'s storage', () {
+      const denied = FileSystemException(
+        'Cannot open file',
+        '/data/user/0/app/vault/x.pdf',
+        OSError('Permission denied', 13),
+      );
+      expect(classify(denied), isNot(BxFault.outOfSpace));
+      expect(classify(denied).message, isNot(contains('space')));
+
+      const missing = FileSystemException(
+        'Cannot create file',
+        '/nope/x.pdf',
+        OSError('No such file or directory', 2),
+      );
+      expect(classify(missing), isNot(BxFault.outOfSpace));
+    });
+
+    test('a storage failure still never leaks the path', () {
+      const e = FileSystemException(
+        'Cannot write',
+        '/data/user/0/tech.isaacarinola.belloxdydx/app_flutter/vault/x.pdf',
+        OSError('No space left on device', 28),
+      );
+      expect(classify(e).message, isNot(contains('/data/')));
+      expect(classify(e).message, isNot(contains('belloxdydx')));
+    });
+  });
+
   group('faultForStatus', () {
     test('maps the statuses the website actually returns', () {
       expect(faultForStatus(401), BxFault.unauthenticated);

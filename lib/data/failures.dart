@@ -50,6 +50,7 @@ enum BxFault {
   emailTaken,
   usernameTaken,
   featureMissing,
+  outOfSpace,
   server,
   unknown,
 }
@@ -84,6 +85,8 @@ extension BxFaultCopy on BxFault {
           'An account already exists with this email. Try logging in.',
         BxFault.usernameTaken => 'That username was taken. Pick another.',
         BxFault.featureMissing => 'That feature is not available yet.',
+        BxFault.outOfSpace =>
+          'This phone is out of space. Free some up and try again.',
         BxFault.server => 'Something went wrong on our side. Try again.',
         BxFault.unknown => 'Something went wrong. Please try again.',
       };
@@ -104,6 +107,7 @@ extension BxFaultCopy on BxFault {
         BxFault.emailTaken => 'email_taken',
         BxFault.usernameTaken => 'username_taken',
         BxFault.featureMissing => 'rpc_missing',
+        BxFault.outOfSpace => 'out_of_space',
         _ => null,
       };
 
@@ -212,6 +216,19 @@ BxFault classify(Object e, {bool? hasConnection}) {
     if (status == 401 || status == 403) return BxFault.unauthenticated;
     if (status != null && status >= 500) return BxFault.server;
     return BxFault.unknown;
+  }
+
+  // Storage. Only a genuine ENOSPC is reported as "free up space" —
+  // the app used to say that for ANY failed save, so a brand new phone
+  // with 256 GB free was told to clear room because of an unrelated
+  // write error.
+  if (e is FileSystemException) {
+    final code = e.osError?.errorCode;
+    final msg = e.osError?.message.toLowerCase() ?? '';
+    if (code == 28 || msg.contains('no space left') || msg.contains('disk full')) {
+      return BxFault.outOfSpace;
+    }
+    return BxFault.server;
   }
 
   if (e is FormatException) return BxFault.server;

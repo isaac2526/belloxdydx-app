@@ -38,6 +38,41 @@ import 'models.dart';
 /// stays on the legacy path and costs what it costs today.
 /// ============================================================
 
+/// A storage URL sitting inside a larger string — an `<img src>`, an
+/// `<a href>`, a CSS `url()`.
+final RegExp kEmbeddedStorageUrl = RegExp(
+  r'''https?://[^\s"'<>()]*?/storage/v1/object/public/[^\s"'<>()]*''',
+);
+
+/// True when the whole string is one URL and nothing else.
+bool isBareUrl(String s) {
+  final t = s.trim();
+  if (!t.startsWith('http://') && !t.startsWith('https://')) return false;
+  return !t.contains(RegExp(r'[\s<>"]'));
+}
+
+/// Rewrites Supabase storage links so they go through the website's
+/// caching proxy — in place, without destroying what surrounds them.
+///
+/// A URL FIELD becomes a proxied URL. An HTML BODY that merely mentions
+/// a storage URL keeps its markup and has just that URL swapped.
+///
+/// That distinction is the whole point. This used to ask whether a
+/// string CONTAINED a storage URL and then replace the entire string,
+/// so any question or note with an embedded image had its whole body
+/// turned into one `…/api/file?u=<base64 of the document>`. Students
+/// were shown that URL where the question should have been, with the
+/// text and the image both gone — and only on the website path, which
+/// is the path production runs on.
+///
+/// [proxy] takes one URL and returns its replacement.
+String shieldStorageUrls(String node, String Function(String) proxy) {
+  if (!node.contains('/storage/v1/object/public/')) return node;
+  return isBareUrl(node)
+      ? proxy(node)
+      : node.replaceAllMapped(kEmbeddedStorageUrl, (m) => proxy(m.group(0)!));
+}
+
 enum BackendMode {
   /// Supabase-direct. Student traffic bypasses Vercel entirely.
   direct,
@@ -221,6 +256,14 @@ class Backend {
   /// /api/file shield so behaviour is unchanged.
   String fileUrl(String? raw) {
     if (raw == null || raw.isEmpty) return '';
+
+    // The website's own shield returns a ROOT-RELATIVE "/api/file?u=…".
+    // A browser resolves that against the page it is on; this app has no
+    // page, and Dart's HttpClient throws "No host specified in URI" —
+    // which is why every CBT, millionaire and practice-explanation
+    // image failed. Give it an origin whoever sent it.
+    if (raw.startsWith('/')) return '${BxConfig.siteUrl}$raw';
+
     if (!raw.contains('/storage/v1/object/public/')) return raw;
     if (isDirect) return raw;
     final b64 = base64Url.encode(utf8.encode(raw)).replaceAll('=', '');
@@ -241,7 +284,21 @@ class Backend {
   /// So: browser tests cannot catch this, and `backend_test.dart` does.
   dynamic shieldDeep(dynamic node) {
     if (node is String) {
-      return node.contains('/storage/v1/object/public/') ? fileUrl(node) : node;
+      if (!node.contains('/storage/v1/object/public/')) return node;
+
+      // A URL field becomes a proxied URL. An HTML BODY that merely
+      // MENTIONS a storage URL must have that one URL rewritten in
+      // place — not be replaced wholesale.
+      //
+      // It used to be replaced wholesale, and the consequences were
+      // severe: any question or note whose HTML embedded an image had
+      // its entire body swapped for a single
+      // "https://…/api/file?u=<base64 of the whole document>". The
+      // student saw that URL printed where the question should have
+      // been, the text was gone, and the image with it. It only
+      // happened on the website path, which is the path production
+      // runs on.
+      return shieldStorageUrls(node, fileUrl);
     }
     if (node is List) return node.map(shieldDeep).toList();
     if (node is Map) {

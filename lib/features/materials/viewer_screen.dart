@@ -8,6 +8,8 @@ import 'package:pdfx/pdfx.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../../data/local_store.dart';
+
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
@@ -200,22 +202,35 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       var ext = documentExtension(url);
       if (ext.isEmpty) ext = _kind == _DocKind.pdf ? 'pdf' : 'bin';
 
-      final entry = await store.saveToVault(
-        materialId: m.id,
-        title: m.title,
-        courseCode: code,
-        kind: m.kind.name,
-        bytes: bytes,
-        extension: ext,
-      );
+      // Report what actually went wrong. This used to say "free up a
+      // little space" for EVERY failed save, because saveToVault
+      // returned null on any exception — so a student on a brand new
+      // 256 GB phone was told to clear room for an error that had
+      // nothing to do with storage. Only a genuine ENOSPC says that now.
+      VaultEntry? entry;
+      String? failure;
+      try {
+        entry = await store.saveToVault(
+          materialId: m.id,
+          title: m.title,
+          courseCode: code,
+          kind: m.kind.name,
+          bytes: bytes,
+          extension: ext,
+        );
+        if (entry == null) {
+          failure = 'This device will not let the app keep offline copies.';
+        }
+      } catch (e) {
+        failure = ref.read(backendProvider).faultFor(e).message;
+      }
+
       ref.read(vaultProvider.notifier).refresh();
       if (!mounted) return;
       bxToast(
         context,
-        entry == null
-            ? 'Could not save this one. Free up a little space and try again.'
-            : 'Saved. It opens now with no data at all.',
-        error: entry == null,
+        failure ?? 'Saved. It opens now with no data at all.',
+        error: failure != null,
       );
     } finally {
       if (mounted) setState(() => _busy = false);

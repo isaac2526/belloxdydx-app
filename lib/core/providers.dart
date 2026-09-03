@@ -1,8 +1,11 @@
 import 'dart:async';
 
+import 'dart:ui' show PlatformDispatcher;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'native_bridge.dart';
 import '../data/backend.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
@@ -181,20 +184,51 @@ final profileProvider = Provider<Profile>(
 // Theme
 // ------------------------------------------------------------
 
+/// Light, dark or follow-the-phone — and which one a brand new install
+/// opens in.
+///
+/// A first install is LIGHT, whatever the phone is set to. Belloxdydx is
+/// a white-and-gold product and the first thing a student sees should be
+/// the product, not their own night setting. "System" remains available
+/// and is honoured the moment it is chosen; it is simply not the
+/// starting position.
+///
+/// The stored value is read synchronously in the constructor so the very
+/// first frame is already correct — there is no light-to-dark swap after
+/// launch.
 class ThemeNotifier extends StateNotifier<ThemeMode> {
-  ThemeNotifier(this._store) : super(_read(_store));
+  ThemeNotifier(this._store) : super(_read(_store)) {
+    // Keep the native launch window in step from the very first run,
+    // including the case where a student chose dark on a previous
+    // install and the preference survived.
+    NativeBridge.rememberLaunchTheme(_isDark(state, _store));
+  }
 
   final LocalStore _store;
 
   static ThemeMode _read(LocalStore s) => switch (s.getString(BxKeys.themeMode)) {
         'light' => ThemeMode.light,
         'dark' => ThemeMode.dark,
-        _ => ThemeMode.system,
+        'system' => ThemeMode.system,
+        // Nothing stored: this install has never been through the
+        // Appearance control, so it opens light.
+        _ => ThemeMode.light,
+      };
+
+  /// What the launch window should paint next time. "System" has to be
+  /// resolved against the platform here, because Android needs a
+  /// concrete colour before Flutter exists to ask.
+  static bool _isDark(ThemeMode m, LocalStore s) => switch (m) {
+        ThemeMode.dark => true,
+        ThemeMode.light => false,
+        ThemeMode.system =>
+          PlatformDispatcher.instance.platformBrightness == Brightness.dark,
       };
 
   Future<void> set(ThemeMode m) async {
     state = m;
     await _store.setString(BxKeys.themeMode, m.name);
+    await NativeBridge.rememberLaunchTheme(_isDark(m, _store));
   }
 
   Future<void> toggle(Brightness current) =>

@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Mirrors BxColors.light.ground in lib/core/theme/tokens.dart. -->
+<!--
+  Mirrors BxColors in lib/core/theme/tokens.dart.
+
+  There is deliberately no values-night here. The app opens in LIGHT on a
+  first install whatever the phone is set to, so a launch window that
+  followed the system would show dark and then hand over to a light app.
+  A student who later chooses dark gets the dark ground painted by
+  MainActivity, which runs early enough to cover almost all of the wait.
+-->
 <resources>
     <color name="bx_ground">#FFF7F8FA</color>
+    <color name="bx_ground_dark">#FF0A1120</color>
 </resources>

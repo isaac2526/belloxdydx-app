@@ -40,6 +40,11 @@ class LocalStore {
     return _instance ??= LocalStore._(prefs);
   }
 
+  /// Drops the singleton so a test can build a fresh store over new
+  /// mock preferences. Nothing in the app calls this.
+  @visibleForTesting
+  static void resetForTest() => _instance = null;
+
   // ------------------------------------------------------------
   // Simple values
   // ------------------------------------------------------------
@@ -204,8 +209,11 @@ class LocalStore {
       final items = vaultItems()..removeWhere((v) => v.materialId == materialId);
       await _writeVault([entry, ...items]);
       return entry;
-    } catch (_) {
-      return null;
+    } catch (e) {
+      // Deliberately rethrown. Swallowing this into a null is what
+      // made every failure look like a full disk to the caller.
+      debugPrint('[vault] save failed: \$e');
+      rethrow;
     }
   }
 
@@ -234,8 +242,11 @@ class LocalStore {
       final items = vaultItems()..removeWhere((v) => v.materialId == materialId);
       await _writeVault([entry, ...items]);
       return entry;
-    } catch (_) {
-      return null;
+    } catch (e) {
+      // Deliberately rethrown. Swallowing this into a null is what
+      // made every failure look like a full disk to the caller.
+      debugPrint('[vault] save failed: \$e');
+      rethrow;
     }
   }
 

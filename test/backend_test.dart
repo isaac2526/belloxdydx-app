@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:belloxdydx/data/backend.dart';
 import 'package:belloxdydx/data/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -19,6 +20,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// only place the two disagree is exactly here, and these tests run on
 /// the VM, which behaves like a phone.
 void main() {
+  shieldingUrls();
+
   // The real thing, copied rather than imported: Backend needs a live
   // Supabase client to construct, and the defect is in this shape alone.
   dynamic shieldDeep(dynamic node) {
@@ -91,6 +94,83 @@ void main() {
       final out = broken(decoded('{"id":"q1"}'));
       expect(out, isNot(isA<Map<String, dynamic>>()));
       expect(() => out as Map<String, dynamic>, throwsA(isA<TypeError>()));
+    });
+  });
+}
+
+/// The URL shield rewrites Supabase storage links so they go through the
+/// website's caching proxy on the legacy path.
+///
+/// It used to do that by testing whether a string CONTAINED a storage
+/// URL and, if so, replacing the whole string. For a URL field that is
+/// right. For a question body with an <img> in it, it replaced the
+/// entire question with one `…/api/file?u=<base64 of the document>` —
+/// so the student was shown that URL where the question should have
+/// been, with the text and the image both gone. These pin the
+/// distinction.
+void shieldingUrls() {
+  const storage = 'https://proj.supabase.co/storage/v1/object/public'
+      '/materials/diagrams/vector.png';
+
+  // The real proxy shape, standing in for Backend.fileUrl.
+  String proxy(String raw) {
+    final b64 = base64Url.encode(utf8.encode(raw)).replaceAll('=', '');
+    return 'https://site.test/api/file?u=$b64';
+  }
+
+  group('the URL shield', () {
+    test('a bare URL field becomes a proxied URL', () {
+      expect(shieldStorageUrls(storage, proxy),
+          startsWith('https://site.test/api/file?u='));
+    });
+
+    test('a question body keeps its HTML, its text and its image', () {
+      final html = '<p>Identify the vector shown below:</p>'
+          '<img src="$storage" alt="A vector diagram">';
+      final out = shieldStorageUrls(html, proxy);
+
+      expect(out, startsWith('<p>'), reason: 'still HTML, not a URL');
+      expect(out, contains('Identify the vector shown below'),
+          reason: 'the question text survives');
+      expect(out, contains('<img'), reason: 'the image tag survives');
+      expect(out, contains('alt="A vector diagram"'));
+      expect(out, isNot(contains(storage)),
+          reason: 'the storage URL itself was rewritten');
+      expect(out, contains('/api/file?u='));
+    });
+
+    test('several images in one body are each rewritten', () {
+      final two = '<img src="$storage"><p>and</p><img src="$storage">';
+      final out = shieldStorageUrls(two, proxy);
+      expect('/api/file?u='.allMatches(out).length, 2);
+      expect(out, contains('<p>and</p>'));
+    });
+
+    test('single-quoted and unquoted attributes are handled', () {
+      expect(shieldStorageUrls("<img src='$storage'>", proxy),
+          contains('/api/file?u='));
+      expect(shieldStorageUrls('<img src=$storage>', proxy),
+          contains('/api/file?u='));
+    });
+
+    test('a body with no storage URL is left exactly alone', () {
+      const plain = '<p>What is the SI unit of momentum?</p>';
+      expect(shieldStorageUrls(plain, proxy), plain);
+      expect(identical(shieldStorageUrls(plain, proxy), plain), isTrue);
+    });
+
+    test('a whole document must never collapse into one URL', () {
+      // The regression, stated as a shape rather than an implementation.
+      final html = '<p>text</p><img src="$storage">';
+      expect(isBareUrl(shieldStorageUrls(html, proxy)), isFalse);
+    });
+
+    test('isBareUrl tells a field from a document', () {
+      expect(isBareUrl(storage), isTrue);
+      expect(isBareUrl('  $storage  '), isTrue);
+      expect(isBareUrl('<img src="$storage">'), isFalse);
+      expect(isBareUrl('See $storage for the diagram'), isFalse);
+      expect(isBareUrl('not a url at all'), isFalse);
     });
   });
 }
