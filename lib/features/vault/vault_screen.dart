@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -119,12 +120,17 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (!supported)
-          const BxBanner(
-            title: 'Offline saving needs the installed app',
-            message:
-                'A browser can clear its own storage without warning, so we '
-                'do not pretend to hold your material here. Install the '
-                'Belloxdydx app and everything you save stays put.',
+          BxBanner(
+            title: kIsWeb
+                ? 'Offline saving needs the installed app'
+                : 'This phone will not let us keep offline copies',
+            message: kIsWeb
+                ? 'A browser can clear its own storage without warning, so we '
+                    'do not pretend to hold your material here. Install the '
+                    'Belloxdydx app and everything you save stays put.'
+                : 'We could not open a place to store them. Everything still '
+                    'works with data on. Restart the app and it usually '
+                    'sorts itself; if it does not, chat Tutor Bello.',
             icon: Icons.phonelink_off_rounded,
             accent: BxAccent.warning,
           )

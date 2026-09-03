@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -24,6 +25,25 @@ import 'offline_store.dart';
 /// ============================================================
 
 Future<OfflineStore?> openOfflineStore(LocalStore prefs) async {
+  // Bounded, because this runs BEFORE runApp. Everything in here talks
+  // to the platform — a documents directory, a directory listing, a
+  // file read per carried-over item — and any of it can be slow on a
+  // phone under storage pressure or wedged behind a misbehaving
+  // platform channel. A student whose offline root is slow to open
+  // should wait a moment for their vault, never for the app.
+  try {
+    return await _open(prefs).timeout(const Duration(seconds: 10));
+  } on TimeoutException {
+    debugPrint('[offline] store took too long to open; carrying on without '
+        'it and it will be there next launch');
+    return Offline.store;
+  } catch (e) {
+    debugPrint('[offline] store unavailable: $e');
+    return null;
+  }
+}
+
+Future<OfflineStore?> _open(LocalStore prefs) async {
   final store = await OfflineStore.open();
   if (store == null) return null;
   Offline.store = store;
