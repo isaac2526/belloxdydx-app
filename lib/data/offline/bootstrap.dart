@@ -17,6 +17,10 @@ import 'offline_store.dart';
 /// builds, every offline picture misses on the first paint and only
 /// appears after a rebuild that may never come.
 ///
+/// It is bounded and it does the least it can: the catalogue is read,
+/// the old vault is carried across once, and the housekeeping pass runs
+/// behind the first frame rather than in front of it.
+///
 /// It also carries the old vault across. The previous index lived in
 /// SharedPreferences and held ABSOLUTE paths, which is a real bug on
 /// iOS: the app container is a UUID that changes on restore and on some
@@ -32,7 +36,15 @@ Future<OfflineStore?> openOfflineStore(LocalStore prefs) async {
   // platform channel. A student whose offline root is slow to open
   // should wait a moment for their vault, never for the app.
   try {
-    return await _open(prefs).timeout(const Duration(seconds: 10));
+    final store = await _open(prefs).timeout(const Duration(seconds: 5));
+    // Deliberately NOT awaited. Dropping catalogue rows whose files have
+    // gone costs one stat call per held item and per held asset, and a
+    // full vault holds thousands — on a cheap phone that is seconds of
+    // white screen for housekeeping no student asked for. It runs behind
+    // the first frame instead; the worst a moment's delay can cost is an
+    // image that fails to draw once.
+    if (store != null) unawaited(store.reconcile());
+    return store;
   } on TimeoutException {
     debugPrint('[offline] store took too long to open; carrying on without '
         'it and it will be there next launch');
@@ -48,7 +60,6 @@ Future<OfflineStore?> _open(LocalStore prefs) async {
   if (store == null) return null;
   Offline.store = store;
   await _adoptLegacyVault(prefs, store);
-  await store.reconcile();
   return store;
 }
 

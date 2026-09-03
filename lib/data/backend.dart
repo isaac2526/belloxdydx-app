@@ -95,6 +95,24 @@ class Backend {
   int _capabilityVersion = 0;
   int get capabilityVersion => _capabilityVersion;
 
+  /// The name of the path this app ended on last time, for storing.
+  String get modeName => _mode.name;
+
+  /// Puts the app back on the path it used last launch, before the
+  /// probe has answered.
+  ///
+  /// The probe is a network call. Waiting for it before the first
+  /// request means every launch pays it, and a launch on a bad
+  /// connection pays it in full — eight seconds of splash screen for a
+  /// question the phone already knew the answer to. Only a SUCCESSFUL
+  /// probe is ever stored, so restoring `direct` can only put the app
+  /// on a path this database really served; the probe still runs behind
+  /// the first frame and corrects this within a second or two.
+  void restoreMode(String? name) {
+    if (BxConfig.forceLegacyApi) return;
+    if (name == BackendMode.direct.name) _mode = BackendMode.direct;
+  }
+
   SupabaseClient get sb => Supabase.instance.client;
   GoTrueClient get auth => sb.auth;
   User? get user => sb.auth.currentUser;

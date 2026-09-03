@@ -79,6 +79,26 @@ class LocalStore {
     }
   }
 
+  /// Reads a mirrored payload with no await at all.
+  ///
+  /// Boot needs one thing before the first frame: who was signed in
+  /// last time. Reading that from a file costs a round trip through the
+  /// platform channel, and for the length of that round trip the router
+  /// has nothing to show but the splash — which is exactly how an app
+  /// that IS signed in comes up on a login screen. So the small caches
+  /// are mirrored into SharedPreferences, which is already in memory by
+  /// the time [init] returns, and this reads that copy synchronously.
+  Map<String, dynamic>? readJsonSync(String name) {
+    try {
+      final raw = _prefs.getString('cache:$name');
+      if (raw == null) return null;
+      final decoded = jsonDecode(raw);
+      return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Reads a cached payload, or null when there is nothing usable.
   Future<Map<String, dynamic>?> readJson(String name) async {
     try {
@@ -99,13 +119,21 @@ class LocalStore {
     }
   }
 
-  Future<void> writeJson(String name, Map<String, dynamic> data) async {
+  /// [mirror] also keeps a copy in SharedPreferences so [readJsonSync]
+  /// can answer without awaiting anything. Only for small payloads — the
+  /// profile, not the whole content bootstrap.
+  Future<void> writeJson(
+    String name,
+    Map<String, dynamic> data, {
+    bool mirror = false,
+  }) async {
     try {
       final encoded = jsonEncode(data);
+      if (mirror) await _prefs.setString('cache:$name', encoded);
       final f = await _cacheFile(name);
       if (f != null) {
         await f.writeAsString(encoded);
-      } else {
+      } else if (!mirror) {
         await _prefs.setString('cache:$name', encoded);
       }
     } catch (_) {
@@ -148,7 +176,9 @@ abstract final class BxKeys {
   static const screenshotPolicy = 'bx_screens';
   static const deviceTrusted = 'bx_device_trusted';
   static const lockAfterMs = 'bx_lock_after';
+  static const lockEnrolled = 'bx_lock_enrolled';
   static const cachedProfile = 'profile';
+  static const backendMode = 'bx_backend_mode';
   static const cachedContent = 'content';
   static const cachedDashboard = 'dashboard';
 }

@@ -35,6 +35,28 @@ class AuthRepository {
   Profile? _cached;
   Profile? get cachedProfile => _cached;
 
+  /// The student this phone was signed in as last time, read with no
+  /// await at all so boot can show them their own app in the first
+  /// frame instead of a splash screen.
+  ///
+  /// Returns null on a fresh install, after a sign-out, and after a
+  /// sign-in that never completed — every case where showing somebody
+  /// a dashboard would be a lie.
+  Profile? rememberedProfile() {
+    try {
+      final raw = _store.readJsonSync(BxKeys.cachedProfile);
+      if (raw == null) return null;
+      final p = Profile.fromJson(raw);
+      return p.id.isEmpty ? null : p;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Seeds the in-memory profile from the remembered one, so the first
+  /// screen and the first request agree about who is using the app.
+  void adopt(Profile p) => _cached ??= p;
+
   String deviceId() {
     var id = _store.getString(BxKeys.deviceId);
     if (id == null || id.isEmpty) {
@@ -46,6 +68,19 @@ class AuthRepository {
   }
 
   Stream<AuthState> get authChanges => _b.auth.onAuthStateChange;
+
+  /// Fires only when the auth client itself lets the session go — an
+  /// expired or revoked refresh token — never for a network failure,
+  /// which Supabase reports separately and retries.
+  ///
+  /// This is the ONE signal allowed to end a live session on its own.
+  /// Everything else the app might read as "signed out" (a timeout, a
+  /// 401 from a website route, an unreachable profile) is a guess, and
+  /// acting on a guess is how a student on a bad line gets thrown back
+  /// to the login screen mid-question.
+  Stream<void> get sessionEnded => _b.auth.onAuthStateChange
+      .where((s) => s.event == AuthChangeEvent.signedOut && s.session == null)
+      .map((_) {});
   bool get signedIn => _b.signedIn;
 
   /// Accepts an email OR a username. A username is resolved to its email
@@ -307,7 +342,8 @@ class AuthRepository {
       final rows = await _b.select('profiles', eq: {'id': uid}, limit: 1);
       if (rows.isNotEmpty) {
         _cached = Profile.fromJson(rows.first);
-        await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson());
+        await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson(),
+            mirror: true);
         await _store.setBool(BxKeys.activated, _cached!.isActivated);
         return _cached!;
       }
@@ -322,12 +358,18 @@ class AuthRepository {
           ? Map<String, dynamic>.from(r['profile'])
           : r;
       _cached = Profile.fromJson(raw);
-      await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson());
+      await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson(),
+          mirror: true);
       return _cached!;
     } catch (_) {
       final cachedRaw = await _store.readJson(BxKeys.cachedProfile);
       if (cachedRaw != null) {
         _cached = Profile.fromJson(cachedRaw);
+        // Upgrades from a build that only ever wrote the file get the
+        // synchronous copy here, so the NEXT launch is instant.
+        unawaited(
+          _store.writeJson(BxKeys.cachedProfile, cachedRaw, mirror: true),
+        );
         return _cached!;
       }
       rethrow;

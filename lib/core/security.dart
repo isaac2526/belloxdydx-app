@@ -117,6 +117,11 @@ enum BxLockState {
   /// The student is being asked for a fingerprint right now.
   asking,
 
+  /// The first pass, right after an account is created or signed into.
+  /// Same gate, different words: the student is being shown what will
+  /// guard the app from now on rather than being kept out of it.
+  enrolling,
+
   /// This phone has no fingerprint, no face and no screen PIN, so
   /// there is nothing to lock with. Pretending otherwise would be a
   /// button labelled "Unlock" that anybody can press.
@@ -125,26 +130,80 @@ enum BxLockState {
 
 class AppLockNotifier extends StateNotifier<BxLockState>
     with WidgetsBindingObserver {
-  AppLockNotifier(this._store) : super(BxLockState.open) {
+  AppLockNotifier(this._store, {bool hasSession = false})
+      : _hasSession = hasSession,
+        super(_startState(_store, hasSession)) {
     WidgetsBinding.instance.addObserver(this);
     unawaited(_checkCapability());
   }
 
+  /// What the app comes up as.
+  ///
+  /// It used to come up [BxLockState.open], always, and that one word
+  /// was the whole reason the lock "did not work". Every timer, every
+  /// idle count and every backgrounded-at stamp lived in RAM, so
+  /// killing the app — which is what a phone under memory pressure does
+  /// to a backgrounded app within minutes — reset all of it. The lock
+  /// only ever guarded a session that was never interrupted, which is
+  /// the one case that does not need guarding.
+  ///
+  /// Now the last moment of activity is on disk, and a launch that
+  /// comes back to it late comes back to a lock screen. Five minutes is
+  /// the floor used before the backend's real setting has arrived, so a
+  /// relaunch straight after a kill does not nag; a launch the next
+  /// morning does.
+  static BxLockState _startState(LocalStore store, bool hasSession) {
+    if (kIsWeb || !hasSession) return BxLockState.open;
+    if (!store.getBool(BxKeys.biometricOn, fallback: true)) {
+      return BxLockState.open;
+    }
+    final last = store.getInt(BxKeys.lockAfterMs);
+    if (last <= 0) return BxLockState.locked;
+    final away = DateTime.now().millisecondsSinceEpoch - last;
+    return away >= const Duration(minutes: 5).inMilliseconds
+        ? BxLockState.locked
+        : BxLockState.open;
+  }
+
+  /// The cold-start decision on its own, so a test can pin it down
+  /// without a platform channel in the way.
+  @visibleForTesting
+  static BxLockState startStateForTest(LocalStore store, bool hasSession) =>
+      _startState(store, hasSession);
+
   final LocalAuthentication _auth = LocalAuthentication();
   final LocalStore _store;
+
+  /// Whether there is a student behind the lock at all. A signed-out app
+  /// has nothing to guard, and a lock screen over a login form is just a
+  /// dead end with a fingerprint icon on it.
+  bool _hasSession;
+  set hasSession(bool v) {
+    _hasSession = v;
+    if (!v && state != BxLockState.unavailable) state = BxLockState.open;
+  }
 
   AppPolicy _policy = const AppPolicy();
   bool _enabled = false;
   bool _capable = false;
 
   /// The last moment the student did something. A touch anywhere, a
-  /// scroll, a keystroke.
-  DateTime _lastActive = DateTime.now();
+  /// scroll, a keystroke. Restored from disk, because a lock that
+  /// forgets is not a lock.
+  late DateTime _lastActive = _restoreLastActive(_store);
+
+  static DateTime _restoreLastActive(LocalStore store) {
+    final ms = store.getInt(BxKeys.lockAfterMs);
+    return ms > 0
+        ? DateTime.fromMillisecondsSinceEpoch(ms)
+        : DateTime.now();
+  }
 
   /// When the app went to the background, or null while it is in front.
   DateTime? _backgroundedAt;
 
   Timer? _tick;
+  DateTime _lastPersist = DateTime.fromMillisecondsSinceEpoch(0);
 
   set policy(AppPolicy p) {
     _policy = p;
@@ -173,8 +232,62 @@ class AppLockNotifier extends StateNotifier<BxLockState>
       _capable = false;
     }
     _enabled = _capable && _store.getBool(BxKeys.biometricOn, fallback: true);
-    if (!_capable && mounted) state = BxLockState.unavailable;
+    if (!mounted) return;
+    if (!_capable) {
+      // Nothing on this phone can open a lock, so the app must not come
+      // up behind one. This is the reason the cold-start lock above is
+      // safe to be optimistic: it is corrected here, within a frame or
+      // two, before the student can do anything about it.
+      state = BxLockState.unavailable;
+    } else if (!_enabled && state == BxLockState.locked) {
+      state = BxLockState.open;
+    }
     _restartTicker();
+  }
+
+  /// Whether this phone has ever proved it can open the lock.
+  bool get isEnrolled => _store.getBool(BxKeys.lockEnrolled);
+
+  /// Run once, straight after an account is created or signed into.
+  ///
+  /// "Force passkey" means this: the student is shown the gate on the
+  /// way in, while they are still paying attention, rather than
+  /// discovering it a week later at the worst moment. On a phone with a
+  /// fingerprint, a face or a screen PIN, that is one touch. On a phone
+  /// with none of those, there is nothing to force and pretending
+  /// otherwise would be a lie — [isCapable] stays false and Profile
+  /// says plainly what the phone is missing.
+  Future<void> enrolNow() async {
+    if (kIsWeb) return;
+    if (!_capable) await _checkCapability();
+    if (!_capable || !mounted) return;
+    // Signing in is itself activity, so the clock starts here.
+    _lastActive = DateTime.now();
+    await _persist(force: true);
+    if (isEnrolled) return;
+    _enabled = true;
+    await _store.setBool(BxKeys.biometricOn, true);
+    if (!mounted) return;
+    state = BxLockState.enrolling;
+    _restartTicker();
+  }
+
+  /// Writes the moment of last activity where a killed app can find it.
+  ///
+  /// Throttled: this runs from the pointer handler, and a preferences
+  /// write on every finger movement would be its own bug.
+  Future<void> _persist({bool force = false}) async {
+    final now = DateTime.now();
+    if (!force && now.difference(_lastPersist) < const Duration(seconds: 30)) {
+      return;
+    }
+    _lastPersist = now;
+    try {
+      await _store.setInt(
+        BxKeys.lockAfterMs,
+        _lastActive.millisecondsSinceEpoch,
+      );
+    } catch (_) {}
   }
 
   /// Turned on by default where the phone can honour it, and the
@@ -182,7 +295,10 @@ class AppLockNotifier extends StateNotifier<BxLockState>
   Future<void> setEnabled(bool on) async {
     _enabled = on && _capable;
     await _store.setBool(BxKeys.biometricOn, on);
-    if (!_enabled && state == BxLockState.locked) state = BxLockState.open;
+    if (!_enabled &&
+        (state == BxLockState.locked || state == BxLockState.enrolling)) {
+      state = BxLockState.open;
+    }
     _restartTicker();
   }
 
@@ -191,6 +307,7 @@ class AppLockNotifier extends StateNotifier<BxLockState>
   /// actually working.
   void touch() {
     _lastActive = DateTime.now();
+    unawaited(_persist());
   }
 
   void _restartTicker() {
@@ -203,7 +320,7 @@ class AppLockNotifier extends StateNotifier<BxLockState>
   }
 
   void _evaluate() {
-    if (!_enabled || state != BxLockState.open) return;
+    if (!_enabled || !_hasSession || state != BxLockState.open) return;
     if (idleFor >= _policy.lockAfter) state = BxLockState.locked;
   }
 
@@ -217,6 +334,10 @@ class AppLockNotifier extends StateNotifier<BxLockState>
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
         _backgroundedAt ??= DateTime.now();
+        // The last chance to write anything down. A phone reclaiming
+        // memory kills a backgrounded app without another callback, and
+        // whatever is only in RAM at this moment is gone.
+        unawaited(_persist(force: true));
       case AppLifecycleState.resumed:
         final away = _backgroundedAt;
         _backgroundedAt = null;
@@ -228,10 +349,12 @@ class AppLockNotifier extends StateNotifier<BxLockState>
         // after a minute should not ask for a fingerprint; coming back
         // the next morning should.
         if (away != null &&
+            _hasSession &&
             DateTime.now().difference(away) >= _policy.lockAfter) {
-          state = BxLockState.locked;
+          if (state == BxLockState.open) state = BxLockState.locked;
         } else {
           _lastActive = DateTime.now();
+          unawaited(_persist(force: true));
         }
       case AppLifecycleState.inactive:
       case AppLifecycleState.detached:
@@ -241,17 +364,31 @@ class AppLockNotifier extends StateNotifier<BxLockState>
 
   /// Locks now — used by the "Lock now" action in Profile.
   void lock() {
-    if (_capable && _enabled) state = BxLockState.locked;
+    if (_capable && _enabled && _hasSession) state = BxLockState.locked;
+  }
+
+  /// Lets the student past the first-time gate without proving
+  /// anything. The lock stays ON — this only means "not this second".
+  /// A student whose sensor is wet must never be locked out of an app
+  /// they have just paid for.
+  void skipEnrolment() {
+    if (state != BxLockState.enrolling) return;
+    _lastActive = DateTime.now();
+    unawaited(_persist(force: true));
+    state = BxLockState.open;
   }
 
   /// Asks the phone. Returns true when the student got back in.
   Future<bool> unlock() async {
     if (state == BxLockState.asking) return false;
     final previous = state;
+    final enrolling = previous == BxLockState.enrolling;
     state = BxLockState.asking;
     try {
       final ok = await _auth.authenticate(
-        localizedReason: 'Unlock Belloxdydx',
+        localizedReason: enrolling
+            ? 'Set this as the key to Belloxdydx'
+            : 'Unlock Belloxdydx',
         options: const AuthenticationOptions(
           // false lets the phone fall back to its PIN or pattern. A
           // student whose fingerprint sensor is wet must still be able
@@ -261,9 +398,11 @@ class AppLockNotifier extends StateNotifier<BxLockState>
           useErrorDialogs: true,
         ),
       );
+      if (ok) await _store.setBool(BxKeys.lockEnrolled, true);
       if (!mounted) return ok;
       if (ok) {
         _lastActive = DateTime.now();
+        await _persist(force: true);
         state = BxLockState.open;
       } else {
         state = previous == BxLockState.asking ? BxLockState.locked : previous;
@@ -271,7 +410,9 @@ class AppLockNotifier extends StateNotifier<BxLockState>
       return ok;
     } catch (e) {
       debugPrint('[lock] authenticate failed: $e');
-      if (mounted) state = BxLockState.locked;
+      if (mounted) {
+        state = enrolling ? BxLockState.enrolling : BxLockState.locked;
+      }
       return false;
     }
   }

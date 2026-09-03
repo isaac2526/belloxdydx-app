@@ -44,7 +44,17 @@ final assessmentRepoProvider = Provider<AssessmentRepository>(
 
 /// The lock. One per app, and it watches the lifecycle itself.
 final appLockProvider = StateNotifierProvider<AppLockNotifier, BxLockState>(
-  (ref) => AppLockNotifier(ref.watch(localStoreProvider)),
+  (ref) {
+    final store = ref.watch(localStoreProvider);
+    return AppLockNotifier(
+      store,
+      // Read synchronously, from the same mirrored profile boot uses, so
+      // the very first frame is already either locked or not. Deciding
+      // this a frame late means showing the dashboard to whoever picked
+      // the phone up, which is the whole thing the lock exists to stop.
+      hasSession: store.readJsonSync(BxKeys.cachedProfile) != null,
+    );
+  },
 );
 
 /// What Tutor Bello has switched on for every phone. Read from the
@@ -127,6 +137,7 @@ class SessionNotifier extends StateNotifier<SessionState>
 
   final Ref _ref;
   StreamSubscription<bool>? _sessionWatch;
+  StreamSubscription<void>? _authWatch;
   DateTime _lastResumeWork = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Coming back to the app is when the backend's switches are re-read
@@ -159,11 +170,17 @@ class SessionNotifier extends StateNotifier<SessionState>
   AuthRepository get _auth => _ref.read(authRepoProvider);
   Backend get _backend => _ref.read(backendProvider);
 
+  /// True once a session has been put on screen, so a later refresh
+  /// that fails knows it must not undo it.
+  bool _live = false;
+
   Future<void> _boot() async {
     // Starts the radio watch before anything can fail, so the first
     // error a student sees already knows whether their phone has a
     // connection at all.
     _backend.watchConnectivity();
+
+    final store = _ref.read(localStoreProvider);
 
     // FIRST, before anything can poll. The website's heartbeat treats a
     // missing session header exactly like a stolen session, and the app
@@ -171,10 +188,30 @@ class SessionNotifier extends StateNotifier<SessionState>
     // this after the first poll would be too late; not restoring it at
     // all — which is what happened — signed everybody out three minutes
     // into every launch.
-    _backend.restoreMobileSession(
-      _ref.read(localStoreProvider).getString(BxKeys.mobileSession),
-    );
+    _backend.restoreMobileSession(store.getString(BxKeys.mobileSession));
+    _backend.restoreMode(store.getString(BxKeys.backendMode));
+    _watchForSessionEnd();
+
+    // The whole point of this branch: a phone that remembers a signed-in
+    // student opens ON that student, in the first frame, with no network
+    // call in front of it.
+    //
+    // What it replaces awaited a capability probe (up to eight seconds
+    // on a bad line) and then a profile read (two more requests) before
+    // the router was allowed off the splash — and if either one failed,
+    // which offline it always does, it published `signedOut` and the
+    // student was shown a login screen for an account they had never
+    // left. That is the bug: not a lost session, an impatient boot.
+    final remembered = _auth.rememberedProfile();
+    if (remembered != null && _backend.signedIn) {
+      _auth.adopt(remembered);
+      _publish(remembered);
+      unawaited(_catchUp());
+      return;
+    }
+
     await _backend.probeCapabilities();
+    unawaited(_rememberMode());
     if (!_backend.signedIn) {
       state = const SessionState.signedOut();
       return;
@@ -182,11 +219,43 @@ class SessionNotifier extends StateNotifier<SessionState>
     await refreshProfile();
   }
 
+  /// Everything the old boot did in front of the student, moved behind
+  /// them. Nothing in here may take the app away.
+  Future<void> _catchUp() async {
+    try {
+      await _backend.probeCapabilities();
+      await _rememberMode();
+    } catch (e) {
+      debugPrint('[boot] probe skipped: $e');
+    }
+    await refreshProfile();
+  }
+
+  Future<void> _rememberMode() async {
+    try {
+      await _ref
+          .read(localStoreProvider)
+          .setString(BxKeys.backendMode, _backend.modeName);
+    } catch (_) {}
+  }
+
   Future<void> refreshProfile() async {
     final Profile p;
     try {
       p = await _auth.loadProfile(force: true);
     } catch (e) {
+      // A student who is already inside the app is NEVER thrown out of
+      // it by a failed read. The profile is a detail; the session is
+      // not, and only the session decides this.
+      if (_live && state.isSignedIn) {
+        debugPrint('[session] profile refresh skipped: $e');
+        return;
+      }
+      final fallback = _auth.cachedProfile ?? _auth.rememberedProfile();
+      if (fallback != null && _backend.signedIn) {
+        _publish(fallback);
+        return;
+      }
       // Signed in but the profile could not be read — treat as signed out
       // rather than trapping the student on a blank screen. ONLY the
       // profile read may reach this: a fault anywhere else must not be
@@ -196,7 +265,24 @@ class SessionNotifier extends StateNotifier<SessionState>
       return;
     }
 
+    _publish(p);
+  }
+
+  /// Puts a profile on screen and starts everything that hangs off it.
+  /// Safe to call twice: the second call refreshes the state without
+  /// starting a second sync or a second supersede watcher.
+  void _publish(Profile p) {
+    final first = !_live;
+    _live = true;
+    // A phone still proving itself stays on the door. A background
+    // refresh landing a second later must not open it.
+    if (!first && state.status == SessionStatus.deviceCheck && !p.isFrozen) {
+      state = SessionState.deviceCheck(p);
+      return;
+    }
     state = p.isFrozen ? SessionState.frozen(p) : SessionState.active(p);
+    if (!first) return;
+    _ref.read(appLockProvider.notifier).hasSession = true;
     _listenForSupersede();
     unawaited(_prepareOffline(p));
     unawaited(_checkDevice(p));
@@ -261,6 +347,33 @@ class SessionNotifier extends StateNotifier<SessionState>
     }
   }
 
+  /// The counterweight to a boot that trusts the phone.
+  ///
+  /// Because nothing else is allowed to end a live session any more —
+  /// not a timeout, not a failed profile read — something has to end
+  /// one that genuinely IS over. This is it: Supabase telling us the
+  /// refresh token is dead. Without it a student whose account was
+  /// revoked would sit inside a cached dashboard where every button
+  /// returns an error and no button signs them out.
+  void _watchForSessionEnd() {
+    _authWatch?.cancel();
+    try {
+      _authWatch = _auth.sessionEnded.listen(
+        (_) {
+          // Our own signOut() clears this first, so this only fires for
+          // an ending the app did not ask for.
+          if (!_live) return;
+          unawaited(signOut(
+            reason: 'Your session has ended. Please sign in again.',
+          ));
+        },
+        onError: (_) {},
+      );
+    } catch (e) {
+      debugPrint('[session] auth watch unavailable: $e');
+    }
+  }
+
   /// Watches for another device taking the session.
   ///
   /// Deliberately cannot fail the sign-in. This used to be attached
@@ -319,11 +432,24 @@ class SessionNotifier extends StateNotifier<SessionState>
     await applyPolicy();
   }
 
-  Future<void> onSignedIn() => refreshProfile();
+  /// The one place both "sign in" and "create account" land.
+  ///
+  /// The phone's own lock is shown here, once, while the student is
+  /// still paying attention — which is what "force passkey after
+  /// creating an account or signing in" means in practice. It cannot be
+  /// forced on a phone that has no screen lock at all; there it does
+  /// nothing and Profile says why.
+  Future<void> onSignedIn() async {
+    await refreshProfile();
+    if (!state.isSignedIn) return;
+    unawaited(_ref.read(appLockProvider.notifier).enrolNow());
+  }
 
   Future<void> signOut({String? reason}) async {
+    _live = false;
     _sessionWatch?.cancel();
     _sessionWatch = null;
+    _ref.read(appLockProvider.notifier).hasSession = false;
     await _auth.signOut();
     state = SessionState.signedOut(message: reason);
   }
@@ -344,6 +470,7 @@ class SessionNotifier extends StateNotifier<SessionState>
   @override
   void dispose() {
     _sessionWatch?.cancel();
+    _authWatch?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
