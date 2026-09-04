@@ -820,6 +820,16 @@ class AnswerVerdict {
   final DateTime? serverNow;
   final bool timeUp;
 
+  /// False when the answer was TAKEN but could not be MARKED.
+  ///
+  /// The direct path opens an attempt with the answer key stripped and
+  /// only reveals it once the student commits, which is right — and it
+  /// means a student whose line drops mid-round has an answer nobody
+  /// can grade. Losing it, which is what a thrown network error did,
+  /// is the worst of the three options: the answer is kept, the student
+  /// is told plainly, and the mark arrives when they are back.
+  final bool graded;
+
   const AnswerVerdict({
     this.correct = false,
     this.correctKey,
@@ -830,7 +840,11 @@ class AnswerVerdict {
     this.endsAt,
     this.serverNow,
     this.timeUp = false,
+    this.graded = true,
   });
+
+  /// An answer that was kept but could not be marked.
+  const AnswerVerdict.pending() : this(graded: false);
 
   factory AnswerVerdict.fromJson(Map<String, dynamic> j) => AnswerVerdict(
         correct: _bool(_pick(j, ['correct', 'is_correct', 'isCorrect'])),

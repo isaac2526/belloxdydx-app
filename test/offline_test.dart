@@ -41,6 +41,7 @@ void main() {
   syncingWithNoSignal();
   aSavedCopyThatFellBehind();
   belloDateReadsRight();
+  aRoundThatLostItsLine();
 
   late Directory docs;
   late _FakePaths paths;
@@ -1554,6 +1555,78 @@ void belloDateReadsRight() {
       // hour ahead. It must still read as a date.
       final now = DateTime(2026, 9, 10, 12);
       expect(bxBelloDate(DateTime(2026, 9, 12), now: now), '12 Sep');
+    });
+  });
+}
+
+/// ============================================================
+/// THE LINE DROPS IN THE MIDDLE OF A ROUND
+///
+/// "I left a practice questions I suppose to meet it back."
+///
+/// A practice round opened against the server used to lose the answer
+/// outright the moment the connection went: the tap raised a toast
+/// about the network and nothing was written anywhere. On the direct
+/// path — which strips the answer key until a student commits — the
+/// phone often cannot mark it either.
+///
+/// Three outcomes are possible and only one of them is acceptable:
+/// lose it (what it did), guess at it, or keep it and say plainly that
+/// it is not marked yet.
+/// ============================================================
+void aRoundThatLostItsLine() {
+  group('an answer taken with no line', () {
+    test('a verdict that could not be marked says so', () {
+      const pending = AnswerVerdict.pending();
+      expect(pending.graded, isFalse);
+      expect(pending.correct, isFalse,
+          reason: 'and correct stays false, so nothing reads it as a pass');
+    });
+
+    test('a real verdict is graded', () {
+      expect(const AnswerVerdict(correct: true).graded, isTrue);
+      expect(const AnswerVerdict(correct: false).graded, isTrue);
+      expect(
+        AnswerVerdict.fromJson({'correct': true, 'correct_key': 'B'}).graded,
+        isTrue,
+        reason: 'anything the server answered has been marked',
+      );
+    });
+
+    test('an unmarked answer reads back as unmarked, not as wrong', () {
+      // This is the row written to disk. `is_correct: null` has to
+      // survive the round trip: read back as false it would tell a
+      // student they got it wrong because nobody could check.
+      final given = GivenAnswer.fromJson({
+        'choice': 'C',
+        'answer_text': '',
+        'is_correct': null,
+        'pending': true,
+      });
+      expect(given.isAnswered, isTrue, reason: 'the answer is kept');
+      expect(given.isCorrect, isNull, reason: 'and it is NOT marked wrong');
+    });
+
+    test('a marked answer still reads back marked', () {
+      expect(
+        GivenAnswer.fromJson({'choice': 'A', 'is_correct': true}).isCorrect,
+        isTrue,
+      );
+      expect(
+        GivenAnswer.fromJson({'choice': 'A', 'is_correct': false}).isCorrect,
+        isFalse,
+      );
+    });
+
+    test('an unmarked answer is not counted as correct', () {
+      // The score line counts `isCorrect == true`, so an unmarked
+      // answer must never inflate it.
+      final answers = <String, GivenAnswer>{
+        'q1': const GivenAnswer(choice: 'A', isCorrect: true),
+        'q2': const GivenAnswer(choice: 'B', isCorrect: false),
+        'q3': const GivenAnswer(choice: 'C'),
+      };
+      expect(answers.values.where((a) => a.isCorrect == true).length, 1);
     });
   });
 }

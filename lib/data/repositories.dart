@@ -1276,34 +1276,108 @@ class AssessmentRepository {
       return answerOffline(attemptId, questionId,
           choice: choice, answerText: answerText);
     }
-    if (_b.isDirect) {
-      final r = await _b.rpc('bx_answer', params: {
-        'p_attempt_id': attemptId,
-        'p_question_id': questionId,
-        'p_choice': choice.isEmpty ? null : choice,
-        'p_answer_text': answerText.isEmpty ? null : answerText,
+    try {
+      if (_b.isDirect) {
+        final r = await _b.rpc('bx_answer', params: {
+          'p_attempt_id': attemptId,
+          'p_question_id': questionId,
+          'p_choice': choice.isEmpty ? null : choice,
+          'p_answer_text': answerText.isEmpty ? null : answerText,
+        });
+        final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
+        // NOT awaited. Both of these are bookkeeping; neither is anything
+        // the student is waiting to see, and putting disk work between
+        // the tap and the right/wrong is how an answer starts to feel
+        // slow halfway through a semester.
+        unawaited(_rememberVerdict(questionId, verdict));
+        unawaited(_rememberAnswer(attemptId, questionId,
+            choice: choice, answerText: answerText, correct: verdict.correct));
+        return verdict;
+      }
+      final r = await _b.apiSend('/api/practice/answer', body: {
+        'attemptId': attemptId,
+        'questionId': questionId,
+        'choice': choice,
+        'answerText': answerText,
       });
       final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
-      // NOT awaited. Both of these are bookkeeping; neither is anything
-      // the student is waiting to see, and putting disk work between
-      // the tap and the right/wrong is how an answer starts to feel
-      // slow halfway through a semester.
       unawaited(_rememberVerdict(questionId, verdict));
       unawaited(_rememberAnswer(attemptId, questionId,
           choice: choice, answerText: answerText, correct: verdict.correct));
       return verdict;
+    } catch (e) {
+      // THE LINE DROPPED MID-ROUND.
+      //
+      // "I left a practice questions I suppose to meet it back."
+      //
+      // The answer used to be thrown away with a toast about the
+      // connection: the tap did nothing, the round could not be
+      // continued, and everything before it was still only in the
+      // screen's memory. Three outcomes are possible here and losing
+      // the answer is the worst of them.
+      // `hasConnection` is nullable: null means the watcher has not
+      // reported yet, which is not the same as "there is a line". Only
+      // a positive true rules the fallback out.
+      if (_b.hasConnection == true) rethrow;
+      final saved = await _answerWithNoLine(attemptId, questionId,
+          choice: choice, answerText: answerText);
+      if (saved != null) return saved;
+      rethrow;
     }
-    final r = await _b.apiSend('/api/practice/answer', body: {
-      'attemptId': attemptId,
-      'questionId': questionId,
-      'choice': choice,
-      'answerText': answerText,
-    });
-    final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
-    unawaited(_rememberVerdict(questionId, verdict));
-    unawaited(_rememberAnswer(attemptId, questionId,
-        choice: choice, answerText: answerText, correct: verdict.correct));
-    return verdict;
+  }
+
+  /// Keeps an answer the server could not be told about.
+  ///
+  /// Marks it here when the phone genuinely holds the key — which it
+  /// does on the website path, and on the direct path for any course
+  /// the student downloaded. When it does not, the answer is still
+  /// written down and comes back UNMARKED rather than wrong: guessing
+  /// on a student's behalf, in a feature whose whole job is telling
+  /// them whether they are right, would be worse than saying so.
+  Future<AnswerVerdict?> _answerWithNoLine(
+    String attemptId,
+    String questionId, {
+    required String choice,
+    required String answerText,
+  }) async {
+    final store = _store;
+    if (store == null) return null;
+    try {
+      final raw = await store.attempt(attemptId);
+      if (raw == null) return null;
+      final row = (raw['questions'] as List? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .firstWhere((e) => '${e['id']}' == questionId,
+              orElse: () => <String, dynamic>{});
+      if (row.isEmpty) return null;
+
+      final q = Question.fromJson(row);
+      final hasKey = (q.correctKey ?? '').trim().isNotEmpty ||
+          q.acceptedAnswer.trim().isNotEmpty;
+      if (hasKey) {
+        return await answerOffline(attemptId, questionId,
+            choice: choice, answerText: answerText);
+      }
+
+      final answers = Map<String, dynamic>.from(
+          (raw['answers'] as Map?)?.cast<String, dynamic>() ?? {});
+      answers[questionId] = {
+        'choice': choice,
+        'answer_text': answerText,
+        // Deliberately null, not false. `_boolOrNull` reads it back as
+        // "not marked yet", and the score line counts only true.
+        'is_correct': null,
+        'pending': true,
+      };
+      raw['answers'] = answers;
+      raw['at'] = DateTime.now().millisecondsSinceEpoch;
+      await store.putAttempt(attemptId, raw);
+      return const AnswerVerdict.pending();
+    } catch (e) {
+      debugPrint('[practice] could not keep the answer: $e');
+      return null;
+    }
   }
 
   /// Writes one committed answer into the locally-held copy of the
