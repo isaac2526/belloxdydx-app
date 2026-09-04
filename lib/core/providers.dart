@@ -846,6 +846,26 @@ class SessionNotifier extends StateNotifier<SessionState>
           .read(contentRepoProvider)
           .loadContent(level: state.profile?.currentLevel ?? '100', force: true);
       _ref.invalidate(contentProvider);
+
+      // The other surfaces that hang off backend content, and used to
+      // sit stale until the student happened to leave the screen and
+      // come back:
+      //
+      //   the bell    a new announcement neither rang it nor, once
+      //               withdrawn, stopped it ringing
+      //   the tests   a test published, opened or closed never appeared
+      //               on a course hub the student was already standing
+      //               on
+      //   the numbers the dashboard's own counts
+      //
+      // All three are autoDispose futures, so invalidating costs
+      // nothing for the ones nobody is looking at.
+      _ref.invalidate(announcementsProvider);
+      _ref.invalidate(dashboardProvider);
+      for (final c in _ref.read(contentRepoProvider).courses) {
+        _ref.invalidate(testsForCourseProvider(c.id));
+      }
+
       await applyPolicy();
       await _ref.read(courseStampsProvider.notifier).refresh(force: true);
       return true;
@@ -866,6 +886,9 @@ class SessionNotifier extends StateNotifier<SessionState>
       final policy = _ref.read(contentRepoProvider).policy;
       _ref.read(appPolicyProvider.notifier).state = policy;
       _ref.read(appLockProvider.notifier).policy = policy;
+      // So a graded attempt cannot be started against a closed
+      // platform. Offline practice is untouched.
+      _ref.read(assessmentRepoProvider).policyForStart = policy;
       await ScreenCapture.apply(policy);
     } catch (e) {
       debugPrint('[policy] not applied: $e');

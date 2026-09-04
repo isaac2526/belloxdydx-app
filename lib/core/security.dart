@@ -42,11 +42,39 @@ class AppPolicy {
   final bool deviceVerification;
   final int lockMinutes;
 
+  /// Tutor Bello has closed the platform.
+  ///
+  /// The website walls this in Next.js middleware, which every browser
+  /// and every /api route passes through — and which the
+  /// Supabase-direct path never touches at all. So with the platform
+  /// closed, apps on that path carried on reading content and starting
+  /// graded attempts while he believed nobody was inside.
+  ///
+  /// What the app does with it is deliberately softer than the
+  /// website's wall: server-side actions stop and the reason is shown,
+  /// while material already on the phone keeps working. Bricking a
+  /// student's downloaded course because a deploy is happening would
+  /// punish exactly the students this app exists for.
+  final bool maintenance;
+
+  /// Written by Tutor Bello, so it is worth showing rather than a
+  /// generic sentence.
+  final String maintenanceMessage;
+
   const AppPolicy({
     this.allowScreenshots = false,
     this.deviceVerification = true,
     this.lockMinutes = 5,
+    this.maintenance = false,
+    this.maintenanceMessage = '',
   });
+
+  /// What to put on screen when something is refused for it.
+  String get closedMessage => maintenanceMessage.trim().isEmpty
+      ? 'Belloxdydx is closed for a short while. Everything you have '
+          'downloaded still works — practise offline and this will be '
+          'back shortly.'
+      : maintenanceMessage.trim();
 
   Duration get lockAfter => Duration(minutes: lockMinutes.clamp(1, 120));
 
@@ -63,6 +91,9 @@ class AppPolicy {
       deviceVerification:
           (j['deviceVerification'] ?? j['device_verification']) != false,
       lockMinutes: minutes.clamp(1, 120),
+      maintenance: (j['maintenance'] ?? j['maintenance_mode']) == true,
+      maintenanceMessage:
+          '${j['maintenanceMessage'] ?? j['maintenance_message'] ?? ''}',
     );
   }
 
@@ -70,6 +101,8 @@ class AppPolicy {
         'allowScreenshots': allowScreenshots,
         'deviceVerification': deviceVerification,
         'lockMinutes': lockMinutes,
+        'maintenance': maintenance,
+        'maintenanceMessage': maintenanceMessage,
       };
 }
 

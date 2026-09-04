@@ -1064,6 +1064,14 @@ class AssessmentRepository {
   Future<String> startShareCode(String code) =>
       _start(mode: 'test', shareCode: code.toUpperCase());
 
+  /// Refuses a server-side start while the platform is closed.
+  ///
+  /// Set from the app policy on every resume. Deliberately narrow: it
+  /// stops things that need the SERVER, and leaves everything already
+  /// on the phone alone — a student practising a downloaded course
+  /// during a twenty-minute deploy should not be interrupted at all.
+  AppPolicy policyForStart = const AppPolicy();
+
   Future<String> _start({
     required String mode,
     String? courseId,
@@ -1071,6 +1079,9 @@ class AssessmentRepository {
     String? shareCode,
     int count = 20,
   }) async {
+    if (policyForStart.maintenance) {
+      throw BxError(policyForStart.closedMessage, code: 'maintenance');
+    }
     if (_b.isDirect) {
       final r = await _b.rpc('bx_start_attempt', params: {
         'p_mode': mode,

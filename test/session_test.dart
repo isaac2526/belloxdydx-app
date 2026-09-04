@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:belloxdydx/core/providers.dart';
+import 'package:belloxdydx/core/security.dart';
 import 'package:belloxdydx/data/local_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,6 +21,7 @@ void main() {
   sessionTokenSurvivesARestart();
   TestWidgetsFlutterBinding.ensureInitialized();
   themeDefaults();
+  maintenanceMode();
 
   group('Stream.periodic, the shape that broke login', () {
     test('a non-nullable stream with no computation throws immediately', () {
@@ -208,6 +210,75 @@ void sessionTokenSurvivesARestart() {
       expect(held, 'mob-123', reason: 'empty must not clear a live token');
       restore('mob-456');
       expect(held, 'mob-456');
+    });
+  });
+}
+
+/// ============================================================
+/// WHEN TUTOR BELLO CLOSES THE PLATFORM
+///
+/// The maintenance wall is Next.js middleware. Every browser and every
+/// /api route passes through it — and the Supabase-direct path never
+/// touches Next.js at all. So with the platform closed, apps on that
+/// path carried on reading content and starting GRADED ATTEMPTS while
+/// he believed nobody was inside.
+///
+/// What the app does with it is deliberately softer than the website's
+/// wall, and these pin that choice down: server-side actions stop,
+/// everything already on the phone keeps working.
+/// ============================================================
+void maintenanceMode() {
+  group('a closed platform', () {
+    test('is read from the settings both backends send', () {
+      final p = AppPolicy.fromJson(const {
+        'allowScreenshots': false,
+        'deviceVerification': true,
+        'lockMinutes': 5,
+        'maintenance': true,
+        'maintenanceMessage': 'Back in 20 minutes',
+      });
+      expect(p.maintenance, isTrue);
+      expect(p.closedMessage, 'Back in 20 minutes');
+    });
+
+    test('and in the other spelling', () {
+      final p = AppPolicy.fromJson(const {
+        'maintenance_mode': true,
+        'maintenance_message': 'Adding new past questions',
+      });
+      expect(p.maintenance, isTrue);
+      expect(p.closedMessage, 'Adding new past questions');
+    });
+
+    test('a missing setting means open', () {
+      // The direction matters. A settings row that has not been created
+      // must never close the platform for everybody.
+      expect(AppPolicy.fromJson(const {}).maintenance, isFalse);
+      expect(const AppPolicy().maintenance, isFalse);
+    });
+
+    test('with no message it still says something a student can act on',
+        () {
+      const p = AppPolicy(maintenance: true);
+      expect(p.closedMessage, contains('downloaded'));
+      expect(p.closedMessage.trim(), isNotEmpty);
+    });
+
+    test('a blank message is not shown as a blank message', () {
+      const p = AppPolicy(maintenance: true, maintenanceMessage: '   ');
+      expect(p.closedMessage.trim(), isNotEmpty);
+    });
+
+    test('it survives the round trip both backends make it take', () {
+      const p = AppPolicy(
+        maintenance: true,
+        maintenanceMessage: 'Back soon',
+        lockMinutes: 9,
+      );
+      final again = AppPolicy.fromJson(p.toJson());
+      expect(again.maintenance, isTrue);
+      expect(again.maintenanceMessage, 'Back soon');
+      expect(again.lockMinutes, 9);
     });
   });
 }

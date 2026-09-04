@@ -231,6 +231,17 @@ class _DashboardBody extends ConsumerWidget {
     return BxStagger(
       spacing: BxSpace.md,
       children: [
+        // Tutor Bello has closed the platform. Said plainly, at the
+        // top, in his own words — and everything already downloaded
+        // keeps working, which is the point of the softer wall.
+        if (ref.watch(appPolicyProvider).maintenance)
+          BxBanner(
+            title: 'Belloxdydx is closed for a moment',
+            message: ref.watch(appPolicyProvider).closedMessage,
+            icon: Icons.construction_rounded,
+            accent: BxAccent.warning,
+          ),
+
         if (!activated)
           BxBanner(
             title: 'Preview mode',
