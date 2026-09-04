@@ -32,6 +32,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   courseDownloadRecords();
   pruningWithdrawnContent();
+  whoseDateIsShown();
 
   late Directory docs;
   late _FakePaths paths;
@@ -1167,6 +1168,64 @@ void pruningWithdrawnContent() {
           reason: 'a cleared field must really clear');
       expect(held['correct_key'], 'A',
           reason: 'and the rest of the row must survive');
+    });
+  });
+}
+
+/// ============================================================
+/// WHOSE DATE IS ON THE SCREEN
+///
+/// "Check the code, also subject last updated from Bello o not the
+///  download"
+///
+/// Every recency string in the app used to answer "when did the student
+/// press a button" — savedAt, syncedAt, "Saved on this phone". Nobody
+/// has ever wanted to know that about a note. What they want is how
+/// fresh the material is, and only Tutor Bello moves that.
+/// ============================================================
+void whoseDateIsShown() {
+  group('the date on screen is Tutor Bello\'s', () {
+    OfflineItem item(String sig) => OfflineItem(
+          id: 'm1',
+          title: 'Note',
+          kind: 'note',
+          sig: sig,
+          savedAtMs: DateTime(2026, 8, 12).millisecondsSinceEpoch,
+        );
+
+    test('a material carries the date he last changed it', () {
+      // sig is already the material's own updated_at wherever the
+      // backend sends one, so the date is on the disk and costs nothing.
+      final e = item('2026-09-01T10:30:00.000Z');
+      expect(e.updatedAt, isNotNull);
+      expect(e.updatedAt!.toUtc().month, 9);
+      expect(e.updatedAt!.toUtc().day, 1);
+      expect(e.savedAt.month, 8,
+          reason: 'and it is NOT the day the student downloaded it');
+    });
+
+    test('the URL form of a signature is not a date', () {
+      // Older backends, and anything the sync could only fingerprint by
+      // URL. Showing "updated 1970" would be worse than showing nothing.
+      expect(item('https://example.com/a.pdf#3').updatedAt, isNull);
+      expect(item('carried-over').updatedAt, isNull);
+      expect(item('').updatedAt, isNull);
+    });
+
+    test('a course carries it too, and holds it offline', () {
+      const stamp = CourseStamp(
+        id: 'c1',
+        materials: 3,
+        questions: 40,
+        stamp: '2026-09-01T10:30:00.000Z',
+      );
+      expect(stamp.updatedAt, isNotNull);
+      expect(stamp.updatedAt!.toUtc().day, 1);
+    });
+
+    test('an unstamped course shows nothing rather than a wrong date', () {
+      const stamp = CourseStamp(id: 'c1', materials: 3, questions: 40);
+      expect(stamp.updatedAt, isNull);
     });
   });
 }

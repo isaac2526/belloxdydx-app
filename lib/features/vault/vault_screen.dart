@@ -247,10 +247,19 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
 
   Widget _row(OfflineItem e) {
     final c = context.bx;
-    final saved = DateFormat('d MMM').format(e.savedAt);
+    // TUTOR BELLO'S date where it is knowable, the student's only where
+    // it is not.
+    //
+    // "subject last updated from Bello o not the download" — every row
+    // here said "saved 12 Aug", which answers when the student pressed
+    // a button. What they actually want to know about a note is how
+    // fresh it is, and only Tutor Bello moves that.
+    final bello = e.updatedAt;
     final parts = <String>[
       if (e.courseCode.isNotEmpty) e.courseCode,
-      'saved $saved',
+      bello != null
+          ? 'updated ${DateFormat('d MMM').format(bello)}'
+          : 'saved ${DateFormat('d MMM').format(e.savedAt)}',
       if (e.bytes > 0) e.sizeLabel,
       if (e.pinned) 'kept',
     ];

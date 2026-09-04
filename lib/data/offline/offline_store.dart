@@ -93,6 +93,21 @@ class OfflineItem {
   });
 
   DateTime get savedAt => DateTime.fromMillisecondsSinceEpoch(savedAtMs);
+
+  /// When TUTOR BELLO last changed this item, when that is knowable.
+  ///
+  /// [sig] is the material's own `updated_at` wherever the backend sent
+  /// one, and its URL otherwise — so the date is already on the disk and
+  /// costs nothing to read. Null for the URL form, and for anything
+  /// carried over from the old vault.
+  ///
+  /// This is the date worth showing. [savedAt] answers "when did I press
+  /// the button", which is a question no student has ever asked about a
+  /// note.
+  DateTime? get updatedAt {
+    if (sig.isEmpty || !sig.startsWith('20')) return null;
+    return DateTime.tryParse(sig);
+  }
   bool get hasDoc => (docRel ?? '').isNotEmpty;
   bool get hasHtml => (htmlRel ?? '').isNotEmpty;
 

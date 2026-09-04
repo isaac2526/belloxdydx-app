@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 
 import '../../core/providers.dart';
 import '../../core/router.dart';
@@ -291,6 +292,9 @@ class _CourseCard extends ConsumerWidget {
     // Watching the family here is what puts a live badge on a shelf of
     // twenty courses without any of them costing a request.
     final download = ref.watch(courseDownloadProvider(course.id));
+    // When TUTOR BELLO last changed this course. Not when the student
+    // downloaded it — that is a different question and nobody asks it.
+    final stamp = ref.watch(courseStampsProvider)[course.id];
     return BxCard(
       onTap: () => context.push(Routes.course(Uri.encodeComponent(course.code))),
       child: Row(
@@ -313,6 +317,11 @@ class _CourseCard extends ConsumerWidget {
                 ),
                 const SizedBox(height: BxSpace.xxs),
                 Text(counts, style: BxType.tiny(c.muted)),
+                if (stamp?.updatedAt != null)
+                  Text(
+                    'Updated ${DateFormat('d MMM').format(stamp!.updatedAt!)}',
+                    style: BxType.tiny(c.muted),
+                  ),
                 if (download.held || download.isRunning) ...[
                   const SizedBox(height: BxSpace.xs),
                   _offlineChip(download),
