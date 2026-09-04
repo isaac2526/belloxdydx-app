@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// These tests pin that down, because a silent mismatch there would show
 /// up as a blank screen rather than an error.
 void main() {
+  aCorrectedAnnouncement();
   group('Profile', () {
     test('parses a Postgres row', () {
       final p = Profile.fromJson({
@@ -293,6 +294,77 @@ void main() {
       expect(AttemptMode.bookmarks.label, 'Saved questions');
       expect(AttemptMode.exam.isTimed, isTrue);
       expect(AttemptMode.practice.isTimed, isFalse);
+    });
+  });
+}
+
+/// ============================================================
+/// A CORRECTED ANNOUNCEMENT
+///
+/// An announcement is the thing most likely to need correcting after
+/// it is posted — a moved venue, a changed date. A student who
+/// dismissed the old version and is now being shown it again has to be
+/// told why it is back, and a notice that was never touched must not
+/// claim to have been edited because a trigger fired on its insert.
+/// ============================================================
+void aCorrectedAnnouncement() {
+  group('an announcement that was edited', () {
+    Announcement made({DateTime? at, DateTime? moved}) => Announcement(
+          id: 'a1',
+          title: 'Venue',
+          body: 'LT1',
+          createdAt: at,
+          updatedAt: moved,
+        );
+
+    test('says so when the wording actually moved', () {
+      final a = made(
+        at: DateTime(2026, 9, 1, 8),
+        moved: DateTime(2026, 9, 3, 17),
+      );
+      expect(a.wasEdited, isTrue);
+    });
+
+    test('does not, when the stamp only moved by the insert trigger', () {
+      // updated_at defaults to now() alongside created_at, so the two
+      // differ by microseconds on every row that was never edited.
+      final at = DateTime(2026, 9, 1, 8);
+      expect(
+        made(at: at, moved: at.add(const Duration(milliseconds: 3))).wasEdited,
+        isFalse,
+      );
+      expect(made(at: at, moved: at).wasEdited, isFalse);
+    });
+
+    test('does not, when either date is missing', () {
+      // An older backend that sends no updated_at must not make every
+      // notice in the list look freshly corrected.
+      expect(made(at: DateTime(2026, 9, 1)).wasEdited, isFalse);
+      expect(made(moved: DateTime(2026, 9, 1)).wasEdited, isFalse);
+      expect(made().wasEdited, isFalse);
+    });
+
+    test('reads updated_at off either backend path', () {
+      expect(
+        Announcement.fromJson({
+          'id': 'a1',
+          'title': 'Venue',
+          'body': 'LT2',
+          'created_at': '2026-09-01T08:00:00.000Z',
+          'updated_at': '2026-09-03T17:00:00.000Z',
+        }).wasEdited,
+        isTrue,
+      );
+      expect(
+        Announcement.fromJson({
+          'id': 'a1',
+          'title': 'Venue',
+          'body': 'LT2',
+          'createdAt': '2026-09-01T08:00:00.000Z',
+          'updatedAt': '2026-09-03T17:00:00.000Z',
+        }).wasEdited,
+        isTrue,
+      );
     });
   });
 }

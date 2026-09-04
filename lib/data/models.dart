@@ -1193,6 +1193,14 @@ class Announcement {
   final String title;
   final String body;
   final DateTime? createdAt;
+
+  /// When Tutor Bello last changed the wording.
+  ///
+  /// An announcement is the thing most likely to need correcting after
+  /// it is posted — a moved venue, a changed date — and a student who
+  /// dismissed the old version and is now being shown it again needs to
+  /// know which is which.
+  final DateTime? updatedAt;
   final bool unread;
   final bool isActive;
 
@@ -1201,6 +1209,7 @@ class Announcement {
     required this.title,
     required this.body,
     this.createdAt,
+    this.updatedAt,
     this.unread = false,
     this.isActive = true,
   });
@@ -1210,9 +1219,20 @@ class Announcement {
         title: _str(j['title']),
         body: _str(j['body']),
         createdAt: _date(_pick(j, ['created_at', 'createdAt'])),
+        updatedAt: _date(_pick(j, ['updated_at', 'updatedAt'])),
         unread: _bool(j['unread']),
         isActive: _bool(_pick(j, ['is_active', 'isActive']), true),
       );
+
+  /// True when the wording has moved since it was first posted. A
+  /// second's difference is the trigger firing on the insert, not an
+  /// edit, so a real gap is required.
+  bool get wasEdited {
+    final made = createdAt;
+    final moved = updatedAt;
+    if (made == null || moved == null) return false;
+    return moved.difference(made) > const Duration(minutes: 1);
+  }
 }
 
 @immutable
