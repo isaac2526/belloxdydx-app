@@ -360,7 +360,8 @@ class _DashboardBody extends ConsumerWidget {
 
         if (d.wallOfFame.isNotEmpty) _WallOfFame(d.wallOfFame),
 
-        if (d.marathonAt != null) _MarathonCard(d.marathonAt!),
+        if (d.marathonAt != null)
+          _MarathonCard(d.marathonAt!, d.marathonTitle),
 
         _RecentResults(d.recent),
 
@@ -816,7 +817,12 @@ class _WallOfFame extends StatelessWidget {
 
 class _MarathonCard extends StatefulWidget {
   final DateTime at;
-  const _MarathonCard(this.at);
+
+  /// Tutor Bello's words. The card is drawn only when the backend
+  /// supplies a date at all, so clearing the date in the panel takes
+  /// the whole thing off every phone without a new build.
+  final String title;
+  const _MarathonCard(this.at, this.title);
 
   @override
   State<_MarathonCard> createState() => _MarathonCardState();
@@ -856,8 +862,10 @@ class _MarathonCardState extends State<_MarathonCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _Head(
-            eyebrow: 'Marathon countdown',
-            title: 'December is for history!!!',
+            eyebrow: 'Countdown',
+            title: widget.title.trim().isEmpty
+                ? 'Marathon'
+                : widget.title.trim(),
             trailing: Icon(Icons.timer_outlined, size: 20, color: c.violet),
           ),
           const SizedBox(height: BxSpace.xs),

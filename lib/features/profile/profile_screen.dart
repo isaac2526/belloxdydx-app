@@ -646,7 +646,17 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       loading: () => const BxSkeleton(height: 64, radius: BxRadius.md),
       error: (_, __) => const SizedBox.shrink(),
       data: (p) {
-        final (title, body, accent) = switch ((p.enforceable, policy.allowScreenshots)) {
+        // KEYED OFF WHAT THE OPERATING SYSTEM IS ACTUALLY SET TO.
+        //
+        // This used to describe Tutor Bello's SETTING, not the phone's
+        // state — so when the setting never reached the window (which
+        // is exactly what was happening: the policy was applied only
+        // after a background sync that could hang or throw) this card
+        // said "Screenshots are blocked" while the student took one.
+        // A diagnostic that agrees with the intention rather than the
+        // fact is worse than none.
+        final disagrees = p.enforceable && p.allowed != policy.allowScreenshots;
+        final (title, body, accent) = switch ((p.enforceable, p.allowed)) {
           (true, false) => (
               'Screenshots are blocked on this phone',
               'The operating system refuses the capture, so a screenshot or '
@@ -690,6 +700,31 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   Text(title, style: BxType.bodyStrong(c.ink)),
                   const SizedBox(height: 2),
                   Text(body, style: BxType.tiny(c.muted)),
+                  // The two can only disagree if the setting never
+                  // reached the window. Say so plainly and offer the
+                  // one button that fixes it, rather than leaving a
+                  // silent mismatch nobody can see.
+                  if (disagrees) ...[
+                    const SizedBox(height: BxSpace.xs),
+                    Text(
+                      'Tutor Bello has this set to '
+                      '"${policy.allowScreenshots ? 'allowed' : 'blocked'}" '
+                      'but this phone is on '
+                      '"${p.allowed ? 'allowed' : 'blocked'}".',
+                      style: BxType.tiny(c.warning),
+                    ),
+                    const SizedBox(height: BxSpace.xxs),
+                    BxButton.secondary(
+                      'Apply it now',
+                      icon: Icons.refresh_rounded,
+                      onPressed: () async {
+                        await ref
+                            .read(sessionProvider.notifier)
+                            .applyPolicy();
+                        ref.invalidate(screenshotPolicyProvider);
+                      },
+                    ),
+                  ],
                 ],
               ),
             ),

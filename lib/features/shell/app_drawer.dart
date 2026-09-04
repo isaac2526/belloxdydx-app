@@ -236,27 +236,30 @@ class _Foot extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.bx;
-    final sync = ref.watch(syncStatusProvider);
     final lock = ref.watch(appLockProvider);
+    final pending = ref.watch(coursesWithUpdatesProvider);
 
     return Padding(
       padding: const EdgeInsets.all(BxSpace.sm),
       child: Row(
         children: [
+          // "Sync now" is gone. It promised to fill the vault by itself
+          // and did not, and having two ways to get material onto a
+          // phone meant neither of them was ever clearly the answer.
+          // There is one way now: the Download button on each course.
           Expanded(
             child: BxButton.secondary(
-              sync.isRunning ? 'Syncing…' : 'Sync now',
-              icon: Icons.sync_rounded,
-              loading: sync.isRunning,
-              onPressed: sync.isRunning
-                  ? null
-                  : () {
-                      final level =
-                          ref.read(sessionProvider).profile?.currentLevel;
-                      ref
-                          .read(syncStatusProvider.notifier)
-                          .start(now: true, level: level);
-                    },
+              pending > 0
+                  ? '$pending ${pending == 1 ? 'course has' : 'courses have'} '
+                      'a change'
+                  : 'My courses',
+              icon: pending > 0
+                  ? Icons.sync_problem_rounded
+                  : Icons.menu_book_rounded,
+              onPressed: () {
+                Navigator.of(context).pop();
+                ref.read(routerProvider).go(Routes.courses);
+              },
             ),
           ),
           if (lock != BxLockState.unavailable) ...[

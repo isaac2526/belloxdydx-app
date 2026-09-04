@@ -71,7 +71,10 @@ extension BxFaultCopy on BxFault {
           'This account is locked to a different device. Chat Tutor Bello '
               'for a device reset.',
         BxFault.timeUp => 'Time is up.',
-        BxFault.notFound => 'We could not find that.',
+        BxFault.notFound =>
+          'Belloxdydx could not find that on the server. It may have been '
+              'taken down, or this part of the site is still being set up. '
+              'Tell Tutor Bello if it keeps happening.',
         BxFault.maintenance =>
           'Belloxdydx is under maintenance. We dey come back soon.',
         BxFault.rateLimited => 'Too many tries. Wait a moment and try again.',
@@ -94,6 +97,8 @@ extension BxFaultCopy on BxFault {
   /// The short code screens branch on (an activation gate, a device-lock
   /// card). Faults with no special handling carry none.
   String? get code => switch (this) {
+        BxFault.notFound => 'not_found',
+        BxFault.server => 'server',
         BxFault.offline || BxFault.serverUnreachable => 'offline',
         BxFault.timeout => 'timeout',
         BxFault.unauthenticated => 'unauthenticated',
@@ -146,6 +151,18 @@ String? safeServerMessage(Object? raw) {
 /// student can only act on one of them. Null means we do not know, and
 /// the wording stays neutral.
 BxFault classify(Object e, {bool? hasConnection}) {
+  // AN ERROR THAT WAS ALREADY CLASSIFIED KEEPS ITS IDENTITY.
+  //
+  // This was the whole of "Something went wrong. Please try again."
+  // BxError is what the data layer throws once it has already worked
+  // out what happened — "We could not find that", "Activate your
+  // account", a freeze reason written by Tutor Bello himself. Passing
+  // one back through here matched none of the text branches below and
+  // fell out of the bottom as `unknown`, so the app replaced a precise
+  // answer with the most useless sentence it owns. Every caller that
+  // wraps a repository call in classify() was doing this.
+  if (e is BxError) return faultForCode(e.code) ?? BxFault.unknown;
+
   // ---- transport first, always ----
   // A network failure often arrives wearing another library's clothes,
   // so this runs before any type check that could mistake it for an
@@ -234,6 +251,29 @@ BxFault classify(Object e, {bool? hasConnection}) {
   if (e is FormatException) return BxFault.server;
   return BxFault.unknown;
 }
+
+/// The reverse of [BxFault.code]: turns a code the data layer already
+/// decided back into its fault, so nothing is downgraded on the way
+/// through a second classify().
+BxFault? faultForCode(String? code) => switch (code) {
+      'offline' => BxFault.offline,
+      'timeout' => BxFault.timeout,
+      'unauthenticated' => BxFault.unauthenticated,
+      'forbidden' => BxFault.forbidden,
+      'not_activated' => BxFault.notActivated,
+      'frozen' => BxFault.frozen,
+      'device_locked' => BxFault.deviceLocked,
+      'time_up' => BxFault.timeUp,
+      'maintenance' => BxFault.maintenance,
+      'bad_credentials' => BxFault.badCredentials,
+      'email_taken' => BxFault.emailTaken,
+      'username_taken' => BxFault.usernameTaken,
+      'rpc_missing' => BxFault.featureMissing,
+      'out_of_space' => BxFault.outOfSpace,
+      'not_found' => BxFault.notFound,
+      'server' => BxFault.server,
+      _ => null,
+    };
 
 bool _looksLikeTransport(String text) =>
     text.contains('socketexception') ||

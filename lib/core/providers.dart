@@ -13,7 +13,6 @@ import '../data/models.dart';
 import '../data/net_speed.dart';
 import '../data/offline/course_downloader.dart';
 import '../data/offline/offline_store.dart';
-import '../data/offline/sync_engine.dart';
 import '../data/repositories.dart';
 
 /// ============================================================
@@ -75,49 +74,6 @@ final screenshotPolicyProvider =
 /// The offline root. Opened once in main() before runApp, so a widget
 /// can ask it a question during build without awaiting anything.
 final offlineStoreProvider = Provider<OfflineStore?>((_) => Offline.store);
-
-final syncEngineProvider = Provider<SyncEngine>((ref) {
-  final engine = SyncEngine(
-    backend: ref.watch(backendProvider),
-    content: ref.watch(contentRepoProvider),
-    store: Offline.store,
-  );
-  engine.autoDocuments =
-      ref.watch(localStoreProvider).getBool(BxKeys.autoDownloadDocs);
-  ref.onDispose(() => unawaited(engine.dispose()));
-  return engine;
-});
-
-/// What the Vault screen and the dashboard banner watch.
-final syncStatusProvider = StateNotifierProvider<SyncStatusNotifier, SyncStatus>(
-  (ref) => SyncStatusNotifier(ref.watch(syncEngineProvider)),
-);
-
-class SyncStatusNotifier extends StateNotifier<SyncStatus> {
-  SyncStatusNotifier(this._engine) : super(_engine.status) {
-    _sub = _engine.updates.listen((s) {
-      if (mounted) state = s;
-    });
-  }
-
-  final SyncEngine _engine;
-  StreamSubscription<SyncStatus>? _sub;
-
-  Future<void> start({bool now = false, String? level}) => _engine.run(
-        minInterval: now ? Duration.zero : const Duration(hours: 6),
-        level: level,
-      );
-
-  void cancel() => _engine.cancel();
-
-  set autoDocuments(bool v) => _engine.autoDocuments = v;
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
-  }
-}
 
 /// How fast the connection is right now, measured from the traffic the
 /// app is already making. Never a synthetic speed test: spending a
@@ -488,9 +444,21 @@ class SessionNotifier extends StateNotifier<SessionState>
         // the phone up obey Tutor Bello rather than waiting out the
         // three-minute pulse.
         await checkInNow();
+        // THE POLICY FIRST, AND ON FRESH SETTINGS.
+        //
+        // Two faults lived here. It sat behind a full background sync,
+        // so on a real phone with a real library it ran minutes late
+        // and, when that sync threw, never ran at all — the screenshot
+        // switch, the lock timeout and the maintenance wall were simply
+        // never applied. And the SETTINGS themselves ride on the
+        // content bootstrap, so applying a policy without reloading it
+        // just re-applies the one already in memory.
+        //
+        // One small request, then the policy, before anything heavier.
         await _ref
-            .read(syncStatusProvider.notifier)
-            .start(level: state.profile?.currentLevel);
+            .read(contentRepoProvider)
+            .loadContent(level: state.profile?.currentLevel ?? '100',
+                force: true);
         await applyPolicy();
         // What Tutor Bello published while the student was away. This
         // is what makes "there's a change in this course" arrive on its
@@ -701,15 +669,18 @@ class SessionNotifier extends StateNotifier<SessionState>
       // so it still has to obey the screenshot policy. What it does not
       // get is a sync: there is no point spending a bundle filling a
       // vault for material the account cannot open.
-      if (p.isFrozen) {
-        await applyPolicy();
-        return;
-      }
-      unawaited(_ref.read(courseStampsProvider.notifier).refresh());
+      // The content bootstrap is what carries Tutor Bello's switches —
+      // the screenshot policy, the lock timeout, maintenance — and it
+      // used to be fetched as the first step of the background sync
+      // that no longer exists. Asked for directly now, before anything
+      // heavier, so the policy is applied from what he set rather than
+      // from the defaults compiled into the app.
       await _ref
-          .read(syncStatusProvider.notifier)
-          .start(level: p.currentLevel);
+          .read(contentRepoProvider)
+          .loadContent(level: p.currentLevel, force: true);
       await applyPolicy();
+      if (p.isFrozen) return;
+      unawaited(_ref.read(courseStampsProvider.notifier).refresh());
     } catch (e) {
       debugPrint('[offline] first sync skipped: $e');
     }
@@ -1045,6 +1016,9 @@ class SessionNotifier extends StateNotifier<SessionState>
       // platform. Offline practice is untouched.
       _ref.read(assessmentRepoProvider).policyForStart = policy;
       await ScreenCapture.apply(policy);
+      // So the Profile screen reads the phone's NEW state rather than
+      // the one it cached before this ran.
+      _ref.invalidate(screenshotPolicyProvider);
     } catch (e) {
       debugPrint('[policy] not applied: $e');
     }
@@ -1407,7 +1381,9 @@ final offlineSummaryProvider = FutureProvider.autoDispose<OfflineSummary>(
   (ref) async {
     // Recomputed whenever the catalogue or a sync changes.
     ref.watch(vaultProvider);
-    ref.watch(syncStatusProvider);
+    // Recomputed after any course download, which is now the only
+    // thing that puts material on the phone.
+    ref.watch(offlineRecordTick);
     final store = ref.watch(offlineStoreProvider);
     if (store == null) return const OfflineSummary();
     final questions = await store.allQuestions();

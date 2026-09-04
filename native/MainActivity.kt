@@ -92,6 +92,16 @@ class MainActivity : FlutterFragmentActivity() {
         applyScreenshotPolicy(screenshotsAllowed())
     }
 
+    // Belt and braces. onStart already re-applies, but a window can be
+    // recreated for a configuration change without onStart running in
+    // the order you would expect, and the cost of setting a flag that
+    // is already set is nothing. The cost of NOT setting it is a
+    // student screenshotting the question bank.
+    override fun onResume() {
+        super.onResume()
+        applyScreenshotPolicy(screenshotsAllowed())
+    }
+
     private fun screenshotsAllowed(): Boolean =
         getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_ALLOW_SCREENSHOTS, false)

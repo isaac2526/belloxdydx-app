@@ -182,9 +182,16 @@ class BxAppBar extends ConsumerWidget implements PreferredSizeWidget {
         // "Wi-Fi · 4.1 MB/s" sitting in the chrome all day is clutter;
         // "Mobile data · slow" the moment the line goes bad is the
         // difference between "this app is broken" and "my network is".
+        // ALWAYS on screen, not only when the line goes bad.
+        //
+        // It used to hide itself whenever the connection was fine,
+        // which meant the one state a student could never confirm was
+        // "my network is good" — so a slow screen was always the app's
+        // fault. One steady signal icon, green / amber / red, is worth
+        // more than a chip that only appears to deliver bad news.
         const Padding(
           padding: EdgeInsets.only(right: BxSpace.xs),
-          child: BxNetChip(iconOnly: true),
+          child: BxNetChip(iconOnly: true, onlyWhenItMatters: false),
         ),
         ...actions,
         const SizedBox(width: BxSpace.xs),

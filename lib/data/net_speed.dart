@@ -1,6 +1,10 @@
 import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show Color;
+
+import '../core/theme/tokens.dart';
+import '../ui/primitives.dart' show BxAccent;
 
 /// ============================================================
 /// HOW FAST THE CONNECTION ACTUALLY IS
@@ -99,6 +103,38 @@ class BxNetSpeed {
 
   bool get isSlow =>
       grade == BxNetGrade.poor || grade == BxNetGrade.offline;
+
+  /// The one colour the whole app uses for this reading.
+  ///
+  /// Green good, amber ok, red bad, red for no line at all. Defined
+  /// once, next to the grade that decides it, so the app bar, the vault
+  /// and a running download can never disagree about what "slow" looks
+  /// like.
+  BxAccent get accent => switch (grade) {
+        BxNetGrade.offline => BxAccent.danger,
+        BxNetGrade.poor => BxAccent.danger,
+        BxNetGrade.fair => BxAccent.warning,
+        BxNetGrade.good => BxAccent.success,
+        BxNetGrade.unknown => BxAccent.neutral,
+      };
+
+  Color tint(BxColors c) => switch (grade) {
+        BxNetGrade.offline => c.danger,
+        BxNetGrade.poor => c.danger,
+        BxNetGrade.fair => c.warning,
+        BxNetGrade.good => c.success,
+        BxNetGrade.unknown => c.muted,
+      };
+
+  /// What the reading means for the student, in their words rather than
+  /// in megabytes.
+  String get plain => switch (grade) {
+        BxNetGrade.offline => 'No connection',
+        BxNetGrade.poor => 'Bad connection',
+        BxNetGrade.fair => 'Connection is ok',
+        BxNetGrade.good => 'Good connection',
+        BxNetGrade.unknown => 'Checking your connection',
+      };
 }
 
 /// Under ~30 KB/s the app is not usable for anything but text.

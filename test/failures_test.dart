@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:belloxdydx/data/failures.dart';
+import 'package:belloxdydx/data/models.dart' show BxError;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -18,6 +19,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 /// exception below is fed through classify() and its sentence checked
 /// against a blocklist, so that class of leak cannot come back quietly.
 void main() {
+  anAlreadyClassifiedErrorKeepsItsIdentity();
   // Written out in the shape the libraries actually produce them.
   const supabaseHost = 'ziprpmqnxeylxywmesbb.supabase.co';
 
@@ -244,6 +246,69 @@ void main() {
       expect(safeServerMessage(''), isNull);
       expect(safeServerMessage(null), isNull);
       expect(safeServerMessage(42), isNull);
+    });
+  });
+}
+
+/// ============================================================
+/// "SOMETHING WENT WRONG. PLEASE TRY AGAIN."
+///
+/// The single most useless sentence the app owns, and it was being
+/// reached from errors that already knew exactly what had happened.
+///
+/// BxError is what the data layer throws once it has worked out the
+/// answer — "we could not find that", "activate your account", a freeze
+/// reason Tutor Bello typed himself. classify() did not recognise the
+/// type, so none of its text branches matched and it fell out of the
+/// bottom as `unknown`. Every screen that wrapped a repository call in
+/// classify() — the course Download button among them — replaced a
+/// precise answer with a shrug.
+/// ============================================================
+void anAlreadyClassifiedErrorKeepsItsIdentity() {
+  group('an error that already knows what it is', () {
+    test('is not downgraded to "something went wrong"', () {
+      const known = BxError('We could not find that.', code: 'not_found');
+      expect(classify(known), BxFault.notFound);
+      expect(classify(known).message, isNot(contains('Something went wrong')));
+    });
+
+    test('keeps its identity for every code the data layer sets', () {
+      const cases = <String, BxFault>{
+        'not_activated': BxFault.notActivated,
+        'frozen': BxFault.frozen,
+        'device_locked': BxFault.deviceLocked,
+        'offline': BxFault.offline,
+        'timeout': BxFault.timeout,
+        'maintenance': BxFault.maintenance,
+        'out_of_space': BxFault.outOfSpace,
+        'rpc_missing': BxFault.featureMissing,
+        'not_found': BxFault.notFound,
+        'server': BxFault.server,
+      };
+      cases.forEach((code, fault) {
+        expect(classify(BxError('msg', code: code)), fault,
+            reason: 'a BxError carrying "$code" must classify as $fault');
+      });
+    });
+
+    test('every fault the data layer can name survives the round trip', () {
+      // The reverse map must not fall behind the forward one. A fault
+      // with a code that faultForCode does not know would silently
+      // become "something went wrong" all over again.
+      for (final f in BxFault.values) {
+        final code = f.code;
+        if (code == null) continue;
+        expect(faultForCode(code), isNotNull,
+            reason: '$f has code "$code" but faultForCode cannot read it '
+                'back — that is exactly how this bug happened');
+      }
+    });
+
+    test('a genuinely unknown error is still unknown', () {
+      // The fix must not turn every error into a false positive.
+      expect(classify(const BxError('mystery')), BxFault.unknown);
+      expect(classify(Exception('nothing recognisable here')),
+          BxFault.unknown);
     });
   });
 }

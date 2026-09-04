@@ -1005,6 +1005,11 @@ class DashboardData {
   final int streakBest;
   final Quote quote;
   final DateTime? marathonAt;
+
+  /// Tutor Bello's own words for the countdown. Was a string literal in
+  /// the app — "December is for history!!!" — so changing it needed a
+  /// new build in the Play Store.
+  final String marathonTitle;
   final ResumeCard? resume;
   final int attemptsSubmitted;
   final int averagePercent;
@@ -1024,6 +1029,7 @@ class DashboardData {
     this.streakBest = 0,
     this.quote = Quote.fallback,
     this.marathonAt,
+    this.marathonTitle = '',
     this.resume,
     this.attemptsSubmitted = 0,
     this.averagePercent = 0,
@@ -1052,6 +1058,8 @@ class DashboardData {
           ? Quote.fromJson(Map<String, dynamic>.from(j['quote']))
           : Quote.fallback,
       marathonAt: _date(_pick(j, ['marathonIso', 'marathon_at'])),
+      marathonTitle:
+          _str(_pick(j, ['marathonTitle', 'marathon_title'])),
       resume: j['resume'] is Map
           ? ResumeCard.fromJson(Map<String, dynamic>.from(j['resume']))
           : null,

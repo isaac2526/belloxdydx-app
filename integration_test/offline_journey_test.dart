@@ -289,12 +289,33 @@ void main() {
         reason: 'login must complete against the mock. On screen: ${visible()}');
     debugPrint('[journey] signed in');
 
-    // ---- the sync runs behind them ----------------------------------
-    // Nothing is tapped here on purpose. The claim under test is that
-    // material arrives BY ITSELF, so the test waits rather than asks.
+    // ---- ONE WAY ONTO THE PHONE: THE DOWNLOAD BUTTON ----------------
+    //
+    // There used to be a background sync here that was supposed to fill
+    // the vault by itself. It did not, and having two mechanisms meant
+    // a student who tapped one and saw nothing had no idea whether to
+    // wait or go and press the other. It is gone. This is now the only
+    // thing that puts material on a phone, so it is what the journey
+    // drives — and everything below asserts against what IT landed.
     final store = Offline.store;
     expect(store, isNotNull,
         reason: 'the offline root must open on a real filesystem');
+
+    // The shelf arrives on its own bootstrap a moment after sign-in, so
+    // it is waited for rather than assumed — reading .first off an
+    // empty list here is a StateError, not a useful failure.
+    final shelfReady = await until(
+      tester,
+      () => container.read(contentRepoProvider).courses.isNotEmpty,
+      budget: const Duration(seconds: 60),
+    );
+    expect(shelfReady, isTrue,
+        reason: 'the course shelf must load after sign-in');
+    final firstShelfCourse = container.read(contentRepoProvider).courses.first;
+    await tester.runAsync(() => container
+        .read(courseDownloadProvider(firstShelfCourse.id).notifier)
+        .start());
+    await tester.pump(const Duration(seconds: 2));
 
     final filled = await until(
       tester,
@@ -310,8 +331,9 @@ void main() {
         .toList();
 
     expect(filled, isTrue,
-        reason: 'THE VAULT MUST NOT BE EMPTY AFTER A REAL SYNC. '
-            'On disk: $onDisk');
+        reason: 'THE VAULT MUST NOT BE EMPTY AFTER A COURSE DOWNLOAD. '
+            'This is the one mechanism now — if it leaves nothing on the '
+            'disk, nothing does. On disk: $onDisk');
 
     // ---- what actually landed ---------------------------------------
     final notes = onDisk.where((p) => p.startsWith('notes/')).toList();

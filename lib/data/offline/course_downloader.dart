@@ -8,7 +8,7 @@ import '../failures.dart';
 import '../models.dart';
 import '../repositories.dart';
 import 'offline_store.dart';
-import 'sync_engine.dart' show sigFor, urlsInHtml, utf8Length;
+import 'content_keys.dart' show sigFor, urlsInHtml, utf8Length;
 
 /// ============================================================
 /// DOWNLOADING ONE WHOLE COURSE

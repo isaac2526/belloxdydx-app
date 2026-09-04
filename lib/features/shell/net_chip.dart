@@ -50,10 +50,21 @@ class BxNetChip extends ConsumerWidget {
     if (net.grade == BxNetGrade.unknown) return const SizedBox.shrink();
     if (onlyWhenItMatters && !net.isSlow) return const SizedBox.shrink();
 
+    // THE SIGNAL BARS, ALWAYS THE SAME SHAPE, ONLY THE COLOUR MOVING.
+    //
+    // It used to change icon with the grade — a cloud when offline, a
+    // tick when poor, two bars when fair — so there was nothing steady
+    // for the eye to read. Now it is one wifi-signal shape whose bars
+    // fill up and whose colour says the rest:
+    //
+    //   green  = good     · everything in the app is comfortable
+    //   amber  = ok       · usable, slower on pictures and PDFs
+    //   red    = bad      · text only, downloads will crawl
+    //   red ✕  = no line  · nothing but what is already on the phone
     final icon = switch (net.grade) {
-      BxNetGrade.offline => Icons.cloud_off_rounded,
-      BxNetGrade.poor => Icons.network_check_rounded,
-      BxNetGrade.fair => Icons.wifi_2_bar_rounded,
+      BxNetGrade.offline => Icons.signal_wifi_off_rounded,
+      BxNetGrade.poor => Icons.network_wifi_1_bar_rounded,
+      BxNetGrade.fair => Icons.network_wifi_2_bar_rounded,
       _ => net.unmetered
           ? Icons.wifi_rounded
           : Icons.signal_cellular_alt_rounded,
@@ -65,16 +76,7 @@ class BxNetChip extends ConsumerWidget {
         message: net.label,
         child: Semantics(
           label: net.label,
-          child: Icon(
-            icon,
-            size: 18,
-            color: switch (net.grade) {
-              BxNetGrade.offline => c.danger,
-              BxNetGrade.poor => c.warning,
-              BxNetGrade.fair => c.info,
-              _ => c.success,
-            },
-          ),
+          child: Icon(icon, size: 20, color: net.tint(c)),
         ),
       );
     }
@@ -83,12 +85,7 @@ class BxNetChip extends ConsumerWidget {
       net.label,
       dense: true,
       icon: icon,
-      accent: switch (net.grade) {
-        BxNetGrade.offline => BxAccent.danger,
-        BxNetGrade.poor => BxAccent.warning,
-        BxNetGrade.fair => BxAccent.info,
-        _ => BxAccent.success,
-      },
+      accent: net.accent,
     );
   }
 }
@@ -108,12 +105,12 @@ class BxNetLine extends ConsumerWidget {
       children: [
         Icon(
           net.grade == BxNetGrade.offline
-              ? Icons.cloud_off_rounded
+              ? Icons.signal_wifi_off_rounded
               : net.unmetered
                   ? Icons.wifi_rounded
                   : Icons.signal_cellular_alt_rounded,
-          size: 13,
-          color: net.isSlow ? c.warning : c.muted,
+          size: 14,
+          color: net.tint(c),
         ),
         const SizedBox(width: 4),
         // Flexible, because this line sits beside other things in a
@@ -126,7 +123,7 @@ class BxNetLine extends ConsumerWidget {
             net.label,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: BxType.tiny(net.isSlow ? c.warning : c.muted),
+            style: BxType.tiny(net.tint(c)),
           ),
         ),
       ],
