@@ -744,6 +744,28 @@ void main() {
         '$heldBefore -> $heldAfter (server still publishes '
         '${index.questionIds.length})');
 
+    // ---- Tutor Bello moves the student to another level -------------
+    //
+    // There was no admin control for this at all — a student who put
+    // the wrong level in at sign-up could only be fixed by editing the
+    // row by hand — so the branch the app has for following a level
+    // change could never fire from the panel side. It can now, and the
+    // phone has to notice without a reinstall.
+    res = await tester
+        .runAsync(() => hit('/__test/set-level', '{"level":"200"}'));
+    expect(res!['status'], 200);
+
+    final moved = await tester
+        .runAsync(() => container.read(authRepoProvider).standingNow());
+    expect(moved!.level, '200',
+        reason: 'A LEVEL TUTOR BELLO SETS MUST REACH THE PHONE. Their '
+            'whole shelf is wrong until it does.');
+    debugPrint('[journey] level moved on the panel -> the app is told '
+        '"${moved.level}"');
+
+    // Put it back before the level-closing check below.
+    await tester.runAsync(() => hit('/__test/set-level', '{"level":"100"}'));
+
     // ---- Tutor Bello closes the level the student is standing on -----
     //
     // Deactivating a level on the website unpublishes it. Every student

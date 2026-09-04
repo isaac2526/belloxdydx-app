@@ -1165,6 +1165,14 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true });
   }
 
+  // Tutor Bello moves a student to another level from the panel.
+  if (path === '/__test/set-level') {
+    const code = String(body.level || '200');
+    for (const u of Object.values(USERS)) u.current_level = code;
+    state.rev += 1;
+    return send(res, 200, { ok: true, level: code });
+  }
+
   // Tutor Bello closes a level from the panel.
   if (path === '/__test/close-level') {
     const code = String(body.level || '100');
