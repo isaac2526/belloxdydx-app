@@ -7,6 +7,7 @@ import 'package:belloxdydx/features/auth/auth_brand.dart';
 import 'package:belloxdydx/data/models.dart';
 import 'package:belloxdydx/data/offline/course_downloader.dart';
 import 'package:belloxdydx/data/offline/offline_store.dart';
+import 'package:belloxdydx/core/router.dart';
 import 'package:belloxdydx/features/shell/app_drawer.dart';
 import 'package:belloxdydx/main.dart' as app;
 import 'package:flutter/material.dart';
@@ -860,6 +861,78 @@ void main() {
           reason: 'and it must be a real date, not an empty stamp');
       debugPrint('[journey] Bello date after a cold start with no server: '
           '${restored[course.id]!.updatedAt}');
+
+      // ---- THE OFFLINE VAULT, ON SCREEN, WITH THE SERVER GONE -------
+      //
+      // Everything above proves the STORE holds the material. It does
+      // not prove the screen the student actually opens shows it — and
+      // that screen is the one thing this app is named for. So it is
+      // opened here, through the drawer, exactly as a student would,
+      // with the backend dead.
+      // Driven through the app's OWN router rather than by tapping back
+      // out of the reader we are standing in — the drawer route itself
+      // was already exercised earlier in this journey. The screen that
+      // renders is the real one either way.
+      container.read(routerProvider).go(Routes.vault);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 2));
+      expect(
+          await untilFound(tester, find.text('Offline Vault'),
+              budget: const Duration(seconds: 10)),
+          isTrue,
+          reason: 'THE OFFLINE VAULT MUST OPEN WITH THE SERVER GONE. '
+              'On screen: ${visible()}');
+
+      final onVault = visible();
+      debugPrint('[journey] vault screen: $onVault');
+
+      expect(onVault.contains('Nothing saved yet'), isFalse,
+          reason: 'THE VAULT MUST NOT BE EMPTY AFTER A REAL DOWNLOAD. '
+              'This is the exact complaint the whole offline layer '
+              'exists to answer. On screen: $onVault');
+
+      // The counts card, drawn from the disk rather than the network.
+      // It reads every question file to count them, so it settles a
+      // moment after the screen paints — waited for rather than raced.
+      expect(
+          await untilFound(tester, find.text('Questions'),
+              budget: const Duration(seconds: 15)),
+          isTrue,
+          reason: 'THE VAULT MUST COUNT WHAT IS ON THE PHONE, with the '
+              'server gone. On screen: ${visible()}');
+      for (final label in ['Materials', 'Questions', 'Pictures']) {
+        expect(find.text(label).evaluate(), isNotEmpty,
+            reason: 'the vault must count what is on the phone ($label). '
+                'On screen: ${visible()}');
+      }
+
+      // Tutor Bello's date, not the student's — the line he asked for,
+      // on a screen with no connection behind it.
+      expect(visible().contains('Tutor Bello last updated'), isTrue,
+          reason: 'THE VAULT MUST SAY WHEN TUTOR BELLO LAST UPDATED, not '
+              'when the student pressed a button, and it must say it '
+              'with the data off. On screen: ${visible()}');
+      debugPrint('[journey] vault counts and Bello date: '
+          '${visible().split(' | ').take(12).join(' | ')}');
+
+      // A real saved item, by its own title, with a row to open.
+      final savedTitle = store.readable
+          .where((i) => i.title.trim().isNotEmpty)
+          .map((i) => i.title.trim())
+          .firstOrNull;
+      expect(savedTitle, isNotNull,
+          reason: 'the download must have left something readable');
+      expect(
+          await untilFound(tester, find.textContaining(savedTitle!.split(' ').first),
+              budget: const Duration(seconds: 5)),
+          isTrue,
+          reason: 'the vault must list what is on the phone by name. '
+              'Held: ${store.readable.map((i) => i.title).take(5).toList()} '
+              'On screen: ${visible()}');
+      expect(find.text('Open').evaluate(), isNotEmpty,
+          reason: 'every vault row must offer a way to open it offline');
+      debugPrint('[journey] vault lists "$savedTitle" and offers Open, '
+          'with the backend dead');
 
       // A saved note still opens, read through the app's own repository
       // rather than the store directly — which is what a student
