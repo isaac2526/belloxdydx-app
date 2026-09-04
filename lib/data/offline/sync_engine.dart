@@ -282,7 +282,25 @@ class SyncEngine {
 
     try {
       // ---- tier 0: the index itself -------------------------------
-      await _content.loadContent(level: level ?? '100', force: true);
+      //
+      // loadContent falls back to the cached shelf when it cannot
+      // reach the server, which is right for reading and wrong for
+      // syncing: nothing was checked, so nothing may be claimed. A
+      // student who taps Sync in a lecture hall with no signal used to
+      // get "Last synced 3:14 PM" and a clean bill of health, then
+      // turned the data off believing they held today's material.
+      final fresh = await _content.loadContent(level: level ?? '100', force: true);
+      if (!fresh) {
+        _emit(SyncStatus(
+          phase: SyncPhase.failed,
+          label: 'Could not check for new material',
+          syncedAtMs: store.syncedAtMs,
+          message: 'We could not reach Belloxdydx, so nothing was checked. '
+              'Everything you already saved still opens. Try again when '
+              'you have a connection.',
+        ));
+        return;
+      }
 
       final jobs = await _plan(store);
       if (_cancelled) return;

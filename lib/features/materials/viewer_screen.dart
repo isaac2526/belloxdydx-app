@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdfx/pdfx.dart';
@@ -163,6 +164,17 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   bool _busy = false;
   bool _opened = false;
   bool _offline = false;
+
+  /// True when the copy on this phone is OLDER than what Tutor Bello
+  /// now publishes. The reader used to serve the saved copy for ever
+  /// with nothing on screen to say so, so a corrected past-question
+  /// paper never reached the student who had already saved the wrong
+  /// one.
+  bool _stale = false;
+
+  /// When Tutor Bello last changed this document — never when the
+  /// student downloaded it.
+  DateTime? _belloAt;
   String? _error;
   String? _filePath;
   Uint8List? _bytes;
@@ -206,6 +218,14 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     var offline = false;
     String? error;
 
+    // What the server says about this document, and what the phone
+    // actually holds. `sig` was written from updatedAt at save time, so
+    // the two are directly comparable.
+    final live = m.updatedAt?.toIso8601String() ?? url;
+    final held = store?.item(widget.id);
+    var stale = false;
+    final belloAt = m.updatedAt ?? held?.updatedAt;
+
     final saved = await store?.documentPath(widget.id);
     if (saved != null) {
       // The FILE decides, not its name.
@@ -224,6 +244,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         path = saved;
         offline = true;
         kind = _DocKind.pdf;
+        // An empty sig on either side means we cannot tell, and
+        // "cannot tell" must not raise a false alarm on a document
+        // that never changed.
+        stale = held != null &&
+            held.sig.isNotEmpty &&
+            live.isNotEmpty &&
+            held.sig != live;
       }
     }
 
@@ -260,6 +287,8 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       _filePath = path;
       _bytes = bytes;
       _offline = offline;
+      _stale = stale;
+      _belloAt = belloAt;
       _error = error;
       _preparing = false;
       _page = 0;
@@ -356,6 +385,54 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     }
   }
 
+  /// Throws away the saved copy and pulls Tutor Bello's new one.
+  ///
+  /// The reader had no way to do this at all: pull-to-refresh reloaded
+  /// the material row and then handed the same old file straight back,
+  /// because a vaulted copy always wins. That is right for every other
+  /// case and wrong for exactly this one, so the student gets a button.
+  Future<void> _getNewCopy(StudyMaterial m, String code) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final store = ref.read(offlineStoreProvider);
+      final url = _sourceUrl(m);
+      if (store == null || url.isEmpty) return;
+      final bytes = await fetchDocumentBytes(url);
+      if (bytes == null) {
+        if (!mounted) return;
+        bxToast(context,
+            'Could not reach the new copy. Your saved one still opens.',
+            error: true);
+        return;
+      }
+      var ext = documentExtension(url);
+      if (ext.isEmpty) ext = 'pdf';
+      await store.putDocument(
+        id: m.id,
+        title: m.title,
+        courseCode: code,
+        courseId: m.courseId,
+        kind: m.kind.name,
+        bytes: bytes,
+        extension: ext,
+        sig: m.updatedAt?.toIso8601String() ?? m.url,
+      );
+      await store.flush();
+      ref.read(vaultProvider.notifier).refresh();
+      _preparedFor = null;
+      if (!mounted) return;
+      setState(() {});
+      bxToast(context, 'You now have Tutor Bello\'s latest copy.');
+    } catch (e) {
+      if (!mounted) return;
+      bxToast(context, ref.read(backendProvider).faultFor(e).message,
+          error: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _remove() async {
     final ok = await bxConfirm(
       context,
@@ -442,12 +519,12 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
             ),
         ],
       ),
-      body: _body(async, material, activated),
+      body: _body(async, material, activated, code ?? ''),
     );
   }
 
   Widget _body(AsyncValue<StudyMaterial> async, StudyMaterial? material,
-      bool activated) {
+      bool activated, String code) {
     if (material == null) {
       if (async.hasError) {
         final e = async.error;
@@ -525,13 +602,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     }
 
     return switch (_kind) {
-      _DocKind.pdf => _pdfBody(),
+      _DocKind.pdf => _pdfBody(material, code),
       _DocKind.office => _officeBody(material),
       _DocKind.other => _otherBody(material),
     };
   }
 
-  Widget _pdfBody() {
+  Widget _pdfBody(StudyMaterial m, String code) {
     final c = context.bx;
     return BxPage(
       scrollable: false,
@@ -541,12 +618,43 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const ThreatStrip(),
-          if (_offline) ...[
+          // TUTOR BELLO'S date, on the document itself.
+          //
+          // A saved paper looked identical whether it was written last
+          // night or last session. Now the chip carries the date he
+          // last changed it, and a copy that has fallen behind says so
+          // and offers the new one — the reader had no way to replace
+          // a saved file at all before this.
+          if (_offline || _belloAt != null) ...[
             const SizedBox(height: BxSpace.xs),
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: BxChip('Offline copy',
-                  accent: BxAccent.success, icon: Icons.offline_pin_rounded),
+            Wrap(
+              spacing: BxSpace.xs,
+              runSpacing: BxSpace.xs,
+              children: [
+                if (_offline)
+                  const BxChip('Offline copy',
+                      accent: BxAccent.success,
+                      icon: Icons.offline_pin_rounded),
+                if (_belloAt != null)
+                  BxChip(
+                    'Tutor Bello updated '
+                    '${DateFormat('d MMM yyyy').format(_belloAt!)}',
+                    accent: BxAccent.neutral,
+                    icon: Icons.edit_calendar_outlined,
+                  ),
+              ],
+            ),
+          ],
+          if (_stale) ...[
+            const SizedBox(height: BxSpace.xs),
+            BxBanner(
+              title: 'Tutor Bello changed this document',
+              message: 'You are reading the copy you saved earlier. The new '
+                  'one is ready whenever you have a connection.',
+              icon: Icons.system_update_alt_rounded,
+              accent: BxAccent.warning,
+              actionLabel: _busy ? null : 'Get the new copy',
+              onAction: _busy ? null : () => _getNewCopy(m, code),
             ),
           ],
           const SizedBox(height: BxSpace.sm),

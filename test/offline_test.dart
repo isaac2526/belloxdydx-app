@@ -3,7 +3,11 @@ import 'dart:io';
 
 import 'package:belloxdydx/data/models.dart';
 import 'package:belloxdydx/data/offline/offline_store.dart';
+import 'package:belloxdydx/data/backend.dart';
+import 'package:belloxdydx/data/local_store.dart';
+import 'package:belloxdydx/data/repositories.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
@@ -34,6 +38,8 @@ void main() {
   pruningWithdrawnContent();
   whoseDateIsShown();
   clearingAWithdrawnCourse();
+  syncingWithNoSignal();
+  aSavedCopyThatFellBehind();
 
   late Directory docs;
   late _FakePaths paths;
@@ -1383,6 +1389,121 @@ void clearingAWithdrawnCourse() {
       final rec = store.courseRecord('c1')!;
       expect(rec['ok'], isFalse);
       expect(rec['reason'], 'Your offline library is full.');
+    });
+  });
+}
+
+/// ============================================================
+/// A SYNC THAT NEVER LEFT THE PHONE MUST NOT CLAIM TO HAVE SYNCED
+///
+/// loadContent falls back to the cached shelf whenever it cannot reach
+/// the server. That is right for reading — the app has to keep working
+/// with the data off — and it was catastrophic for syncing, because the
+/// sync engine treated the cached answer as a successful check: no jobs
+/// were planned, markSynced() stamped the clock, and the Vault said
+/// "Last synced 3:14 PM". A student in a lecture hall with no signal
+/// tapped Sync, read that, turned their data off and believed they were
+/// holding today's material.
+///
+/// So loadContent now says WHERE its answer came from, and the sync
+/// refuses to stamp anything it did not actually check.
+/// ============================================================
+void syncingWithNoSignal() {
+  group('a sync that never reached the server', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      LocalStore.resetForTest();
+    });
+
+    test('serves the cached shelf but reports that it is cached', () async {
+      final store = await LocalStore.init();
+      await store.writeJson(BxKeys.cachedContent, {
+        'courses': [
+          {'id': 'c1', 'code': 'PHY 101', 'title': 'General Physics I'},
+        ],
+        'materials': const [],
+      });
+
+      // Backend() with nothing configured cannot reach anything, which
+      // is exactly the lecture-hall case.
+      final repo = ContentRepository(Backend(), store);
+      final fresh = await repo.loadContent(level: '100', force: true);
+
+      expect(fresh, isFalse,
+          reason: 'nothing was checked, so nothing may be claimed');
+      expect(repo.courses, hasLength(1),
+          reason: 'the student still reads what they already have');
+    });
+
+    test('a shelf that is neither on the server nor on the phone throws',
+        () async {
+      final store = await LocalStore.init();
+      final repo = ContentRepository(Backend(), store);
+      await expectLater(
+        repo.loadContent(level: '100', force: true),
+        throwsA(anything),
+      );
+    });
+  });
+}
+
+/// ============================================================
+/// A SAVED DOCUMENT THAT TUTOR BELLO HAS SINCE CHANGED
+///
+/// The reader always preferred the vaulted copy, which is right, and
+/// then never checked it against what the server publishes, which is
+/// not. A corrected past-question paper could never reach a student who
+/// had already saved the wrong one: the screen said nothing, carried no
+/// date, and pull-to-refresh reloaded the row and handed back the same
+/// file.
+/// ============================================================
+void aSavedCopyThatFellBehind() {
+  group('a saved document knows when it has fallen behind', () {
+    // The comparison the reader makes: the sig written at save time
+    // against the material's updated_at now.
+    bool stale({required String held, required String live}) =>
+        held.isNotEmpty && live.isNotEmpty && held != live;
+
+    test('a re-uploaded document is stale', () {
+      expect(
+        stale(
+          held: '2026-08-01T09:00:00.000Z',
+          live: '2026-09-03T16:20:00.000Z',
+        ),
+        isTrue,
+      );
+    });
+
+    test('the same document is not', () {
+      expect(
+        stale(
+          held: '2026-08-01T09:00:00.000Z',
+          live: '2026-08-01T09:00:00.000Z',
+        ),
+        isFalse,
+      );
+    });
+
+    test('an unknown date on either side raises no false alarm', () {
+      // A backend that sends no updated_at, or a copy saved by an older
+      // build. "We cannot tell" must not become "yours is out of date"
+      // on a document that never changed — that sends a student to
+      // spend data re-downloading a file they already hold.
+      expect(stale(held: '', live: '2026-09-03T16:20:00.000Z'), isFalse);
+      expect(stale(held: '2026-08-01T09:00:00.000Z', live: ''), isFalse);
+      expect(stale(held: '', live: ''), isFalse);
+    });
+
+    test('the date the student sees comes off the saved copy', () {
+      final e = OfflineItem(
+        id: 'm1',
+        title: 'PHY 101 · 2023 past questions',
+        kind: 'pq',
+        sig: '2026-09-03T16:20:00.000Z',
+        savedAtMs: DateTime(2026, 9, 4).millisecondsSinceEpoch,
+      );
+      expect(e.updatedAt!.toUtc().day, 3,
+          reason: "Tutor Bello's date, not the download's");
     });
   });
 }

@@ -684,8 +684,15 @@ class ContentRepository {
 
   /// One bootstrap that fills the course shelf and every material header.
   /// Falls back to the last good copy on disk so the app opens offline.
-  Future<void> loadContent({required String level, bool force = false}) async {
-    if (!force && _courses.isNotEmpty) return;
+  /// Loads the shelf for a level.
+  ///
+  /// Returns true only when the answer came from the SERVER. A cached
+  /// answer is still served — the app must keep working with the data
+  /// off — but the caller has to be able to tell the difference,
+  /// because "Last synced just now" after a run that never left the
+  /// phone is a lie the student acts on.
+  Future<bool> loadContent({required String level, bool force = false}) async {
+    if (!force && _courses.isNotEmpty) return false;
     try {
       if (_b.isDirect) {
         final r = await _b.rpc('bx_content', params: {'p_level': level});
@@ -702,19 +709,21 @@ class ContentRepository {
         }
         _ingest(r);
         await _store.writeJson(BxKeys.cachedContent, r);
-        return;
+        return true;
       }
       final r = await _b.apiGet('/api/mobile/content');
       final shielded = _b.shieldDeep(r) as Map<String, dynamic>;
       _ingest(shielded);
       await _store.writeJson(BxKeys.cachedContent, shielded);
+      return true;
     } catch (e) {
       final cached = await _store.readJson(BxKeys.cachedContent);
       if (cached != null) {
         _ingest(cached);
-        return;
+        return false;
       }
       if (_courses.isEmpty) rethrow;
+      return false;
     }
   }
 

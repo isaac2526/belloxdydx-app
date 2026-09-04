@@ -190,24 +190,71 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
           const SizedBox(height: BxSpace.xs),
           Divider(height: 1, color: c.line),
           const SizedBox(height: BxSpace.xs),
+          // The date that matters is TUTOR BELLO'S.
+          //
+          // This card used to lead with "Last synced 3:14 PM", which
+          // answers a question nobody asked — the student knows when
+          // they pressed the button. What they cannot see is how fresh
+          // the material itself is, and only Tutor Bello moves that.
+          // So his date leads, and the phone's own clock is demoted to
+          // the second line where it belongs.
           Row(
             children: [
-              Icon(Icons.sd_storage_outlined, size: 15, color: c.muted),
+              Icon(Icons.edit_calendar_outlined, size: 15, color: c.goldDeep),
               const SizedBox(width: BxSpace.xs),
               Expanded(
                 child: Text(
-                  s.syncedAt == null
-                      ? 'Not synced yet'
-                      : 'Last synced ${DateFormat('d MMM, h:mm a').format(s.syncedAt!)}',
-                  style: BxType.tiny(c.muted),
+                  _belloLine(),
+                  style: BxType.tiny(c.inkSoft),
                 ),
               ),
               Text(formatBytes(s.bytes), style: BxType.mono(c.inkSoft, size: 12)),
             ],
           ),
+          const SizedBox(height: 2),
+          Row(
+            children: [
+              Icon(Icons.sd_storage_outlined, size: 14, color: c.muted),
+              const SizedBox(width: BxSpace.xs),
+              Expanded(
+                child: Text(
+                  s.syncedAt == null
+                      ? 'This phone has not checked yet'
+                      : 'This phone checked '
+                          '${DateFormat('d MMM, h:mm a').format(s.syncedAt!)}',
+                  style: BxType.tiny(c.muted),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
+  }
+
+  /// "Tutor Bello last updated …" across every course on the shelf.
+  ///
+  /// Falls back to saying nothing is known rather than borrowing the
+  /// phone's clock — a made-up date here is worse than an absent one.
+  String _belloLine() {
+    final stamps = ref.watch(courseStampsProvider);
+    final pending = ref.watch(coursesWithUpdatesProvider);
+    DateTime? newest;
+    for (final st in stamps.values) {
+      final d = st.updatedAt;
+      if (d == null) continue;
+      if (newest == null || d.isAfter(newest)) newest = d;
+    }
+    if (pending > 0) {
+      return newest == null
+          ? '$pending ${pending == 1 ? 'course has' : 'courses have'} new '
+              'material — tap sync'
+          : 'Tutor Bello updated ${DateFormat('d MMM').format(newest)} · '
+              '$pending ${pending == 1 ? 'course' : 'courses'} to pull';
+    }
+    if (newest == null) return 'Sync to see when Tutor Bello last updated';
+    return 'Tutor Bello last updated '
+        '${DateFormat('d MMM, h:mm a').format(newest)}';
   }
 
   Widget _autoDocsSwitch() {
