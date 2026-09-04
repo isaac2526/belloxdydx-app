@@ -183,8 +183,8 @@ class BxAppBar extends ConsumerWidget implements PreferredSizeWidget {
         // "Mobile data · slow" the moment the line goes bad is the
         // difference between "this app is broken" and "my network is".
         const Padding(
-          padding: EdgeInsets.only(right: BxSpace.xxs),
-          child: BxNetChip(),
+          padding: EdgeInsets.only(right: BxSpace.xs),
+          child: BxNetChip(iconOnly: true),
         ),
         ...actions,
         const SizedBox(width: BxSpace.xs),

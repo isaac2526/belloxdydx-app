@@ -27,7 +27,22 @@ class BxNetChip extends ConsumerWidget {
   /// a permanent "Wi-Fi · 4.1 MB/s" is clutter.
   final bool onlyWhenItMatters;
 
-  const BxNetChip({super.key, this.onlyWhenItMatters = true});
+  /// Icon and colour only, with the reading on a long-press.
+  ///
+  /// "Mobile data · slow" is eleven characters of chrome in an AppBar
+  /// action slot, and an AppBar gives its actions all the room they ask
+  /// for before the title gets any. On a 320dp phone at the largest
+  /// text the app allows, the title was crushed to about 56dp — so the
+  /// student lost the name of the screen they were on at exactly the
+  /// moment their line went bad. The colour already carries the
+  /// meaning; the words belong where there is room for them.
+  final bool iconOnly;
+
+  const BxNetChip({
+    super.key,
+    this.onlyWhenItMatters = true,
+    this.iconOnly = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -35,15 +50,39 @@ class BxNetChip extends ConsumerWidget {
     if (net.grade == BxNetGrade.unknown) return const SizedBox.shrink();
     if (onlyWhenItMatters && !net.isSlow) return const SizedBox.shrink();
 
+    final icon = switch (net.grade) {
+      BxNetGrade.offline => Icons.cloud_off_rounded,
+      BxNetGrade.poor => Icons.network_check_rounded,
+      BxNetGrade.fair => Icons.wifi_2_bar_rounded,
+      _ => net.unmetered
+          ? Icons.wifi_rounded
+          : Icons.signal_cellular_alt_rounded,
+    };
+
+    if (iconOnly) {
+      final c = context.bx;
+      return Tooltip(
+        message: net.label,
+        child: Semantics(
+          label: net.label,
+          child: Icon(
+            icon,
+            size: 18,
+            color: switch (net.grade) {
+              BxNetGrade.offline => c.danger,
+              BxNetGrade.poor => c.warning,
+              BxNetGrade.fair => c.info,
+              _ => c.success,
+            },
+          ),
+        ),
+      );
+    }
+
     return BxChip(
       net.label,
       dense: true,
-      icon: switch (net.grade) {
-        BxNetGrade.offline => Icons.cloud_off_rounded,
-        BxNetGrade.poor => Icons.network_check_rounded,
-        BxNetGrade.fair => Icons.wifi_2_bar_rounded,
-        _ => net.unmetered ? Icons.wifi_rounded : Icons.signal_cellular_alt_rounded,
-      },
+      icon: icon,
       accent: switch (net.grade) {
         BxNetGrade.offline => BxAccent.danger,
         BxNetGrade.poor => BxAccent.warning,
@@ -77,9 +116,18 @@ class BxNetLine extends ConsumerWidget {
           color: net.isSlow ? c.warning : c.muted,
         ),
         const SizedBox(width: 4),
-        Text(
-          net.label,
-          style: BxType.tiny(net.isSlow ? c.warning : c.muted),
+        // Flexible, because this line sits beside other things in a
+        // narrow box — a progress caption on a 320dp phone at the
+        // largest text the app allows. Left rigid it overflowed its own
+        // row by 54 pixels and painted the yellow-and-black stripe
+        // across a running download.
+        Flexible(
+          child: Text(
+            net.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: BxType.tiny(net.isSlow ? c.warning : c.muted),
+          ),
         ),
       ],
     );

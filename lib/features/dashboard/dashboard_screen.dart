@@ -1187,6 +1187,12 @@ class _CourseUpdatesBanner extends ConsumerWidget {
     // it — and since nothing could clear the withdrawal, permanently
     // meant permanently. The badge Tutor Bello asked for was switched
     // off by an unrelated, undismissable notice.
+    // Nothing to say: draw NOTHING, not an empty Column. An empty
+    // Column is still a child of the stagger above, so it took a gap on
+    // each side of it — a phantom band at the top of every activated
+    // student's dashboard, every day, with nothing in it.
+    if (gone.isEmpty && n == 0) return const SizedBox.shrink();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

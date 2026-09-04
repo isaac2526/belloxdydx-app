@@ -127,18 +127,30 @@ class BxStagger extends StatelessWidget {
   /// being slow rather than as a flourish.
   static const int maxAnimated = 10;
 
+  /// A child that draws nothing must not be spaced as though it did.
+  ///
+  /// A section that decides for itself whether it has anything to say —
+  /// a banner watching a provider, say — returns SizedBox.shrink() when
+  /// it has not. It was still a child, so it still got a gap on each
+  /// side of it: a phantom band of dead space at the top of a screen
+  /// with nothing in it. Dropping it here fixes every such section at
+  /// once rather than one screen at a time.
+  static bool _draws(Widget w) =>
+      !(w is SizedBox && w.width == 0 && w.height == 0);
+
   @override
   Widget build(BuildContext context) {
+    final visible = children.where(_draws).toList(growable: false);
     final items = <Widget>[];
-    for (var i = 0; i < children.length; i++) {
+    for (var i = 0; i < visible.length; i++) {
       if (i > 0) {
         items.add(direction == Axis.vertical
             ? SizedBox(height: spacing)
             : SizedBox(width: spacing));
       }
       items.add(i < maxAnimated
-          ? BxFadeIn(delay: step * i, child: children[i])
-          : children[i]);
+          ? BxFadeIn(delay: step * i, child: visible[i])
+          : visible[i]);
     }
     return direction == Axis.vertical
         ? Column(crossAxisAlignment: crossAxisAlignment, children: items)

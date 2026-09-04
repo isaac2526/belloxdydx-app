@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/providers.dart';
 import '../../data/models.dart';
 import '../../data/offline/course_downloader.dart';
+import '../../data/net_speed.dart';
 import '../../data/offline/offline_store.dart';
 import '../../ui/ui.dart';
 import '../shell/net_chip.dart';
@@ -36,8 +37,35 @@ class CourseDownloadCard extends ConsumerWidget {
     final stamp = ref.watch(courseStampsProvider)[course.id];
     final store = ref.watch(offlineStoreProvider);
 
-    if (store == null) return const SizedBox.shrink();
+    // A phone that cannot keep offline copies made the whole section
+    // vanish without a word, so a student on a locked-down or
+    // out-of-space device saw a course hub with no Download anywhere
+    // and no idea why. Say it.
+    if (store == null) {
+      return BxCard(
+        accent: BxAccent.neutral,
+        padding: const EdgeInsets.all(BxSpace.lg),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const BxEyebrow('Offline'),
+            const SizedBox(height: BxSpace.xs),
+            Text('This phone will not let us keep copies',
+                style: BxType.h3(c.ink)),
+            const SizedBox(height: BxSpace.xxs),
+            Text(
+              'We could not open a place to store them, so ${_code()} needs '
+              'data to open. Everything else works exactly as it does. '
+              'Restart the app and it usually sorts itself.',
+              style: BxType.body(c.inkSoft),
+            ),
+          ],
+        ),
+      );
+    }
 
+    final net = ref.watch(netSpeedProvider);
+    final offline = net.grade == BxNetGrade.offline;
     final running = state.isRunning;
     final stale = state.updateAvailable && state.held;
 
@@ -71,18 +99,28 @@ class CourseDownloadCard extends ConsumerWidget {
           ),
           if (running) ...[
             const SizedBox(height: BxSpace.md),
-            BxProgressBar(state.progress),
+            // Nothing has been counted yet during the manifest and
+            // bundle phase, and a bar sitting at 0% for several seconds
+            // reads as "stuck" — the one thing a student watching a
+            // download must not be told wrongly.
+            BxProgressBar(state.progress, indeterminate: state.total <= 0),
             const SizedBox(height: BxSpace.xxs),
-            Row(
+            // A Row gave the connection line all the room it asked for
+            // and the caption whatever was left, which on a 320dp phone
+            // at the largest text was about 56dp — four wrapped lines
+            // jittering under a running bar. A Wrap lets the reading
+            // drop to its own line instead of squeezing the caption.
+            Wrap(
+              spacing: BxSpace.sm,
+              runSpacing: 2,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Expanded(
-                  child: Text(
-                    state.total > 0
-                        ? '${state.done} of ${state.total} · '
-                            '${formatBytes(state.bytes)}'
-                        : 'Working out what to fetch…',
-                    style: BxType.tiny(c.muted),
-                  ),
+                Text(
+                  state.total > 0
+                      ? '${state.done} of ${state.total} · '
+                          '${formatBytes(state.bytes)}'
+                      : 'Working out what to fetch…',
+                  style: BxType.tiny(c.muted),
                 ),
                 // Here the reading is always worth showing: a student
                 // watching a bar crawl deserves to know whether it is
@@ -132,7 +170,22 @@ class CourseDownloadCard extends ConsumerWidget {
               onPressed: () =>
                   ref.read(courseDownloadProvider(course.id).notifier).cancel(),
             )
-          else
+          else ...[
+            // Say it BEFORE the tap. The card used to look completely
+            // ready with the data off: the student pressed Download,
+            // watched it work, and was told a minute later that there
+            // was no connection.
+            if (offline) ...[
+              Text(
+                state.held
+                    ? 'You are offline. What is already on this phone opens '
+                        'normally; checking for changes needs a connection.'
+                    : 'You are offline. This needs a connection — turn your '
+                        'data on and it comes down.',
+                style: BxType.tiny(c.warning),
+              ),
+              const SizedBox(height: BxSpace.xs),
+            ],
             BxButton(
               _action(state),
               icon: state.held && !stale
@@ -142,9 +195,13 @@ class CourseDownloadCard extends ConsumerWidget {
                   ? BxButtonKind.secondary
                   : BxButtonKind.primary,
               expand: true,
-              onPressed: () =>
-                  ref.read(courseDownloadProvider(course.id).notifier).start(),
+              onPressed: offline
+                  ? null
+                  : () => ref
+                      .read(courseDownloadProvider(course.id).notifier)
+                      .start(),
             ),
+          ],
         ],
       ),
     );

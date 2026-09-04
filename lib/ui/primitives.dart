@@ -420,7 +420,22 @@ class BxProgressBar extends StatelessWidget {
   final Color? color;
   final double height;
 
-  const BxProgressBar(this.value, {super.key, this.color, this.height = 6});
+  /// When true the bar sweeps instead of standing at zero.
+  ///
+  /// Work that has not yet been measured — reading a manifest, asking
+  /// what a course contains — has no fraction to show, and a bar frozen
+  /// at 0% for several seconds reads as "stuck", which is the one thing
+  /// a student watching a download must not be told wrongly. A sweeping
+  /// bar says "working" without claiming a number nobody has.
+  final bool indeterminate;
+
+  const BxProgressBar(
+    this.value, {
+    super.key,
+    this.color,
+    this.height = 6,
+    this.indeterminate = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -429,16 +444,21 @@ class BxProgressBar extends StatelessWidget {
       borderRadius: BorderRadius.circular(BxRadius.pill),
       child: SizedBox(
         height: height,
-        child: TweenAnimationBuilder<double>(
-          tween: Tween(begin: 0, end: value.clamp(0.0, 1.0)),
-          duration: BxDuration.slow,
-          curve: BxCurves.enter,
-          builder: (_, v, __) => LinearProgressIndicator(
-            value: v,
-            backgroundColor: c.surfaceAlt,
-            color: color ?? c.gold,
-          ),
-        ),
+        child: indeterminate
+            ? LinearProgressIndicator(
+                backgroundColor: c.surfaceAlt,
+                color: color ?? c.gold,
+              )
+            : TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: value.clamp(0.0, 1.0)),
+                duration: BxDuration.slow,
+                curve: BxCurves.enter,
+                builder: (_, v, __) => LinearProgressIndicator(
+                  value: v,
+                  backgroundColor: c.surfaceAlt,
+                  color: color ?? c.gold,
+                ),
+              ),
       ),
     );
   }
