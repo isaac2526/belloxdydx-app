@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:belloxdydx/core/theme/app_theme.dart';
 import 'package:belloxdydx/ui/ui.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// in one theme (unreadable text) and a row that overflows on a small
 /// screen (a yellow-and-black stripe over the UI).
 void main() {
+  theSmallestTextIsReadable();
   Widget host(Widget child, {required bool dark, double width = 360}) {
     return MaterialApp(
       theme: dark ? bxDarkTheme : bxLightTheme,
@@ -297,6 +300,66 @@ void main() {
         expect(a.stroke(palette), isA<Color>());
         expect(a.ink(palette), isA<Color>());
       }
+    }
+  });
+}
+
+/// ============================================================
+/// THE SMALLEST TEXT MUST STILL BE READABLE
+///
+/// `muted` is what the tiniest lines in the app are painted in — "Tutor
+/// Bello last updated this", "On this phone: 24 questions", the
+/// download caption — and it was tuned against pure white and then used
+/// almost everywhere but: on gold, warning, success and info card
+/// fills, and on the sunken surfaces. It measured 4.16:1 there, under
+/// the 4.5:1 floor, on the phones with the worst screens and the
+/// brightest sunlight.
+/// ============================================================
+double _channel(int c) {
+  final v = c / 255.0;
+  return v <= 0.03928 ? v / 12.92 : math.pow((v + 0.055) / 1.055, 2.4) as double;
+}
+
+double _luminance(Color c) =>
+    0.2126 * _channel((c.r * 255).round()) +
+    0.7152 * _channel((c.g * 255).round()) +
+    0.0722 * _channel((c.b * 255).round());
+
+double contrast(Color a, Color b) {
+  final la = _luminance(a);
+  final lb = _luminance(b);
+  final hi = math.max(la, lb);
+  final lo = math.min(la, lb);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+void theSmallestTextIsReadable() {
+  group('muted text clears 4.5:1 on every surface it lands on', () {
+    for (final palette in [
+      ('light', BxColors.light),
+      ('dark', BxColors.dark),
+    ]) {
+      final name = palette.$1;
+      final c = palette.$2;
+      final grounds = <String, Color>{
+        'ground': c.ground,
+        'surface': c.surface,
+        'surfaceAlt': c.surfaceAlt,
+        'surfaceSunken': c.surfaceSunken,
+        'goldTint': c.goldTint,
+        'successTint': c.successTint,
+        'warningTint': c.warningTint,
+        'dangerTint': c.dangerTint,
+        'infoTint': c.infoTint,
+        'violetTint': c.violetTint,
+      };
+      grounds.forEach((where, ground) {
+        test('$name: muted on $where', () {
+          expect(contrast(c.muted, ground), greaterThanOrEqualTo(4.5),
+              reason: 'the smallest text in the app is painted in muted, '
+                  'and $where is a surface it sits on');
+        });
+      });
     }
   });
 }

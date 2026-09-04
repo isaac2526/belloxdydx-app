@@ -85,7 +85,14 @@ class BxColors extends ThemeExtension<BxColors> {
     surfaceSunken: Color(0xFFF4F6F9),
     ink: Color(0xFF0F1729),
     inkSoft: Color(0xFF2A3648),
-    muted: Color(0xFF697586),
+    // #697586 measured 4.68:1 on pure white and 4.16:1 on the tinted
+    // card fills — under the 4.5 threshold on every single one of
+    // them, and this is the colour the SMALLEST text in the app uses:
+    // "Tutor Bello last updated this", "On this phone: 24 questions",
+    // the download caption. It was tuned against white and then used
+    // almost everywhere but. #616D7E is the same hue and clears 4.5 on
+    // every light surface the app has, white included.
+    muted: Color(0xFF616D7E),
     line: Color(0xFFE3E7ED),
     lineStrong: Color(0xFFCED5DF),
     gold: Color(0xFFD4A017),
