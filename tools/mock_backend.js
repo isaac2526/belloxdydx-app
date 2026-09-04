@@ -281,6 +281,10 @@ const state = {
   // The content revision, exactly as migration 0014 keeps it: one
   // number that moves whenever anything a student can see is written.
   rev: 1,
+  // Set by /__test/force-logout, so a test can prove a revocation
+  // reaches a running app on the direct path — where the Realtime
+  // watcher deliberately cannot tell one from a race.
+  revoked: {},
   revChangedAt: new Date().toISOString(),
 };
 
@@ -501,6 +505,13 @@ const RPC = {
   // the two /api/mobile routes that shadow them. The pinned-question
   // rule is modelled too: TEST_PINNED holds the questions a published
   // test claims, and the bundle must never hand those over.
+  bx_session_standing: (u, p) => {
+    const mine = state.devices[u.id];
+    if (state.revoked && state.revoked[u.id]) return { verdict: 'revoked' };
+    if (!mine) return { verdict: 'unknown' };
+    return { verdict: mine === p.p_device_id ? 'ok' : 'superseded' };
+  },
+
   bx_revision: () => ({
     rev: state.rev,
     changedAt: state.revChangedAt,
@@ -1137,6 +1148,12 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, withdrew: gone ? gone.id : null });
   }
 
+  // Tutor Bello force-logs-out a student, or resets their device.
+  if (path === '/__test/force-logout') {
+    for (const u of Object.values(USERS)) state.revoked[u.id] = true;
+    return send(res, 200, { ok: true });
+  }
+
   if (path === '/__test/publish') {
     const courseId = body.courseId || COURSES[0].id;
     const course = COURSES.find((c) => c.id === courseId) || COURSES[0];
@@ -1271,6 +1288,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (path === '/api/auth/heartbeat') {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
+      if (state.revoked[u.id]) return send(res, 401, { error: 'superseded' });
       // Carries the revision AND the student's own standing, so a
       // freeze reaches a running phone in one poll instead of never.
       return send(res, 200, {

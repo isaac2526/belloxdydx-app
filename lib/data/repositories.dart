@@ -473,6 +473,13 @@ class AuthRepository {
       _standing ??= (_b.isDirect ? _directStanding() : _legacyStanding())
           .asBroadcastStream();
 
+  /// One check-in, now, rather than waiting for the timer. Used by the
+  /// journey harness to prove the mechanism without driving a
+  /// three-minute clock.
+  @visibleForTesting
+  Future<SessionPulse> standingNow() =>
+      _b.isDirect ? _directPulse() : _pulse();
+
   Stream<SessionPulse> _legacyStanding() =>
       Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
           .asyncMap((_) => _pulse())
@@ -524,6 +531,36 @@ class AuthRepository {
     if (uid == null) return SessionPulse.unknown;
     try {
       final rev = await _b.rpc('bx_revision');
+
+      // Whether this device still holds the session, answered by the
+      // SERVER rather than inferred from an empty Realtime snapshot.
+      //
+      // The watcher next door maps "no row" to "still mine" on purpose,
+      // and that reasoning is right — an empty result is also what a
+      // race looks like, and treating it as superseded logged people
+      // out at random the first time this ran. The cost was that a
+      // deliberate force-logout or device reset looked exactly like a
+      // race, so the student stayed signed in for ever while the admin
+      // panel said "Session killed ✓".
+      //
+      // bx_session_standing can tell them apart because bind writes
+      // user_devices and active_sessions together: a device row with no
+      // session row is a revocation, not a row that has not arrived
+      // yet. It answers 'unknown' whenever it cannot be certain, and
+      // nothing here signs anybody out on a guess.
+      var alive = true;
+      try {
+        final standing = await _b.rpc('bx_session_standing', params: {
+          'p_device_id': deviceId(),
+        });
+        final verdict = standing['verdict']?.toString();
+        if (verdict == 'superseded' || verdict == 'revoked') alive = false;
+      } catch (e) {
+        // An older database with no such function. The Realtime watcher
+        // still stands behind the single-session rule.
+        debugPrint('[session] standing check unavailable: $e');
+      }
+
       Map<String, dynamic> me = const {};
       try {
         final rows = await _b.select('profiles',
@@ -536,7 +573,7 @@ class AuthRepository {
         debugPrint('[session] standing unavailable: $e');
       }
       return SessionPulse.fromJson({
-        'ok': true,
+        'ok': alive,
         'rev': rev['rev'],
         'revAvailable': true,
         if (me.isNotEmpty) 'me': me,

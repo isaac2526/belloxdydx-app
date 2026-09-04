@@ -744,6 +744,32 @@ void main() {
         '$heldBefore -> $heldAfter (server still publishes '
         '${index.questionIds.length})');
 
+    // ---- a revocation reaches a RUNNING app --------------------------
+    //
+    // Tutor Bello presses "Force logout" (or resets the device). The
+    // panel says "Session killed ✓" either way. On the direct path the
+    // app is not polling — it watches its own active_sessions row over
+    // Realtime, and that watcher maps an empty result to "still mine"
+    // ON PURPOSE, because an empty result is also what a race looks
+    // like and treating it as theft logged students out at random the
+    // first time this ran. The cost was that a deliberate revocation
+    // looked exactly like a race, so the student stayed signed in for
+    // ever.
+    //
+    // Checked at the repository, because driving a three-minute timer
+    // in a widget test proves nothing about the mechanism.
+    res = await tester.runAsync(() => hit('/__test/force-logout'));
+    expect(res!['status'], 200);
+
+    final pulse = await tester
+        .runAsync(() => container.read(authRepoProvider).standingNow());
+    expect(pulse, isNotNull);
+    expect(pulse!.alive, isFalse,
+        reason: 'A FORCE LOGOUT MUST REACH A RUNNING APP. The panel says '
+            '"Session killed" and on this path nothing ever happened.');
+    debugPrint('[journey] force logout -> the app is told its session '
+        'ended');
+
     // ---- the server disappears ----------------------------------------
     // Everything above could be explained by a warm cache. This cannot:
     // the backend is killed outright and the app has to stand on its own.

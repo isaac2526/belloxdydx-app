@@ -709,6 +709,10 @@ class SessionNotifier extends StateNotifier<SessionState>
         },
         onError: (_) {},
       );
+      // Note: the pulse below carries the same answer on the direct
+      // path, where the Realtime watcher cannot tell a revocation from
+      // a race. Both end in signOut; whichever arrives first wins and
+      // the second is a no-op because _live is already false.
     } catch (e) {
       debugPrint('[session] device watch unavailable: $e');
     }
@@ -740,6 +744,19 @@ class SessionNotifier extends StateNotifier<SessionState>
 
   void _onPulse(SessionPulse pulse) {
     if (!mounted) return;
+
+    // ---- the session itself ----------------------------------------
+    //
+    // On the direct path the Realtime watcher cannot tell a revocation
+    // from a race and deliberately errs towards staying signed in, so
+    // this is where a force-logout or a device reset actually lands.
+    // The server said so positively; unknown never reaches here.
+    if (!pulse.alive && _live) {
+      unawaited(signOut(
+        reason: 'Your session was ended. Please sign in again.',
+      ));
+      return;
+    }
 
     // ---- what Tutor Bello changed, anywhere ------------------------
     //
