@@ -493,12 +493,28 @@ class OfflineStore {
     required int questions,
     required String stamp,
     required bool ok,
+    int tests = 0,
+    int pins = 0,
+    String pinPrint = '',
+    String courseStamp = '',
     int bytes = 0,
   }) async {
     if (courseId.isEmpty) return;
     _courses[courseId] = {
       'materials': materials,
       'questions': questions,
+      // A pin decides which questions the bundle withholds, so it is
+      // part of what a correct download contains — see CourseStamp.
+      'tests': tests,
+      'pins': pins,
+      // A count catches a pin added or removed; only the checksum
+      // catches a SWAP, which changes what the bundle withholds while
+      // leaving every number identical.
+      'pin_print': pinPrint,
+      'course_stamp': courseStamp,
+      // When TUTOR BELLO last touched any part of this course. Held so
+      // the app can say so even with no signal, which is exactly when a
+      // student most wants to know how old their copy is.
       'stamp': stamp,
       'ok': ok,
       'bytes': bytes,
@@ -938,7 +954,23 @@ class OfflineStore {
   /// Question sets are stored per bucket — a course id, or `mistakes`,
   /// or `bookmarks`. Writing one whole is cheaper and far easier to
   /// reason about than a row store, and the sets are small.
-  Future<void> putQuestions(String bucket, List<Map<String, dynamic>> rows) async {
+  /// [complete] says the incoming rows are WHOLE — every field the
+  /// backend has for that question, not a partial view.
+  ///
+  /// The merge below exists because a question arrives in different
+  /// states of undress depending on when it is seen, and overwriting
+  /// would strip a key the phone already held. But the same rule means
+  /// an edit that CLEARS a field never lands: Tutor Bello deletes a
+  /// wrong explanation and the phone keeps showing it, for ever,
+  /// because "empty" always loses to "held".
+  ///
+  /// A course download sends complete rows, so it passes true and the
+  /// incoming value wins outright — a cleared field really clears.
+  Future<void> putQuestions(
+    String bucket,
+    List<Map<String, dynamic>> rows, {
+    bool complete = false,
+  }) async {
     if (rows.isEmpty) return;
     final safe = _safeName(bucket);
 
@@ -963,6 +995,12 @@ class OfflineStore {
       _questionHome[id] = bucket;
       final before = merged[id];
       if (before == null) {
+        merged[id] = row;
+        continue;
+      }
+      if (complete) {
+        // A whole row from a course download. It is the truth, including
+        // the parts of it that are now empty.
         merged[id] = row;
         continue;
       }
@@ -998,6 +1036,79 @@ class OfflineStore {
       sig: '${merged.length}',
     );
     _touch();
+  }
+
+  /// Drops questions the backend no longer publishes.
+  ///
+  /// The bank only ever merged, so a question Tutor Bello unpublished or
+  /// deleted stayed here for ever — practisable, with its answer key,
+  /// long after he had decided it was wrong.
+  ///
+  /// [alive] must be the FULL set of ids the course still publishes,
+  /// including the ones withheld from the download because they are
+  /// pinned to a test. An empty or partial list would delete the bank,
+  /// so a caller that could not read the list must not call this.
+  /// Returns how many were dropped.
+  Future<int> pruneQuestions(String bucket, Set<String> alive) async {
+    if (alive.isEmpty) return 0;
+    final held = await questions(bucket);
+    if (held.isEmpty) return 0;
+
+    final keep = held
+        .where((r) => alive.contains('${r['id'] ?? ''}'))
+        .toList(growable: false);
+    final dropped = held.length - keep.length;
+    if (dropped <= 0) return 0;
+
+    for (final r in held) {
+      final id = '${r['id'] ?? ''}';
+      if (!alive.contains(id)) _questionHome.remove(id);
+    }
+
+    final safe = _safeName(bucket);
+    await _writeText(
+      'questions',
+      '$safe.json',
+      jsonEncode({
+        'at': DateTime.now().millisecondsSinceEpoch,
+        'rows': keep,
+      }),
+    );
+    final existing = _items['q:$safe'];
+    if (existing != null) {
+      _items['q:$safe'] = existing.copyWith(
+        bytes: await _sizeOf('questions/$safe.json'),
+        sig: '${keep.length}',
+      );
+    }
+    _touch();
+    await flush();
+    debugPrint('[offline] dropped $dropped withdrawn questions from $bucket');
+    return dropped;
+  }
+
+  /// Drops saved materials the backend no longer publishes.
+  ///
+  /// Same reasoning: an unpublished note, slide or past-question paper
+  /// stayed readable on the phone with no way for anybody to withdraw
+  /// it. Only items belonging to [courseId] are considered, so a
+  /// partial view of one course cannot touch another.
+  Future<int> pruneMaterials(String courseId, Set<String> alive) async {
+    if (courseId.isEmpty || alive.isEmpty) return 0;
+    final doomed = _items.values
+        .where((i) =>
+            i.kind != 'questions' &&
+            i.courseId == courseId &&
+            !alive.contains(i.id))
+        .map((i) => i.id)
+        .toList(growable: false);
+    for (final id in doomed) {
+      await removeItem(id);
+    }
+    if (doomed.isNotEmpty) {
+      debugPrint('[offline] dropped ${doomed.length} withdrawn materials');
+    }
+    return doomed.length;
   }
 
   Future<List<Map<String, dynamic>>> questions(String bucket) async {

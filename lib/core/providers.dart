@@ -161,6 +161,13 @@ class CourseStampsNotifier extends StateNotifier<Map<String, CourseStamp>> {
   DateTime _lastRead = DateTime.fromMillisecondsSinceEpoch(0);
   Future<void>? _inFlight;
 
+  /// The revision the current answer was read at. When the backend has
+  /// not moved past this, the per-course manifest is pure cost — on the
+  /// website path it is three counts and three newest-row reads PER
+  /// COURSE, so a shelf of eight courses is forty-eight queries to
+  /// discover that nothing happened.
+  int _readAtRev = 0;
+
   /// Throttled, because every course tile asks for it as it scrolls
   /// into view. Pass [force] after a download, when the answer has
   /// certainly changed.
@@ -177,10 +184,23 @@ class CourseStampsNotifier extends StateNotifier<Map<String, CourseStamp>> {
   }
 
   Future<void> _read() async {
+    final repo = _ref.read(contentRepoProvider);
     try {
-      final rows = await _ref.read(contentRepoProvider).manifest();
+      // One tiny read first. If the backend has not moved since the
+      // answer we are already holding, there is nothing to find and the
+      // manifest is skipped entirely.
+      if (state.isNotEmpty && _readAtRev > 0) {
+        final rev = await repo.revision();
+        if (rev.available && rev.rev == _readAtRev) {
+          _lastRead = DateTime.now();
+          return;
+        }
+      }
+
+      final rows = await repo.manifest();
       if (!mounted) return;
       _lastRead = DateTime.now();
+      _readAtRev = repo.lastManifestRev;
       state = {for (final r in rows) r.id: r};
     } catch (e) {
       // A manifest the app could not read is not an error a student
@@ -188,6 +208,7 @@ class CourseStampsNotifier extends StateNotifier<Map<String, CourseStamp>> {
       debugPrint('[course] manifest skipped: $e');
     }
   }
+
 }
 
 final courseStampsProvider =
@@ -232,6 +253,8 @@ class CourseDownloadNotifier extends StateNotifier<CourseDownloadState> {
 
   Future<void> start() async {
     await _engine.run();
+    // The catalogue changed underneath anything watching it.
+    _ref.read(offlineRecordTick.notifier).state++;
     // The badge is re-read from the server rather than assumed: a
     // question added while the download was running must still show up
     // as a change.
@@ -260,9 +283,80 @@ final courseDownloadProvider = StateNotifierProvider.family<
 /// How many courses on this shelf have something new waiting. Read by
 /// the dashboard so the badge is visible before a student opens the
 /// course list.
+/// Courses this phone still holds that the backend no longer publishes.
+///
+/// Tutor Bello deleting a course, hiding it, or moving it to another
+/// level leaves every note, PDF, picture and question of it sitting on
+/// the phone — openable, practisable, indistinguishable from material
+/// he still stands behind. Nothing ever told the student.
+///
+/// "Missing from the manifest" is NOT enough to conclude this: the
+/// manifest is filtered to the student's current level, so a course
+/// they simply are not standing on right now looks exactly like a
+/// deleted one. Deleting a student's downloaded material because they
+/// switched level would be unforgivable, so each candidate is asked
+/// about directly and only a positive answer counts.
+class WithdrawnCoursesNotifier extends StateNotifier<Set<String>> {
+  WithdrawnCoursesNotifier(this._ref) : super(const {}) {
+    _ref.listen<Map<String, CourseStamp>>(
+      courseStampsProvider,
+      (_, next) => unawaited(_check(next)),
+      fireImmediately: true,
+    );
+  }
+
+  final Ref _ref;
+  bool _busy = false;
+
+  Future<void> _check(Map<String, CourseStamp> shelf) async {
+    if (_busy || shelf.isEmpty) return;
+    final store = _ref.read(offlineStoreProvider);
+    if (store == null) return;
+
+    final candidates = store.downloadedCourses
+        .where((id) => !shelf.containsKey(id))
+        .toList(growable: false);
+    if (candidates.isEmpty) {
+      if (mounted && state.isNotEmpty) state = const {};
+      return;
+    }
+
+    _busy = true;
+    try {
+      final repo = _ref.read(contentRepoProvider);
+      final gone = <String>{};
+      for (final id in candidates) {
+        final verdict = await repo.isCourseWithdrawn(id);
+        // null means the question could not be asked. Silence is not a
+        // yes.
+        if (verdict == true) gone.add(id);
+      }
+      if (mounted) state = gone;
+    } catch (e) {
+      debugPrint('[course] withdrawal check skipped: $e');
+    } finally {
+      _busy = false;
+    }
+  }
+}
+
+final withdrawnCoursesProvider =
+    StateNotifierProvider<WithdrawnCoursesNotifier, Set<String>>(
+  WithdrawnCoursesNotifier.new,
+);
+
+/// Bumped whenever a course download writes its record.
+///
+/// The banner below reads the offline catalogue, which is one long-lived
+/// object — so watching the store gives it nothing to rebuild on, and
+/// the banner stayed lit after the student had already downloaded the
+/// very course it was pointing at.
+final offlineRecordTick = StateProvider<int>((_) => 0);
+
 final coursesWithUpdatesProvider = Provider<int>((ref) {
   final stamps = ref.watch(courseStampsProvider);
   final store = ref.watch(offlineStoreProvider);
+  ref.watch(offlineRecordTick);
   if (store == null) return 0;
   var n = 0;
   for (final s in stamps.values) {
@@ -298,6 +392,10 @@ class SessionNotifier extends StateNotifier<SessionState>
   final Ref _ref;
   StreamSubscription<bool>? _sessionWatch;
   StreamSubscription<void>? _authWatch;
+  StreamSubscription<SessionPulse>? _standingWatch;
+
+  /// The content revision this phone last acted on.
+  int _rev = 0;
   DateTime _lastResumeWork = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Coming back to the app is when the backend's switches are re-read
@@ -369,6 +467,7 @@ class SessionNotifier extends StateNotifier<SessionState>
     // into every launch.
     _backend.restoreMobileSession(store.getString(BxKeys.mobileSession));
     _backend.restoreMode(store.getString(BxKeys.backendMode));
+    _rev = store.getInt(BxKeys.contentRev);
     _watchForSessionEnd();
 
     // The whole point of this branch: a phone that remembers a signed-in
@@ -589,6 +688,147 @@ class SessionNotifier extends StateNotifier<SessionState>
     } catch (e) {
       debugPrint('[session] device watch unavailable: $e');
     }
+    _listenForStanding();
+  }
+
+  /// Acts on what the check-in says about the backend and about this
+  /// student — every three minutes, on the request the app was already
+  /// making.
+  ///
+  /// Before this, all of it waited for a cold start. Tutor Bello could
+  /// freeze an account and the phone would carry on serving it until the
+  /// app was next KILLED and reopened, which on a phone that is never
+  /// closed is never. An activation granted by hand landed just as
+  /// slowly, which is worse: a student who has paid is sitting behind a
+  /// gate that has already been opened for them.
+  void _listenForStanding() {
+    _standingWatch?.cancel();
+    _standingWatch = null;
+    try {
+      _standingWatch = _auth.watchStanding().listen(
+        _onPulse,
+        onError: (_) {},
+      );
+    } catch (e) {
+      debugPrint('[session] standing watch unavailable: $e');
+    }
+  }
+
+  void _onPulse(SessionPulse pulse) {
+    if (!mounted) return;
+
+    // ---- what Tutor Bello changed, anywhere ------------------------
+    //
+    // One number, moved by a database trigger on every write to every
+    // content table. When it moves, the shelf and the per-course badges
+    // are re-read — and NOT the courses themselves. A student's bundle
+    // is not spent re-downloading a course because an announcement was
+    // edited; the badge simply appears and they choose.
+    if (pulse.revAvailable && pulse.rev > 0 && pulse.rev != _rev) {
+      final first = _rev == 0;
+      if (first) {
+        // Nothing to follow up on the first pulse of a launch: this is
+        // simply where the number is now.
+        _rev = pulse.rev;
+        unawaited(
+          _ref.read(localStoreProvider).setInt(BxKeys.contentRev, _rev),
+        );
+      } else {
+        // COMMITTED ONLY IF THE FOLLOW-UP SUCCEEDS.
+        //
+        // Recording the number first and then failing to re-read — one
+        // flaky moment, a lost signal in a lecture hall — would mean the
+        // app believes it has already dealt with that revision. The
+        // change would then never be picked up again, because the next
+        // pulse carries the same number and matches. A change missed
+        // for good, from one dropped request.
+        final target = pulse.rev;
+        unawaited(() async {
+          final ok = await _backendChanged();
+          if (!ok || !mounted) return;
+          _rev = target;
+          await _ref.read(localStoreProvider).setInt(BxKeys.contentRev, target);
+        }());
+      }
+    }
+
+    // ---- what changed about this student ---------------------------
+    final p = state.profile;
+    if (p == null || !pulse.knowsStanding) return;
+
+    final frozen = pulse.frozen;
+    if (frozen != null && frozen != p.isFrozen) {
+      // Both directions. Unfreezing has to land as fast as freezing, or
+      // a student Tutor Bello has forgiven stays locked out until they
+      // think to reinstall.
+      _adopt(p.copyWith(
+        isFrozen: frozen,
+        frozenReason: frozen ? pulse.frozenReason : '',
+      ));
+      return;
+    }
+
+    final activated = pulse.activated;
+    if (activated != null && activated != p.isActivated) {
+      _adopt(p.copyWith(isActivated: activated));
+      unawaited(
+        _ref.read(localStoreProvider).setBool(BxKeys.activated, activated),
+      );
+      return;
+    }
+
+    final level = pulse.level;
+    if (level != null && level.isNotEmpty && level != p.currentLevel) {
+      // The shelf they are looking at is the wrong one.
+      _adopt(p.copyWith(currentLevel: level));
+      unawaited(_backendChanged());
+    }
+  }
+
+  /// Publishes a changed profile AND writes it where the next launch
+  /// will find it.
+  ///
+  /// Publishing alone is not enough. Boot opens on the profile mirrored
+  /// to disk, so a freeze that arrived on the heartbeat and was only
+  /// ever held in memory is UNDONE by killing the app — which is what
+  /// these phones do to a backgrounded app within minutes. The student
+  /// would land back in a working dashboard until the next heartbeat
+  /// froze them again, over and over.
+  void _adopt(Profile p) {
+    _publish(p);
+    unawaited(() async {
+      try {
+        await _ref
+            .read(localStoreProvider)
+            .writeJson(BxKeys.cachedProfile, p.toJson(), mirror: true);
+      } catch (e) {
+        debugPrint('[session] could not keep the change: $e');
+      }
+    }());
+  }
+
+  /// Re-reads what is cheap and leaves alone what is not.
+  ///
+  /// The shelf, the switches and the per-course badges. NOT the courses
+  /// themselves: a student's data bundle is not spent re-downloading a
+  /// course because an announcement was edited. The badge appears and
+  /// they choose.
+  ///
+  /// Returns false when it could not finish, so the caller knows not to
+  /// record the revision as handled.
+  Future<bool> _backendChanged() async {
+    try {
+      await _ref
+          .read(contentRepoProvider)
+          .loadContent(level: state.profile?.currentLevel ?? '100', force: true);
+      _ref.invalidate(contentProvider);
+      await applyPolicy();
+      await _ref.read(courseStampsProvider.notifier).refresh(force: true);
+      return true;
+    } catch (e) {
+      debugPrint('[session] could not follow the change: $e');
+      return false;
+    }
   }
 
   /// Pushes the backend's switches onto the phone.
@@ -636,7 +876,15 @@ class SessionNotifier extends StateNotifier<SessionState>
     _live = false;
     _sessionWatch?.cancel();
     _sessionWatch = null;
+    _standingWatch?.cancel();
+    _standingWatch = null;
+    _rev = 0;
     _ref.read(appLockProvider.notifier).hasSession = false;
+    // The shelf, the levels and the screenshot policy of the student who
+    // just left. All of it lived in a long-lived repository and would
+    // have been shown to whoever signed in next on this phone.
+    _ref.read(contentRepoProvider).forget();
+    _ref.invalidate(contentProvider);
     await _auth.signOut();
     state = SessionState.signedOut(message: reason);
   }
@@ -657,6 +905,7 @@ class SessionNotifier extends StateNotifier<SessionState>
   @override
   void dispose() {
     _sessionWatch?.cancel();
+    _standingWatch?.cancel();
     _authWatch?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();

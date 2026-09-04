@@ -181,6 +181,7 @@ abstract final class BxKeys {
   static const lastRouteAt = 'bx_last_route_at';
   static const cachedProfile = 'profile';
   static const backendMode = 'bx_backend_mode';
+  static const contentRev = 'bx_content_rev';
   static const cachedContent = 'content';
   static const cachedDashboard = 'dashboard';
 }

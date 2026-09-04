@@ -115,6 +115,15 @@ class CourseDownloadState {
   /// When it was last downloaded, or 0.
   final int savedAtMs;
 
+  /// When TUTOR BELLO last changed any part of this course, as an ISO
+  /// string, or empty.
+  ///
+  /// Deliberately separate from [savedAtMs] and deliberately the one
+  /// the student is shown. "You downloaded this on Tuesday" answers a
+  /// question nobody asked; "Tutor Bello last updated this on Tuesday"
+  /// is the one they actually have.
+  final String updatedAt;
+
   const CourseDownloadState({
     required this.courseId,
     this.phase = CourseDownloadPhase.idle,
@@ -130,6 +139,7 @@ class CourseDownloadState {
     this.updateAvailable = false,
     this.held = false,
     this.savedAtMs = 0,
+    this.updatedAt = '',
   });
 
   bool get isRunning =>
@@ -161,6 +171,7 @@ class CourseDownloadState {
     bool? updateAvailable,
     bool? held,
     int? savedAtMs,
+    String? updatedAt,
     bool clearMessage = false,
   }) =>
       CourseDownloadState(
@@ -178,6 +189,7 @@ class CourseDownloadState {
         updateAvailable: updateAvailable ?? this.updateAvailable,
         held: held ?? this.held,
         savedAtMs: savedAtMs ?? this.savedAtMs,
+        updatedAt: updatedAt ?? this.updatedAt,
       );
 }
 
@@ -263,6 +275,7 @@ class CourseDownloader {
       materials: (rec['materials'] as num?)?.toInt() ?? 0,
       bytes: (rec['bytes'] as num?)?.toInt() ?? 0,
       savedAtMs: (rec['at'] as num?)?.toInt() ?? 0,
+      updatedAt: '${rec['stamp'] ?? ''}',
       // A run that did not finish must keep asking. Anything else and a
       // half-downloaded course sits there looking finished.
       updateAvailable: !ok,
@@ -278,6 +291,9 @@ class CourseDownloader {
     _emit(_state.copyWith(
       updateAvailable: stamp.differsFrom(rec) && !stamp.isEmpty,
       held: rec != null,
+      // Kept current even when nothing is downloaded, so a course a
+      // student has not taken offline still says when it last changed.
+      updatedAt: stamp.stamp,
     ));
   }
 
@@ -395,6 +411,29 @@ class CourseDownloader {
       await store.flush();
       if (_cancelled) return _stopped();
 
+      // ---- drop what Tutor Bello withdrew ------------------------
+      //
+      // The bank only ever merged, so a question he unpublished or
+      // deleted stayed here for ever — practisable, with its answer
+      // key, long after he had decided it was wrong. Same for a note or
+      // a paper. Pruned only against a list the server confirmed
+      // COMPLETE: a read that failed must never be read as "the course
+      // is empty, delete everything".
+      if (!_cancelled) {
+        _emit(_state.copyWith(label: 'Clearing what was withdrawn'));
+        try {
+          final index = await _content.courseIndex(courseId);
+          if (index.isUsable) {
+            await store.pruneQuestions(courseId, index.questionIds);
+            if (index.materialIds.isNotEmpty) {
+              await store.pruneMaterials(courseId, index.materialIds);
+            }
+          }
+        } catch (e) {
+          debugPrint('[course] could not prune: $e');
+        }
+      }
+
       // ---- the cross-check ---------------------------------------
       //
       // "it must be sure that everything was downloaded". Not the
@@ -402,6 +441,10 @@ class CourseDownloader {
       // this run went for is read back, and the question bucket is
       // counted against what the server said it was sending.
       _emit(_state.copyWith(label: 'Checking every file', done: units.length));
+      // NOT questionRows - dropped: everything saved in this run came
+      // from the server moments ago, so it is in the alive set and none
+      // of it can have been pruned. Subtracting would only weaken the
+      // check.
       final missing = await _verify(store, units, questionRows);
       final heldQuestions = (await store.questions(courseId)).length;
 
@@ -413,6 +456,10 @@ class CourseDownloader {
         // storing what we saved would leave the badge lit forever.
         materials: stamp?.materials ?? materials.length,
         questions: stamp?.questions ?? heldQuestions,
+        tests: stamp?.tests ?? 0,
+        pins: stamp?.pins ?? 0,
+        pinPrint: stamp?.pinPrint ?? '',
+        courseStamp: stamp?.courseStamp ?? '',
         stamp: stamp?.stamp ?? '',
         ok: ok,
         bytes: bytes,
@@ -429,6 +476,7 @@ class CourseDownloader {
         held: true,
         updateAvailable: !ok,
         savedAtMs: DateTime.now().millisecondsSinceEpoch,
+        updatedAt: stamp?.stamp ?? _state.updatedAt,
         message: ok
             ? null
             : '${failed + missing} '
@@ -524,7 +572,10 @@ class CourseDownloader {
         // Written page by page rather than at the end, so a download
         // that is interrupted three quarters through still leaves three
         // quarters of the bank on the phone.
-        await store.putQuestions(courseId, page.questions);
+        // complete: these rows came whole from the bundle, so an
+        // explanation Tutor Bello CLEARED really clears rather than
+        // losing to the copy already held.
+        await store.putQuestions(courseId, page.questions, complete: true);
         saved += page.questions.length;
         _emit(_state.copyWith(
           questions: saved,

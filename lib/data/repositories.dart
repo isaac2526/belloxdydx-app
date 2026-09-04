@@ -454,6 +454,99 @@ class AuthRepository {
   /// session the row changes and this device is pushed a logout
   /// instantly. Cheaper AND faster than polling.
   /// ------------------------------------------------------------
+  /// One check-in, feeding everything that needs one.
+  ///
+  /// On the legacy path this IS the heartbeat — the same three-minute
+  /// request that enforces the single-session rule now also carries the
+  /// content revision and the student's own standing, so learning that
+  /// an account was frozen costs nothing it was not already spending.
+  ///
+  /// On the direct path the session rule is a Realtime subscription
+  /// rather than a poll, so the standing gets its own timer: one cheap
+  /// RPC and one row read every three minutes.
+  ///
+  /// Broadcast and memoised, because two listeners must not become two
+  /// requests.
+  Stream<SessionPulse>? _standing;
+
+  Stream<SessionPulse> watchStanding() =>
+      _standing ??= (_b.isDirect ? _directStanding() : _legacyStanding())
+          .asBroadcastStream();
+
+  Stream<SessionPulse> _legacyStanding() =>
+      Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
+          .asyncMap((_) => _pulse())
+          .handleError((_) => SessionPulse.unknown);
+
+  Stream<SessionPulse> _directStanding() =>
+      Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
+          .asyncMap((_) => _directPulse())
+          .handleError((_) => SessionPulse.unknown);
+
+  /// The legacy heartbeat, read for everything it now says.
+  Future<SessionPulse> _pulse() async {
+    // No token to present is not the same as a stolen session, and the
+    // website cannot tell them apart — /api/auth/heartbeat answers 401
+    // "superseded" whether another device took the row or the header was
+    // simply absent. So the app has to know the difference itself.
+    //
+    // Without this, any state that loses the token — a reinstall that
+    // kept the Supabase session, a cleared preference, a first launch
+    // after an upgrade that changed the key — reads as "somebody else
+    // signed in" and ejects a paying student.
+    if (_b.mobileSessionToken == null) {
+      try {
+        await _bindDevice();
+        return SessionPulse(alive: _b.mobileSessionToken != null);
+      } catch (e) {
+        // Could not re-bind (usually offline). Staying signed in is the
+        // right way to be wrong: the next successful bind settles it.
+        debugPrint('[session] could not re-bind: $e');
+        return SessionPulse.unknown;
+      }
+    }
+
+    try {
+      final r = await _b.apiGet('/api/auth/heartbeat', retries: 0);
+      return SessionPulse.fromJson(r);
+    } on BxError catch (e) {
+      if (e.code == 'unauthenticated') return const SessionPulse(alive: false);
+      return SessionPulse.unknown; // offline is not a crime
+    } catch (_) {
+      return SessionPulse.unknown;
+    }
+  }
+
+  /// The same three answers on the Supabase path, where there is no
+  /// heartbeat route to carry them.
+  Future<SessionPulse> _directPulse() async {
+    final uid = _b.userId;
+    if (uid == null) return SessionPulse.unknown;
+    try {
+      final rev = await _b.rpc('bx_revision');
+      Map<String, dynamic> me = const {};
+      try {
+        final rows = await _b.select('profiles',
+            columns: 'is_frozen, frozen_reason, current_level, is_activated',
+            eq: {'id': uid},
+            limit: 1);
+        if (rows.isNotEmpty) me = rows.first;
+      } catch (e) {
+        // RLS may decline; the revision half still stands on its own.
+        debugPrint('[session] standing unavailable: $e');
+      }
+      return SessionPulse.fromJson({
+        'ok': true,
+        'rev': rev['rev'],
+        'revAvailable': true,
+        if (me.isNotEmpty) 'me': me,
+      });
+    } catch (e) {
+      debugPrint('[session] revision unavailable: $e');
+      return SessionPulse.unknown;
+    }
+  }
+
   Stream<bool> watchSession() {
     final uid = _b.userId;
     if (uid == null) return const Stream.empty();
@@ -486,47 +579,14 @@ class AuthRepository {
     // showed 45s buys nothing over 3 minutes for a rule that only has to
     // catch a second sign-in.
     //
-    // The tick type must be nullable, or carry a computation. Stream
-    // .periodic has nothing to emit without one, so for a non-nullable
-    // element type it throws from the constructor rather than at the
-    // first tick — which is how `Stream<bool>.periodic(...)` here stopped
-    // every student on the legacy path from ever finishing a login.
-    return Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
-        .asyncMap((_) => _heartbeat())
-        .handleError((_) => true);
-  }
-
-  Future<bool> _heartbeat() async {
-    // No token to present is not the same as a stolen session, and the
-    // website cannot tell them apart — /api/auth/heartbeat answers 401
-    // "superseded" whether another device took the row or the header was
-    // simply absent. So the app has to know the difference itself.
-    //
-    // Without this, any state that loses the token — a reinstall that
-    // kept the Supabase session, a cleared preference, a first launch
-    // after an upgrade that changed the key — reads as "somebody else
-    // signed in" and ejects a paying student.
-    if (_b.mobileSessionToken == null) {
-      try {
-        await _bindDevice();
-        return _b.mobileSessionToken != null;
-      } catch (e) {
-        // Could not re-bind (usually offline). Staying signed in is the
-        // right way to be wrong: the next successful bind settles it.
-        debugPrint('[session] could not re-bind: $e');
-        return true;
-      }
-    }
-
-    try {
-      await _b.apiGet('/api/auth/heartbeat', retries: 0);
-      return true;
-    } on BxError catch (e) {
-      if (e.code == 'unauthenticated') return false;
-      return true; // offline is not a crime
-    } catch (_) {
-      return true;
-    }
+    // Derived from the SAME pulse the standing watcher reads, so the two
+    // are one request rather than two. (Historic note worth keeping: the
+    // tick type must be nullable or carry a computation — Stream.periodic
+    // has nothing to emit without one, so for a non-nullable element type
+    // it throws from the CONSTRUCTOR rather than at the first tick, which
+    // is how `Stream<bool>.periodic(...)` here once stopped every student
+    // on the legacy path from finishing a login.)
+    return watchStanding().map((p) => p.alive).handleError((_) => true);
   }
 
   Future<void> signOut() async {
@@ -625,16 +685,46 @@ class ContentRepository {
   // Downloading a whole course
   // ------------------------------------------------------------
 
+  /// The one number that moves whenever ANYTHING changes on the
+  /// backend. One row, one column — cheap enough to ask on every
+  /// resume, which is the whole point of it existing.
+  ///
+  /// Answers "unavailable" rather than throwing when migration 0014 has
+  /// not been applied; the caller then falls back to comparing the
+  /// manifest, which is what it did before this existed.
+  Future<ContentRevision> revision() async {
+    try {
+      final r = _b.isDirect
+          ? await _b.rpc('bx_revision')
+          : await _b.apiGet('/api/mobile/revision', retries: 0);
+      return ContentRevision.fromJson({
+        ...r,
+        if (_b.isDirect) 'available': true,
+      });
+    } catch (e) {
+      debugPrint('[content] revision unavailable: $e');
+      return const ContentRevision();
+    }
+  }
+
   /// How much of each course the server is publishing right now.
   ///
   /// The cheapest question the app asks, and the whole of the "there's
   /// a change in this course, download now" badge. Deliberately not a
   /// diff: a diff costs the server real work on every app open, and the
   /// app has to fetch the changed rows anyway.
+  /// The revision the last manifest was read at, so the caller can tell
+  /// whether asking again could possibly say anything new.
+  int lastManifestRev = 0;
+
   Future<List<CourseStamp>> manifest() async {
     final r = _b.isDirect
         ? await _b.rpc('bx_manifest')
         : await _b.apiGet('/api/mobile/manifest');
+    lastManifestRev = ContentRevision.fromJson({
+      ...r,
+      if (_b.isDirect) 'available': true,
+    }).rev;
     final rows = r['courses'];
     if (rows is! List) return const [];
     return rows
@@ -681,11 +771,90 @@ class ContentRepository {
     );
   }
 
+  /// Every id the course still publishes, withheld ones included.
+  ///
+  /// This is what lets a download DROP what Tutor Bello withdrew. It
+  /// cannot be worked out from the bundle pages: those deliberately
+  /// hold back the questions pinned to a test, so "not sent" and "no
+  /// longer there" look identical from the app's side.
+  Future<CourseIndex> courseIndex(String courseId) async {
+    try {
+      final r = _b.isDirect
+          ? await _b.rpc('bx_course_ids', params: {'p_course_id': courseId})
+          : await _b.apiGet(
+              '/api/mobile/course-bundle?courseId=$courseId&part=ids');
+      if (r['error'] != null) return const CourseIndex();
+      return CourseIndex.fromJson({
+        ...r,
+        if (_b.isDirect) 'complete': r['complete'] ?? true,
+      });
+    } catch (e) {
+      // A list the app could not read must never be pruned against.
+      debugPrint('[content] course index unavailable: $e');
+      return const CourseIndex();
+    }
+  }
+
+  /// Whether a course the phone still holds has been withdrawn.
+  ///
+  /// "Not in the manifest" is NOT enough to answer this. The manifest is
+  /// filtered to the student's current level, so a course they simply
+  /// are not standing on right now looks exactly like one Tutor Bello
+  /// deleted — and deleting a student's downloaded material because
+  /// they switched level would be unforgivable.
+  ///
+  /// So it is asked directly. bx_course_ids and the ids route both look
+  /// only at is_visible, not at level, so `not_found` means genuinely
+  /// gone or hidden and anything else means it is still there.
+  ///
+  /// Returns null when the question could not be answered — offline, a
+  /// timeout — and null must never be treated as gone.
+  Future<bool?> isCourseWithdrawn(String courseId) async {
+    if (courseId.isEmpty) return null;
+    try {
+      if (_b.isDirect) {
+        final r = await _b.rpc('bx_course_ids', params: {
+          'p_course_id': courseId,
+        });
+        final err = r['error']?.toString();
+        if (err == 'not_found') return true;
+        if (err != null) return null;
+        return false;
+      }
+      final r = await _b.apiGet(
+        '/api/mobile/course-bundle?courseId=$courseId&part=ids',
+        retries: 0,
+      );
+      return r['error']?.toString() == 'not_found';
+    } on BxError catch (e) {
+      // 404 is an answer. Everything else is a failure to ask.
+      if (e.code == 'not_found') return true;
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   String _bundleMessage(String code) => switch (code) {
         'not_found' => 'That course is not on your shelf.',
         'not_activated' => 'Activate your account to download a course.',
         _ => 'That course could not be downloaded.',
       };
+
+  /// Throws the previous student's shelf away.
+  ///
+  /// The repository is a long-lived object and its lists are plain
+  /// fields, so signing out left the courses, the levels and the
+  /// SCREENSHOT POLICY of whoever just left sitting in memory — ready
+  /// to be shown to the next person to sign in on that phone, for as
+  /// long as it took the first content read to come back.
+  void forget() {
+    _courses = const [];
+    _materials = const [];
+    _levels = const [];
+    _policy = const AppPolicy();
+    lastManifestRev = 0;
+  }
 
   void _ingest(Map<String, dynamic> r) {
     final rawCourses = r['courses'];

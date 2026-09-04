@@ -1162,6 +1162,25 @@ class _CourseUpdatesBanner extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // A course Tutor Bello withdrew is a different sentence from one he
+    // changed, and it wins: material he has taken down should not sit on
+    // a student's phone being revised from.
+    final gone = ref.watch(withdrawnCoursesProvider);
+    if (gone.isNotEmpty) {
+      return BxBanner(
+        title: gone.length == 1
+            ? 'One course was taken down'
+            : '${gone.length} courses were taken down',
+        message: 'Tutor Bello has removed material you had saved. It is '
+            'still on this phone, but it is no longer part of your '
+            'course — open the Vault to clear it and free the space.',
+        icon: Icons.unpublished_rounded,
+        accent: BxAccent.danger,
+        actionLabel: 'Open the Vault',
+        onAction: () => context.push(Routes.vault),
+      );
+    }
+
     final n = ref.watch(coursesWithUpdatesProvider);
     if (n == 0) return const SizedBox.shrink();
     return BxBanner(

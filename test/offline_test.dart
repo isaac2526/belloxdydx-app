@@ -31,6 +31,7 @@ class _FakePaths extends PathProviderPlatform
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   courseDownloadRecords();
+  pruningWithdrawnContent();
 
   late Directory docs;
   late _FakePaths paths;
@@ -792,18 +793,30 @@ void courseDownloadRecords() {
       code: 'CHM 101',
       materials: 8,
       questions: 240,
+      tests: 2,
+      pins: 12,
+      pinPrint: 'abc123',
+      courseStamp: '2026-08-20T08:00:00Z',
       stamp: '2026-09-01T10:00:00Z',
     );
 
     Map<String, dynamic> held({
       int materials = 8,
       int questions = 240,
+      int tests = 2,
+      int pins = 12,
+      String pinPrint = 'abc123',
+      String courseStamp = '2026-08-20T08:00:00Z',
       String stamp = '2026-09-01T10:00:00Z',
       bool ok = true,
     }) =>
         {
           'materials': materials,
           'questions': questions,
+          'tests': tests,
+          'pins': pins,
+          'pin_print': pinPrint,
+          'course_stamp': courseStamp,
           'stamp': stamp,
           'ok': ok,
         };
@@ -840,16 +853,131 @@ void courseDownloadRecords() {
       expect(server.differsFrom(held(materials: 7)), isTrue);
     });
 
+    test('A QUESTION PINNED TO A TEST moves nothing else at all', () {
+      // The sharpest case, and the one the first version of this missed
+      // completely. A pin decides which questions the bundle WITHHOLDS,
+      // so pinning one changes the correct content of every download of
+      // that course without touching a single question or material row.
+      // Measured against a real PostgreSQL: pinning one question took a
+      // download from five questions to four while the material count,
+      // the question count and both timestamps stayed byte-identical.
+      expect(
+        server.differsFrom(held(pins: 11)),
+        isTrue,
+        reason: 'a phone would keep a question that is now on an exam',
+      );
+    });
+
+    test('a pin SWAP keeps the count and still gets caught', () {
+      // Unpin one question and pin another in the same sitting: the
+      // count is identical and the set the bundle withholds has
+      // completely changed. Measured against a real PostgreSQL — pins
+      // 3 -> 3, questions 7 -> 7, question stamp unmoved, checksum
+      // 0c39052b86… -> d521a1e128…
+      expect(
+        server.differsFrom(held(pinPrint: 'a-different-checksum')),
+        isTrue,
+        reason: 'the phone would hold the key to whichever question was '
+            'just put on the exam',
+      );
+    });
+
+    test('a test published moves the test count', () {
+      expect(server.differsFrom(held(tests: 1)), isTrue);
+    });
+
+    test('a course RENAMED or HIDDEN moves only its own stamp', () {
+      // courses has carried an updated_at trigger since the first
+      // migration and nothing ever read it, so a rename, a hide, a
+      // re-order and a move to another level were all invisible.
+      expect(
+        server.differsFrom(held(courseStamp: '2026-08-19T08:00:00Z')),
+        isTrue,
+      );
+    });
+
     test('a run that did not finish keeps asking', () {
       // Everything matches, but the download reported failures. A
       // half-downloaded course must not sit there looking finished.
       expect(server.differsFrom(held(ok: false)), isTrue);
     });
 
+    test('a record written by an older build counts as different', () {
+      // No tests, pins or course_stamp keys at all. One extra download
+      // on the upgrade launch, and correct from then on — the other way
+      // round would leave every existing phone permanently blind to the
+      // three fields this release added.
+      expect(
+        server.differsFrom({
+          'materials': 8,
+          'questions': 240,
+          'stamp': '2026-09-01T10:00:00Z',
+          'ok': true,
+        }),
+        isTrue,
+      );
+    });
+
     test('an empty course is not offered as a download', () {
       const nothing = CourseStamp(id: 'c2');
       expect(nothing.isEmpty, isTrue);
       expect(server.isEmpty, isFalse);
+    });
+
+    test('it reads both spellings the two backends use', () {
+      // The SQL half and the website half must be indistinguishable.
+      final fromSql = CourseStamp.fromJson(const {
+        'id': 'c1',
+        'code': 'CHM 101',
+        'materials': 8,
+        'questions': 240,
+        'tests': 2,
+        'pins': 12,
+        'pin_print': 'abc123',
+        'course_stamp': '2026-08-20T08:00:00Z',
+        'material_stamp': '2026-08-21T08:00:00Z',
+        'stamp': '2026-09-01T10:00:00Z',
+      });
+      expect(fromSql.pins, 12);
+      expect(fromSql.courseStamp, '2026-08-20T08:00:00Z');
+      expect(fromSql.differsFrom(held()), isFalse);
+      expect(fromSql.updatedAt, isNotNull,
+          reason: 'the date shown to a student comes off this');
+    });
+  });
+
+  group('the one number that says something changed', () {
+    test('a moved revision means go and look', () {
+      const now = ContentRevision(rev: 41, available: true);
+      expect(now.movedFrom(40), isTrue);
+      expect(now.movedFrom(41), isFalse);
+    });
+
+    test('an UNAVAILABLE revision always means go and look', () {
+      // Migration 0014 not applied. The app falls back to comparing the
+      // manifest, which is what it did before this existed: slower to
+      // notice, never wrong. Reading "unavailable" as "nothing changed"
+      // would blind every phone until the migration ran.
+      const missing = ContentRevision(rev: 0, available: false);
+      expect(missing.movedFrom(0), isTrue);
+      expect(missing.movedFrom(99), isTrue);
+    });
+
+    test('a zero revision is never trusted', () {
+      const zero = ContentRevision(rev: 0, available: true);
+      expect(zero.movedFrom(0), isTrue);
+    });
+
+    test('it reads both spellings the two backends use', () {
+      expect(
+        ContentRevision.fromJson(const {'rev': 7, 'revAvailable': true}).rev,
+        7,
+      );
+      expect(
+        ContentRevision.fromJson(const {'rev': 7, 'available': true}).available,
+        isTrue,
+      );
+      expect(ContentRevision.fromJson(const {}).available, isFalse);
     });
   });
 
@@ -902,6 +1030,143 @@ void courseDownloadRecords() {
       await store.claim('student-2');
       expect(store.courseRecord('c1'), isNull,
           reason: "another student's downloads are not this one's to see");
+    });
+  });
+}
+
+/// ============================================================
+/// DROPPING WHAT TUTOR BELLO WITHDREW
+///
+/// The offline bank only ever merged. A question he unpublished or
+/// deleted stayed on the phone for ever — practisable, with its answer
+/// key, long after he had decided it was wrong.
+///
+/// It cannot be worked out from the download pages, because those
+/// deliberately withhold the questions pinned to a published test: "the
+/// server did not send it" and "the server no longer has it" look
+/// exactly alike. So the phone asks for the full id list, withheld ones
+/// included, and prunes against that.
+///
+/// The dangerous direction is deleting too much. These pin that shut.
+/// ============================================================
+void pruningWithdrawnContent() {
+  group('dropping what was withdrawn', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    Map<String, dynamic> q(String id, {String why = '<p>because</p>'}) => {
+          'id': id,
+          'course_id': 'c1',
+          'question_html': '<p>Q$id</p>',
+          'correct_key': 'A',
+          'explanation_html': why,
+          'options': [
+            {'key': 'A', 'text': 'one'},
+          ],
+        };
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_prune_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      final opened = await OfflineStore.open();
+      expect(opened, isNotNull);
+      store = opened!;
+      await store.putQuestions('c1', [q('a'), q('b'), q('c'), q('d')]);
+      await store.flush();
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    test('a withdrawn question is really gone from the disk', () async {
+      final dropped = await store.pruneQuestions('c1', {'a', 'b', 'c'});
+      expect(dropped, 1);
+
+      final held = await store.questions('c1');
+      expect(held.map((r) => r['id']), unorderedEquals(['a', 'b', 'c']));
+
+      // And from a store that has never seen this session — a prune
+      // that only lives in RAM is a question that comes back.
+      final reopened = await OfflineStore.open();
+      expect((await reopened!.questions('c1')).length, 3);
+    });
+
+    test('a question WITHHELD from the download is not withdrawn',
+        () async {
+      // 'd' is pinned to a published test, so the bundle never sent it —
+      // and it is still on the course. Pruning it would delete a
+      // question Tutor Bello still publishes.
+      final dropped = await store.pruneQuestions('c1', {'a', 'b', 'c', 'd'});
+      expect(dropped, 0);
+      expect((await store.questions('c1')).length, 4);
+    });
+
+    test('an EMPTY list never deletes anything', () async {
+      // The read failed, or the course really has nothing. Either way
+      // emptying the bank on it would be catastrophic and unrecoverable
+      // offline.
+      expect(await store.pruneQuestions('c1', {}), 0);
+      expect((await store.questions('c1')).length, 4);
+    });
+
+    test('another course is never touched', () async {
+      await store.putQuestions('c2', [q('x'), q('y')]);
+      await store.pruneQuestions('c1', {'a'});
+      expect((await store.questions('c2')).length, 2,
+          reason: 'pruning one course must not reach into another');
+    });
+
+    test('pruning twice is not a second deletion', () async {
+      expect(await store.pruneQuestions('c1', {'a', 'b', 'c'}), 1);
+      expect(await store.pruneQuestions('c1', {'a', 'b', 'c'}), 0);
+    });
+  });
+
+  group('an edit that clears a field', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_clear_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      store = (await OfflineStore.open())!;
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    Map<String, dynamic> row(String why) => {
+          'id': 'q1',
+          'course_id': 'c1',
+          'question_html': '<p>Q</p>',
+          'correct_key': 'A',
+          'explanation_html': why,
+        };
+
+    test('a PARTIAL row still must not strip what the phone holds',
+        () async {
+      // The reason the merge exists. On the direct path an attempt opens
+      // with the answer key stripped and fills it in only once the
+      // student has answered; overwriting would throw the key away and a
+      // question with no key cannot be marked offline.
+      await store.putQuestions('c1', [row('<p>the long explanation</p>')]);
+      await store.putQuestions('c1', [
+        {'id': 'q1', 'course_id': 'c1', 'question_html': '<p>Q</p>'},
+      ]);
+      final held = (await store.questions('c1')).first;
+      expect(held['explanation_html'], '<p>the long explanation</p>');
+      expect(held['correct_key'], 'A');
+    });
+
+    test('a COMPLETE row lets Tutor Bello clear something', () async {
+      // The same rule, unchanged, meant a wrong explanation he deleted
+      // stayed on the phone for ever, because "empty" always lost to
+      // "held". A course download sends whole rows and says so.
+      await store.putQuestions('c1', [row('<p>this was wrong</p>')]);
+      await store.putQuestions('c1', [row('')], complete: true);
+      final held = (await store.questions('c1')).first;
+      expect(held['explanation_html'], '',
+          reason: 'a cleared field must really clear');
+      expect(held['correct_key'], 'A',
+          reason: 'and the rest of the row must survive');
     });
   });
 }

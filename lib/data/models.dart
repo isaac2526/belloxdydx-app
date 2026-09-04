@@ -148,7 +148,13 @@ class Profile {
         'frozen_reason': frozenReason,
       };
 
-  Profile copyWith({bool? isActivated, String? currentLevel}) => Profile(
+  Profile copyWith({
+    bool? isActivated,
+    String? currentLevel,
+    bool? isFrozen,
+    String? frozenReason,
+  }) =>
+      Profile(
         id: id,
         surname: surname,
         firstName: firstName,
@@ -159,8 +165,8 @@ class Profile {
         referralCode: referralCode,
         currentLevel: currentLevel ?? this.currentLevel,
         isActivated: isActivated ?? this.isActivated,
-        isFrozen: isFrozen,
-        frozenReason: frozenReason,
+        isFrozen: isFrozen ?? this.isFrozen,
+        frozenReason: frozenReason ?? this.frozenReason,
       );
 }
 
@@ -1246,30 +1252,78 @@ class StudyLevel {
       );
 }
 
-/// One line of the course manifest: how much of a course the server is
-/// publishing right now, and when the newest piece of it was touched.
+/// One line of the course manifest: everything the server is publishing
+/// for this course right now, and when Tutor Bello last touched any of
+/// it.
 ///
-/// Two numbers AND a stamp, because neither is enough alone.
+/// Counts AND stamps, throughout, because neither is enough alone.
 /// `updated_at` cannot see a deletion — unpublish a question and the
-/// newest stamp does not move — and a count cannot see an edit. A
-/// course whose material was corrected and whose question was
-/// withdrawn on the same afternoon shows a change in exactly one of
-/// them, and the student needs to be told either way.
+/// newest stamp does not move, but the count drops by one — and a count
+/// cannot see an edit. A course whose material was corrected and whose
+/// question was withdrawn on the same afternoon moves exactly one of
+/// them, and the student needs telling either way.
+///
+/// It started as materials and questions alone and that was not enough,
+/// in ways nobody could have been asked to list in advance. Each of the
+/// fields below moves what a CORRECT download contains while leaving
+/// those first two exactly where they were:
+///
+///   [courseStamp]  the course row's own updated_at — a rename, a hide,
+///                  a re-order, a move to another level, a code change.
+///   [tests]        published tests on the course, and [testStamp].
+///   [pins]         how many questions are pinned to those tests. NOT
+///                  cosmetic: a pin decides which questions the bundle
+///                  withholds, so pinning one changes the correct
+///                  content of every download of that course without
+///                  touching a single question row. Measured: pinning
+///                  one question took a download from five questions to
+///                  four while every count and both timestamps stayed
+///                  byte-identical.
 @immutable
 class CourseStamp {
   final String id;
   final String code;
   final String title;
+  final int semester;
   final int materials;
   final int questions;
+  final int tests;
+  final int pins;
+
+  /// A checksum of the ids pinned to this course's published tests.
+  ///
+  /// [pins] catches a pin added and a pin removed. It cannot catch a
+  /// SWAP — unpin one question and pin another in the same sitting and
+  /// the count is identical while the set the bundle withholds has
+  /// completely changed, so a phone would be holding the key to
+  /// whichever question was just put on the exam.
+  final String pinPrint;
+  final String materialStamp;
+  final String questionStamp;
+  final String testStamp;
+  final String courseStamp;
+
+  /// The newest moment Tutor Bello touched ANY part of this course.
+  ///
+  /// This is the date the app shows a student — "Tutor Bello last
+  /// updated this on…" — and it is deliberately not the date they
+  /// downloaded it.
   final String stamp;
 
   const CourseStamp({
     required this.id,
     this.code = '',
     this.title = '',
+    this.semester = 0,
     this.materials = 0,
     this.questions = 0,
+    this.tests = 0,
+    this.pins = 0,
+    this.pinPrint = '',
+    this.materialStamp = '',
+    this.questionStamp = '',
+    this.testStamp = '',
+    this.courseStamp = '',
     this.stamp = '',
   });
 
@@ -1277,8 +1331,16 @@ class CourseStamp {
         id: _str(_pick(j, ['id', 'course_id', 'courseId'])),
         code: _str(_pick(j, ['code', 'course_code'])),
         title: _str(j['title']),
+        semester: _int(j['semester'], 0),
         materials: _int(j['materials'], 0),
         questions: _int(j['questions'], 0),
+        tests: _int(j['tests'], 0),
+        pins: _int(j['pins'], 0),
+        pinPrint: _str(_pick(j, ['pin_print', 'pinPrint'])),
+        materialStamp: _str(_pick(j, ['material_stamp', 'materialStamp'])),
+        questionStamp: _str(_pick(j, ['question_stamp', 'questionStamp'])),
+        testStamp: _str(_pick(j, ['test_stamp', 'testStamp'])),
+        courseStamp: _str(_pick(j, ['course_stamp', 'courseStamp'])),
         stamp: _str(j['stamp']),
       );
 
@@ -1286,10 +1348,22 @@ class CourseStamp {
         'id': id,
         'code': code,
         'title': title,
+        'semester': semester,
         'materials': materials,
         'questions': questions,
+        'tests': tests,
+        'pins': pins,
+        'pin_print': pinPrint,
+        'material_stamp': materialStamp,
+        'question_stamp': questionStamp,
+        'test_stamp': testStamp,
+        'course_stamp': courseStamp,
         'stamp': stamp,
       };
+
+  /// When Tutor Bello last changed this course, or null if the server
+  /// never said.
+  DateTime? get updatedAt => _date(stamp);
 
   /// Whether what the server has differs from what the phone holds.
   ///
@@ -1297,17 +1371,129 @@ class CourseStamp {
   /// always "different" — a course that only half landed must keep
   /// asking to be downloaded rather than sitting there looking
   /// finished.
+  ///
+  /// Every field is compared, not just the two it started with. A held
+  /// record written by an older build has no `pins` key at all, so the
+  /// absent-means-different rule is deliberate: one extra download on
+  /// the upgrade launch, and correct from then on.
   bool differsFrom(Map<String, dynamic>? held) {
     if (held == null) return true;
     if (held['ok'] != true) return true;
     if (_int(held['materials'], -1) != materials) return true;
     if (_int(held['questions'], -1) != questions) return true;
+    if (_int(held['tests'], -1) != tests) return true;
+    if (_int(held['pins'], -1) != pins) return true;
+    if (_str(held['pin_print']) != pinPrint) return true;
+    if (_str(held['course_stamp']) != courseStamp) return true;
     return _str(held['stamp']) != stamp;
   }
 
   /// Nothing published yet. Offering a Download button for this would
   /// be offering to download an empty course.
   bool get isEmpty => materials == 0 && questions == 0;
+}
+
+/// What the app learns each time it checks in with the backend.
+///
+/// One poll, three answers, because the app was already making the call
+/// and each of these used to wait for a cold start:
+///
+///   [alive]   is this still my session, or did another device take it.
+///   [rev]     has anything at all changed on the backend.
+///   [frozen], [level], [activated]  this student's own standing.
+///
+/// Freezing an account used to reach a running phone only when it was
+/// next killed and reopened — which, on a phone that is never closed,
+/// is never. Same for an activation granted by hand and for a level
+/// moved by an admin.
+@immutable
+class SessionPulse {
+  /// False ONLY when the backend positively says another device holds
+  /// the session. Unknown, offline and errored all mean true: signing a
+  /// paying student out on a guess is the expensive way to be wrong.
+  final bool alive;
+
+  final int rev;
+  final bool revAvailable;
+
+  /// Null when this pulse carried no answer about the student — an
+  /// older backend, or a path that does not report it. Null must never
+  /// be read as "not frozen".
+  final bool? frozen;
+  final String frozenReason;
+  final String? level;
+  final bool? activated;
+
+  const SessionPulse({
+    this.alive = true,
+    this.rev = 0,
+    this.revAvailable = false,
+    this.frozen,
+    this.frozenReason = '',
+    this.level,
+    this.activated,
+  });
+
+  static const unknown = SessionPulse();
+
+  factory SessionPulse.fromJson(Map<String, dynamic> j) {
+    final me = j['me'] is Map
+        ? Map<String, dynamic>.from(j['me'] as Map)
+        : const <String, dynamic>{};
+    return SessionPulse(
+      alive: j['ok'] != false,
+      rev: _int(j['rev'], 0),
+      revAvailable: j['revAvailable'] == true || j['available'] == true,
+      frozen: _boolOrNull(_pick(me, ['is_frozen', 'isFrozen'])),
+      frozenReason: _str(_pick(me, ['frozen_reason', 'frozenReason'])),
+      level: me.containsKey('current_level') || me.containsKey('currentLevel')
+          ? _str(_pick(me, ['current_level', 'currentLevel']))
+          : null,
+      activated: _boolOrNull(_pick(me, ['is_activated', 'isActivated'])),
+    );
+  }
+
+  SessionPulse copyWith({bool? alive}) => SessionPulse(
+        alive: alive ?? this.alive,
+        rev: rev,
+        revAvailable: revAvailable,
+        frozen: frozen,
+        frozenReason: frozenReason,
+        level: level,
+        activated: activated,
+      );
+
+  /// Whether this pulse says anything about the student at all.
+  bool get knowsStanding => frozen != null || level != null || activated != null;
+}
+
+/// The one number that moves whenever ANYTHING changes on the backend.
+///
+/// Bumped by a database trigger on every write to every content table,
+/// so it catches what no per-course comparison can: a course deleted, a
+/// level switched off, a setting flipped, a question moved between
+/// courses, an announcement withdrawn — and every DELETE anywhere,
+/// which no `updated_at` can see.
+///
+/// [available] is false when migration 0014 has not been applied. The
+/// app then falls back to comparing the manifest, which is what it did
+/// before this existed: slower to notice, never wrong.
+@immutable
+class ContentRevision {
+  final int rev;
+  final bool available;
+
+  const ContentRevision({this.rev = 0, this.available = false});
+
+  factory ContentRevision.fromJson(Map<String, dynamic> j) => ContentRevision(
+        rev: _int(j['rev'], 0),
+        available: j['revAvailable'] == true || j['available'] == true,
+      );
+
+  /// Whether the backend has moved on from what this phone last saw.
+  /// Unknown counts as "yes, go and look" — a missed change is worse
+  /// than a wasted manifest read.
+  bool movedFrom(int held) => !available || rev <= 0 || rev != held;
 }
 
 /// One page of a course download.
@@ -1361,6 +1547,46 @@ class CourseBundlePage {
   }
 
   bool get isEmpty => materials.isEmpty && questions.isEmpty;
+}
+
+/// What a course still publishes, so the phone can drop what it does
+/// not.
+///
+/// The withheld ids are in here on purpose. Knowing that an id EXISTS
+/// discloses nothing — the app still cannot fetch the question, the
+/// options, the key or the explanation — and without them the app
+/// cannot tell "the server withheld this because it is on a test" from
+/// "the server no longer has this", so it would delete the wrong ones.
+@immutable
+class CourseIndex {
+  final Set<String> questionIds;
+  final Set<String> materialIds;
+
+  /// False when a read failed. A partial list must never be pruned
+  /// against: that would empty the bank on a bad connection.
+  final bool complete;
+
+  const CourseIndex({
+    this.questionIds = const {},
+    this.materialIds = const {},
+    this.complete = false,
+  });
+
+  factory CourseIndex.fromJson(Map<String, dynamic> j) => CourseIndex(
+        questionIds: _ids(_pick(j, ['question_ids', 'questionIds'])),
+        materialIds: _ids(_pick(j, ['material_ids', 'materialIds'])),
+        complete: j['complete'] == true,
+      );
+
+  static Set<String> _ids(dynamic v) {
+    if (v is! List) return const {};
+    return v
+        .map((e) => '$e')
+        .where((e) => e.isNotEmpty && e != 'null')
+        .toSet();
+  }
+
+  bool get isUsable => complete && questionIds.isNotEmpty;
 }
 
 @immutable

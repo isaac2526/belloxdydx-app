@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 
 import '../../core/providers.dart';
 import '../../data/models.dart';
@@ -91,9 +92,33 @@ class CourseDownloadCard extends ConsumerWidget {
               ],
             ),
           ],
-          if (!running && state.held) ...[
+          if (!running) ...[
             const SizedBox(height: BxSpace.xs),
-            Text(_held(state), style: BxType.tiny(c.muted)),
+            // TUTOR BELLO'S date, not the student's.
+            //
+            // "subject last updated from Bello o not the download" —
+            // everywhere in this app that showed a date showed the
+            // moment the STUDENT last pressed something. That answers a
+            // question nobody asked. What a student wants to know about
+            // a course is how fresh the material is, and only Tutor
+            // Bello can move that.
+            if (_bello(state) != null)
+              Row(
+                children: [
+                  Icon(Icons.edit_calendar_rounded, size: 13, color: c.muted),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      'Tutor Bello last updated this ${_when(_bello(state)!)}',
+                      style: BxType.tiny(c.muted),
+                    ),
+                  ),
+                ],
+              ),
+            if (state.held) ...[
+              const SizedBox(height: 2),
+              Text(_held(state), style: BxType.tiny(c.muted)),
+            ],
           ],
           if (!running && state.message != null) ...[
             const SizedBox(height: BxSpace.xs),
@@ -148,6 +173,14 @@ class CourseDownloadCard extends ConsumerWidget {
           'downloaded it. Update and it is yours offline again.';
     }
     if (s.held) {
+      // Tutor Bello can switch the offline question bank off for the
+      // whole estate. Claiming questions the phone was never allowed to
+      // fetch is the kind of small lie that costs a student a round in
+      // a lecture hall with no signal.
+      if (s.questions == 0) {
+        return 'Every note, file and picture on this course is on this '
+            'phone. Questions stay online for now.';
+      }
       return 'Every note, file, picture and question on this course is on '
           'this phone. Practise with your data off.';
     }
@@ -166,6 +199,29 @@ class CourseDownloadCard extends ConsumerWidget {
     }
     return '${bits.join(' and ')}, with every picture and voice note inside '
         'them, saved to this phone.';
+  }
+
+  /// When Tutor Bello last touched this course.
+  ///
+  /// Read from the phone's own record, which the downloader keeps in
+  /// step with the manifest — so the date is still there with the data
+  /// off, which is exactly when a student wants to know how old their
+  /// copy is.
+  DateTime? _bello(CourseDownloadState s) =>
+      s.updatedAt.isEmpty ? null : DateTime.tryParse(s.updatedAt);
+
+  /// A date a student reads without doing arithmetic. "Today" and
+  /// "yesterday" are what they would say out loud; past that, the day
+  /// itself.
+  static String _when(DateTime t) {
+    final now = DateTime.now();
+    final day = DateTime(t.year, t.month, t.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final days = today.difference(day).inDays;
+    if (days <= 0) return 'today';
+    if (days == 1) return 'yesterday';
+    if (days < 7) return '$days days ago';
+    return 'on ${DateFormat('d MMM').format(t)}';
   }
 
   String _held(CourseDownloadState s) {
