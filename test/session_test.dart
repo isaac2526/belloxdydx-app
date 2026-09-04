@@ -22,6 +22,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   themeDefaults();
   maintenanceMode();
+  theReconnectRule();
 
   group('Stream.periodic, the shape that broke login', () {
     test('a non-nullable stream with no computation throws immediately', () {
@@ -279,6 +280,110 @@ void maintenanceMode() {
       expect(again.maintenance, isTrue);
       expect(again.maintenanceMessage, 'Back soon');
       expect(again.lockMinutes, 9);
+    });
+  });
+}
+
+/// ============================================================
+/// THE ONE THING A FROZEN STUDENT COULD ALWAYS DO
+///
+/// Freezing an account is Tutor Bello's only sanction and it was
+/// trivially defeated: turn the data off and keep the whole paid app
+/// for ever. Nothing on the phone and nothing on the server could
+/// detect it, because the phone never had to come back.
+///
+/// The rule that closes it decides whether a student is shut out of
+/// material they have already paid for and already downloaded, so it is
+/// pinned down here exactly. Too loose and the sanction means nothing;
+/// too tight and a student with no bundle loses what they bought.
+/// ============================================================
+void theReconnectRule() {
+  group('when the app must hear from the server before going on', () {
+    final now = DateTime(2026, 9, 4, 12);
+    int msAgo(Duration d) => now.subtract(d).millisecondsSinceEpoch;
+
+    test('three weeks of silence on a paid account stops the app', () {
+      expect(
+        bxNeedsReconnect(
+          activated: true,
+          lastCheckInMs: msAgo(const Duration(days: 22)),
+          now: now,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a fortnight of silence does not', () {
+      // A whole semester break with no data must still open the app.
+      expect(
+        bxNeedsReconnect(
+          activated: true,
+          lastCheckInMs: msAgo(const Duration(days: 14)),
+          now: now,
+        ),
+        isFalse,
+      );
+    });
+
+    test('a student who has not paid is never gated', () {
+      // They hold nothing worth withholding, and shutting them out
+      // punishes the wrong person entirely.
+      expect(
+        bxNeedsReconnect(
+          activated: false,
+          lastCheckInMs: msAgo(const Duration(days: 400)),
+          now: now,
+        ),
+        isFalse,
+      );
+    });
+
+    test('an install with no clock yet is never gated', () {
+      // The first launch after the update that added this. Reading a
+      // missing value as "silent since 1970" would lock out every paying
+      // student in the estate on upgrade day.
+      expect(
+        bxNeedsReconnect(activated: true, lastCheckInMs: 0, now: now),
+        isFalse,
+      );
+      expect(
+        bxNeedsReconnect(activated: true, lastCheckInMs: -1, now: now),
+        isFalse,
+      );
+    });
+
+    test('a phone with a clock set into the future is not gated', () {
+      // Cheap phones lose their clock on a flat battery and come back
+      // in 2036. That is a broken clock, not a frozen student.
+      expect(
+        bxNeedsReconnect(
+          activated: true,
+          lastCheckInMs: now.add(const Duration(days: 900))
+              .millisecondsSinceEpoch,
+          now: now,
+        ),
+        isFalse,
+      );
+    });
+
+    test('the boundary is a real boundary, not an off-by-one', () {
+      expect(
+        bxNeedsReconnect(
+          activated: true,
+          lastCheckInMs: msAgo(const Duration(days: 21)),
+          now: now,
+        ),
+        isFalse,
+        reason: 'exactly three weeks is still inside the allowance',
+      );
+      expect(
+        bxNeedsReconnect(
+          activated: true,
+          lastCheckInMs: msAgo(const Duration(days: 21, minutes: 1)),
+          now: now,
+        ),
+        isTrue,
+      );
     });
   });
 }

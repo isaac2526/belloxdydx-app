@@ -184,4 +184,10 @@ abstract final class BxKeys {
   static const contentRev = 'bx_content_rev';
   static const cachedContent = 'content';
   static const cachedDashboard = 'dashboard';
+
+  /// The last moment the server actually answered a question about this
+  /// student's own standing. Not the last sync, not the last screen —
+  /// the last time the backend confirmed who they are and whether the
+  /// account is still in good standing.
+  static const lastCheckIn = 'bx_last_check_in';
 }

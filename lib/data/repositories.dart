@@ -473,10 +473,12 @@ class AuthRepository {
       _standing ??= (_b.isDirect ? _directStanding() : _legacyStanding())
           .asBroadcastStream();
 
-  /// One check-in, now, rather than waiting for the timer. Used by the
-  /// journey harness to prove the mechanism without driving a
+  /// One check-in, now, rather than waiting for the timer.
+  ///
+  /// Used by the reconnect screen — a student who has been out of
+  /// contact too long taps once and is let straight back in — and by
+  /// the journey harness, which proves the mechanism without driving a
   /// three-minute clock.
-  @visibleForTesting
   Future<SessionPulse> standingNow() =>
       _b.isDirect ? _directPulse() : _pulse();
 

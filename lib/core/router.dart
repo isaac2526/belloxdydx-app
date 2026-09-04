@@ -7,6 +7,7 @@ import '../features/announcements/announcements_screen.dart';
 import '../features/auth/activate_screen.dart';
 import '../features/auth/forgot_screen.dart';
 import '../features/auth/frozen_screen.dart';
+import '../features/auth/reconnect_screen.dart';
 import '../features/auth/login_screen.dart';
 import '../features/auth/onboarding_screen.dart';
 import '../features/security/device_check_screen.dart';
@@ -57,6 +58,7 @@ abstract final class Routes {
   static const reset = '/reset-password';
   static const activate = '/activate';
   static const frozen = '/frozen';
+  static const reconnect = '/reconnect';
   static const deviceCheck = '/new-device';
 
   static const home = '/';
@@ -250,6 +252,7 @@ class _RouteMemory {
       // come back to.
       if (loc == Routes.welcome ||
           loc == Routes.frozen ||
+          loc == Routes.reconnect ||
           loc == Routes.deviceCheck) {
         _done = true;
         return;
@@ -322,6 +325,14 @@ final routerProvider = Provider<GoRouter>((ref) {
         return loc == Routes.frozen ? null : Routes.frozen;
       }
 
+      // A paid account the server has not confirmed in three weeks asks
+      // for one moment of connection. Below the cold room deliberately:
+      // a student who IS frozen belongs in the cold room, where the
+      // reason Tutor Bello wrote is waiting for them.
+      if (session.status == SessionStatus.mustReconnect) {
+        return loc == Routes.reconnect ? null : Routes.reconnect;
+      }
+
       // Signed in: the auth doors are closed behind them.
       if (loc == Routes.splash ||
           loc == Routes.onboarding ||
@@ -329,6 +340,7 @@ final routerProvider = Provider<GoRouter>((ref) {
           loc == Routes.login ||
           loc == Routes.register ||
           loc == Routes.deviceCheck ||
+          loc == Routes.reconnect ||
           loc == Routes.frozen) {
         return Routes.home;
       }
@@ -347,6 +359,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.forgot, builder: (_, __) => const ForgotScreen()),
       GoRoute(path: Routes.reset, builder: (_, __) => const ResetScreen()),
       GoRoute(path: Routes.frozen, builder: (_, __) => const FrozenScreen()),
+      GoRoute(
+          path: Routes.reconnect,
+          builder: (_, __) => const ReconnectScreen()),
       GoRoute(
           path: Routes.deviceCheck,
           builder: (_, __) => const DeviceCheckScreen()),

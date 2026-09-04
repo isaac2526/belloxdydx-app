@@ -439,6 +439,12 @@ class SessionNotifier extends StateNotifier<SessionState>
     _lastResumeWork = now;
     unawaited(() async {
       try {
+        // Ask about the student's OWN standing first. A freeze, an
+        // unfreeze, a level change or three weeks of silence all land
+        // here, before any content work — which is what makes picking
+        // the phone up obey Tutor Bello rather than waiting out the
+        // three-minute pulse.
+        await checkInNow();
         await _ref
             .read(syncStatusProvider.notifier)
             .start(level: state.profile?.currentLevel);
@@ -449,6 +455,10 @@ class SessionNotifier extends StateNotifier<SessionState>
         await _ref.read(courseStampsProvider.notifier).refresh();
       } catch (e) {
         debugPrint('[resume] refresh skipped: $e');
+      } finally {
+        // Even a failed refresh has to re-apply the gate: the failure
+        // may be exactly the silence the gate exists to catch.
+        applySilenceGate();
       }
     }());
   }
@@ -590,6 +600,11 @@ class SessionNotifier extends StateNotifier<SessionState>
       return;
     }
     state = p.isFrozen ? SessionState.frozen(p) : SessionState.active(p);
+    // A paid account the server has not confirmed in three weeks stops
+    // at the reconnect wall. Checked here so it applies on a cold start
+    // too, not only on a resume — going offline and killing the app is
+    // the obvious way round a resume-only check.
+    applySilenceGate();
     if (!first) return;
     _ref.read(appLockProvider.notifier).hasSession = true;
     _listenForSupersede();
@@ -797,6 +812,10 @@ class SessionNotifier extends StateNotifier<SessionState>
     final p = state.profile;
     if (p == null || !pulse.knowsStanding) return;
 
+    // The server has just answered a question about this student, so
+    // the silence clock resets. See [_staleFor] for why one exists.
+    _markCheckedIn();
+
     final frozen = pulse.frozen;
     if (frozen != null && frozen != p.isFrozen) {
       // Both directions. Unfreezing has to land as fast as freezing, or
@@ -823,6 +842,82 @@ class SessionNotifier extends StateNotifier<SessionState>
       // The shelf they are looking at is the wrong one.
       _adopt(p.copyWith(currentLevel: level));
       unawaited(_backendChanged());
+    }
+  }
+
+  /// Freezing an account is Tutor Bello's only sanction, and it was
+  /// trivially defeated: turn the data off and keep the whole paid app
+  /// for ever. Nothing on the phone and nothing on the server could
+  /// detect it, because the phone never had to come back.
+  ///
+  /// The window in [bxNeedsReconnect] is deliberately long. A student
+  /// who genuinely cannot buy data for three weeks is the student this
+  /// app exists for, and what the gate asks for is one moment of
+  /// connection — not a download, not a sync, one call — so nobody is
+  /// locked out of material they already hold for want of a bundle.
+  void _markCheckedIn() {
+    unawaited(_ref.read(localStoreProvider).setInt(
+          BxKeys.lastCheckIn,
+          DateTime.now().millisecondsSinceEpoch,
+        ));
+  }
+
+  /// True when this account has been out of contact long enough that
+  /// the app must hear from the server before going any further.
+  ///
+  /// Only ever applies to an ACTIVATED account: a student who has not
+  /// paid has nothing worth gating, and locking them out would be
+  /// punishing the wrong person.
+  bool _tooLongSilent() {
+    final p = state.profile;
+    if (p == null) return false;
+    final at = _ref.read(localStoreProvider).getInt(BxKeys.lastCheckIn);
+    // Never recorded: this install has not seen the new build yet.
+    // Start the clock rather than locking them out on the first launch
+    // after an update.
+    if (at == 0 && p.isActivated) {
+      _markCheckedIn();
+      return false;
+    }
+    return bxNeedsReconnect(
+      activated: p.isActivated,
+      lastCheckInMs: at,
+      now: DateTime.now(),
+    );
+  }
+
+  /// Puts the app behind the reconnect wall, or takes it back down.
+  ///
+  /// Called on resume and after each pulse, so a student who reconnects
+  /// is let straight back in without restarting anything.
+  void applySilenceGate() {
+    if (!mounted) return;
+    final p = state.profile;
+    if (p == null) return;
+    if (state.status == SessionStatus.active && _tooLongSilent()) {
+      state = SessionState.mustReconnect(p);
+    } else if (state.status == SessionStatus.mustReconnect &&
+        !_tooLongSilent()) {
+      state = SessionState.active(p);
+    }
+  }
+
+  /// Asks the server, once, on behalf of the reconnect screen.
+  ///
+  /// Returns true when the backend answered — whatever it said. A
+  /// frozen answer lands through the normal path and moves the student
+  /// to the cold room, which is the right destination.
+  Future<bool> checkInNow() async {
+    try {
+      final pulse = await _ref.read(authRepoProvider).standingNow();
+      if (!pulse.knowsStanding) return false;
+      _onPulse(pulse);
+      if (!mounted) return true;
+      applySilenceGate();
+      return true;
+    } catch (e) {
+      debugPrint('[standing] check-in failed: $e');
+      return false;
     }
   }
 
@@ -949,6 +1044,10 @@ class SessionNotifier extends StateNotifier<SessionState>
     // have been shown to whoever signed in next on this phone.
     _ref.read(contentRepoProvider).forget();
     _ref.invalidate(contentProvider);
+    // The silence clock belongs to the student who just left. Carrying
+    // it over would put the next student on this phone behind the
+    // reconnect wall for something they had nothing to do with.
+    unawaited(_ref.read(localStoreProvider).setInt(BxKeys.lastCheckIn, 0));
     await _auth.signOut();
     state = SessionState.signedOut(message: reason);
   }
@@ -976,6 +1075,33 @@ class SessionNotifier extends StateNotifier<SessionState>
   }
 }
 
+/// The whole of the reconnect rule, with nothing around it.
+///
+/// Kept as a plain function so it can be pinned down exactly: this
+/// decides whether a student is shut out of material they have already
+/// paid for and already downloaded, and getting it wrong in either
+/// direction is expensive. Too loose and a frozen account keeps the app
+/// for ever by staying offline; too tight and a student with no data
+/// bundle loses what they paid for.
+bool bxNeedsReconnect({
+  required bool activated,
+  required int lastCheckInMs,
+  required DateTime now,
+  Duration allowed = const Duration(days: 21),
+}) {
+  // Nothing to gate. A student who has not paid has nothing worth
+  // withholding, and locking them out punishes the wrong person.
+  if (!activated) return false;
+  // No clock yet — an install that predates this rule. The caller
+  // starts the clock; it must never be read as three weeks of silence.
+  if (lastCheckInMs <= 0) return false;
+  final last = DateTime.fromMillisecondsSinceEpoch(lastCheckInMs);
+  // A stamp from the future is a phone with a wrong clock, not a
+  // student in good standing and not one in bad. Let them through.
+  if (last.isAfter(now)) return false;
+  return now.difference(last) > allowed;
+}
+
 enum SessionStatus {
   unknown,
   signedOut,
@@ -988,6 +1114,10 @@ enum SessionStatus {
 
   active,
   frozen,
+
+  /// Signed in and paid, but the backend has not confirmed this
+  /// account's standing in three weeks. One connection clears it.
+  mustReconnect,
 }
 
 @immutable
@@ -1004,10 +1134,13 @@ class SessionState {
   const SessionState.deviceCheck(Profile p)
       : this._(SessionStatus.deviceCheck, p, null);
   const SessionState.frozen(Profile p) : this._(SessionStatus.frozen, p, null);
+  const SessionState.mustReconnect(Profile p)
+      : this._(SessionStatus.mustReconnect, p, null);
 
   bool get isSignedIn =>
       status == SessionStatus.active ||
       status == SessionStatus.frozen ||
+      status == SessionStatus.mustReconnect ||
       status == SessionStatus.deviceCheck;
   bool get isActivated => profile?.isActivated ?? false;
   bool get isReady => status != SessionStatus.unknown;
