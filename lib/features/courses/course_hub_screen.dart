@@ -8,6 +8,7 @@ import '../../data/models.dart';
 import '../../data/repositories.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
+import 'course_download_card.dart';
 
 /// ============================================================
 /// THE COURSE HUB
@@ -114,10 +115,9 @@ class _CourseHubScreenState extends ConsumerState<CourseHubScreen> {
   }
 
   Future<void> _refresh(String? courseId) async {
-    ref.invalidate(contentProvider);
     if (courseId != null) ref.invalidate(testsForCourseProvider(courseId));
     try {
-      await ref.read(contentProvider.future);
+      await refreshContent(ref);
     } catch (e) {
       if (!mounted) return;
       bxToast(context, _friendly(e), error: true);
@@ -133,8 +133,12 @@ class _CourseHubScreenState extends ConsumerState<CourseHubScreen> {
 
     setState(() => _startingPractice = true);
     try {
-      final attemptId =
-          await ref.read(assessmentRepoProvider).startPractice(course.id);
+      // Falls back to this phone's own bank when the server cannot be
+      // reached — which is the whole reason the Download button below
+      // exists.
+      final attemptId = await ref
+          .read(assessmentRepoProvider)
+          .startPracticeOrOffline(course.id);
       if (!mounted) return;
       await context.push(Routes.practice(attemptId));
     } catch (e) {
@@ -263,6 +267,7 @@ class _CourseHubScreenState extends ConsumerState<CourseHubScreen> {
                 onAction: () => context.push(Routes.activate),
               ),
             _practicePanel(context, course, activated),
+            if (activated) CourseDownloadCard(course: course),
             if (live.isNotEmpty)
               _sectionGrid(context, repo, course, live, activated)
             else

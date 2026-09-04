@@ -1,9 +1,34 @@
 name: Build Belloxdydx
 
+# WHAT COSTS MONEY, AND WHAT DOES NOT.
+#
+# A private repository gets 2,000 free Actions minutes a month, and the
+# macOS runner is billed at TEN TIMES the clock. One full build here was
+# measured at 56 billable minutes — 2 for the tests, 14 for Android, and
+# 40 for four real minutes of iOS. Every push was firing all three, so
+# thirty-five pushes emptied the month.
+#
+# Now: the tests run on every push, because they are 2 minutes and they
+# are the safety net. The installable files are built when Tutor Bello
+# ASKS for them — the "Run workflow" button on the Actions tab, or a
+# version tag. A normal day of work costs 2 minutes instead of 56.
 on:
   push:
     branches: ["**"]
+    # Tagging a version always builds everything.
+    tags: ["v*"]
+  # Press "Run workflow" on the Actions tab. Android is on by default;
+  # iOS is the expensive one, so it is a box you tick.
   workflow_dispatch:
+    inputs:
+      android:
+        description: "Build the Android APK and Play Store bundle"
+        type: boolean
+        default: true
+      ios:
+        description: "Build the unsigned iOS IPA (costs 10x the minutes)"
+        type: boolean
+        default: false
 
 concurrency:
   group: build-${{ github.ref }}
@@ -20,6 +45,7 @@ jobs:
   analyze:
     name: Analyze & test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -34,8 +60,16 @@ jobs:
       - name: Analyze
         run: flutter analyze --no-fatal-infos
 
+      # Run in the students' own timezone, not the runner's UTC.
+      #
+      # Every student of this app is in Nigeria. A date bug that only
+      # appears at a non-zero UTC offset — and the "Tutor Bello last
+      # updated" line had exactly one — is invisible on a UTC runner
+      # and visible on every phone that matters.
       - name: Unit & widget tests
         run: flutter test --reporter expanded
+        env:
+          TZ: Africa/Lagos
 
   # ============================================================
   # Android — APK for direct install, AAB for the Play Store.
@@ -44,6 +78,12 @@ jobs:
     name: Android APK + AAB
     runs-on: ubuntu-latest
     needs: analyze
+    timeout-minutes: 30
+    # Only when asked for, or when a version is tagged.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.android ||
+      startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
@@ -51,6 +91,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          # The APK step measured twelve minutes, and most of that was
+          # Gradle downloading the same dependencies from scratch every
+          # single time. Caching them is one line and it is billed
+          # minutes, not seconds.
+          cache: gradle
 
       - uses: subosito/flutter-action@v2
         with:
@@ -93,11 +138,109 @@ jobs:
       - name: Brand icon
         run: dart run flutter_launcher_icons
 
+      # ============================================================
+      # ONE SIGNATURE, FOR EVER
+      #
+      # Nothing here was signing anything. `flutter build apk --release`
+      # with no signing config silently falls back to signingConfigs
+      # .debug, and the debug keystore is GENERATED FRESH on each CI
+      # runner - so every APK ever produced here carried a different
+      # signature. Android refuses to install an update signed by a
+      # different key, which is why a new build meant "uninstall the old
+      # one first", losing every student's downloaded course with it.
+      # The Play Store is stricter still: the first upload fixes the key
+      # for the life of the listing.
+      #
+      # The keystore lives in repository secrets, never in the repo -
+      # this repository is public, and a committed keystore would let
+      # anyone sign a fake Belloxdydx update.
+      #
+      # If the secrets are absent the build still runs, still produces
+      # an installable APK, and says loudly in the summary that the
+      # signature is throwaway. A silent fallback is how this went
+      # unnoticed in the first place.
+      - name: Release signing key
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "signed=false" >> $GITHUB_OUTPUT
+            {
+              echo "### ⚠️ UNSIGNED-FOR-RELEASE BUILD"
+              echo ""
+              echo "\`ANDROID_KEYSTORE_BASE64\` / \`ANDROID_KEYSTORE_PASSWORD\`"
+              echo "are not set, so this APK is signed with a throwaway debug"
+              echo "key. It installs, but students will have to UNINSTALL to"
+              echo "move to the next build, and it cannot go to the Play Store."
+            } >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          KEYSTORE="$PWD/android/bx-release.jks"
+          echo "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+          # Verify it decoded into a real keystore before trusting it. A
+          # truncated secret would otherwise fall through to a debug
+          # signature, which is the exact failure being fixed here.
+          keytool -list -keystore "$KEYSTORE" \
+            -storepass "$KEYSTORE_PASSWORD" > /dev/null
+          # storeFile is written ABSOLUTE on purpose. Gradle's file()
+          # inside the android { } block of app/build.gradle.kts
+          # resolves a relative path against android/app/, not android/,
+          # so "bx-release.jks" would look in the wrong directory and
+          # quietly fall back to the debug key.
+          cat > android/key.properties <<PROPS
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEYSTORE_PASSWORD
+          keyAlias=belloxdydx
+          storeFile=$KEYSTORE
+          PROPS
+          python3 tools/sign_gradle.py
+          echo "signed=true" >> $GITHUB_OUTPUT
+
       - name: Build APK
         run: flutter build apk --release --split-debug-info=build/symbols
 
+      # Proof, in the log, of which key actually signed it - so
+      # "consistent signature" is something the build demonstrates
+      # rather than something a comment claims.
+      - name: Show the signature that shipped
+        run: |
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          FP=$(keytool -printcert -jarfile "$APK" 2>/dev/null \
+                | grep -m1 "SHA256:" | tr -d ' ')
+          echo "$FP"
+          {
+            echo "### Signature"
+            if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+              echo "- Signed with the permanent Belloxdydx release key."
+              echo "- Every future build carries this same fingerprint, so"
+              echo "  students update in place and keep their downloads."
+            else
+              echo "- ⚠️ Throwaway debug key - see the warning above."
+            fi
+            echo "- \`$FP\`"
+          } >> $GITHUB_STEP_SUMMARY
+
       - name: Build Play Store bundle
         run: flutter build appbundle --release --split-debug-info=build/symbols
+
+      # A signature that silently reverted to debug is worse than a
+      # failed build: it ships, it installs, and it breaks every future
+      # update. So when a key was supplied, this proves it was used.
+      - name: The key must actually have been used
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          for f in build/app/outputs/flutter-apk/app-release.apk \
+                   build/app/outputs/bundle/release/app-release.aab; do
+            OUT=$(keytool -printcert -jarfile "$f" 2>/dev/null)
+            echo "$OUT" | grep -q "O=Belloxdydx" || {
+              echo "::error::$f was NOT signed with the Belloxdydx release key."
+              echo "$OUT" | head -20
+              exit 1
+            }
+            echo "ok: $(basename $f) carries the Belloxdydx release key"
+          done
 
       - name: Report sizes
         run: |
@@ -129,6 +272,16 @@ jobs:
     name: iOS unsigned IPA
     runs-on: macos-14
     needs: analyze
+    timeout-minutes: 30
+    # THE EXPENSIVE ONE. macOS bills at ten times the clock, so four
+    # real minutes here cost forty of the month's two thousand — 71% of
+    # a full build, for a file that cannot be installed on a normal
+    # iPhone without an Apple developer account anyway. It is off by
+    # default and ticked when it is actually wanted.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.ios ||
+      startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
@@ -153,14 +306,29 @@ jobs:
 
       - name: Capture handling for iOS
         run: |
-          # iOS cannot refuse a screenshot -- no API exists. What this
-          # AppDelegate does is what Apple actually allows: cover the
+          # iOS cannot refuse a screenshot -- no API exists. What these
+          # delegates do is what Apple actually allows: cover the
           # content while the screen is being RECORDED or mirrored, and
           # tell Dart after a still shot was taken so it can be
           # reported. native/ios is the source of truth; the generated
-          # shell's own file is replaced each build.
+          # shell's own files are replaced each build.
+          #
+          # BOTH files, and the scene delegate is the one that matters.
+          # The project declares UIApplicationSceneManifest, so the
+          # window belongs to the scene and the application delegate's
+          # `window` is nil -- which is why the method channel was never
+          # created on any iPhone. Copying only AppDelegate.swift, as
+          # this step used to, shipped that bug every build.
           cp native/ios/AppDelegate.swift ios/Runner/AppDelegate.swift
+          cp native/ios/SceneDelegate.swift ios/Runner/SceneDelegate.swift
           test -s ios/Runner/AppDelegate.swift
+          test -s ios/Runner/SceneDelegate.swift
+          # The scene delegate is only ever reached through this key, so
+          # a build whose Info.plist lost it would silently go back to
+          # having no native channel at all.
+          /usr/libexec/PlistBuddy -c \
+            "Print :UIApplicationSceneManifest:UISceneConfigurations" \
+            ios/Runner/Info.plist > /dev/null
 
       - run: flutter pub get
 

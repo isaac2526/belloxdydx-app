@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart';
+import '../../data/offline/course_downloader.dart';
 import '../../data/repositories.dart';
 import '../../ui/ui.dart';
 import '../shell/app_drawer.dart';
@@ -44,13 +46,8 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
       : 'That did not go through. Check your connection and try again.';
 
   Future<void> _refresh() async {
-    final level = ref.read(profileProvider).currentLevel;
     try {
-      await ref
-          .read(contentRepoProvider)
-          .loadContent(level: level, force: true);
-      ref.invalidate(contentProvider);
-      await ref.read(contentProvider.future);
+      await refreshContent(ref);
     } catch (e) {
       if (!mounted) return;
       bxToast(context, _friendly(e), error: true);
@@ -75,7 +72,7 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
           .loadContent(level: level.code, force: true);
       if (!mounted) return;
       ref.read(sessionProvider.notifier).setLevel(level.code);
-      ref.invalidate(contentProvider);
+      await refreshContent(ref);
       setState(() => _query = '');
       _search.clear();
     } catch (e) {
@@ -146,8 +143,35 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
                 c.title.toLowerCase().contains(q))
             .toList();
 
+    // A LEVEL TUTOR BELLO CLOSED.
+    //
+    // Deactivate a level on the website and it stops being published.
+    // Every student standing on it then asked for a shelf that no
+    // longer exists, got an empty one, and — because the switcher only
+    // appeared when there were two or more levels to choose from — lost
+    // the one control that could have moved them off it. They sat on
+    // "No courses on this level yet" for good.
+    //
+    // So the switcher shows whenever the student's own level is gone,
+    // however few are left, and the banner says what happened instead
+    // of letting them think Tutor Bello has uploaded nothing.
+    final known = repo.levels.map((l) => l.code).toSet();
+    final stranded = repo.levels.isNotEmpty && !known.contains(level);
+
     final blocks = <Widget>[
-      if (repo.levels.length > 1) _levelSwitcher(context, repo.levels, level),
+      if (stranded)
+        BxBanner(
+          title: '$level level is closed',
+          message: repo.levels.length == 1
+              ? 'Tutor Bello has closed this level. Tap '
+                  '${_levelName(repo.levels.first)} below to carry on.'
+              : 'Tutor Bello has closed this level. Pick the one you are '
+                  'on below and your shelf comes back.',
+          icon: Icons.school_outlined,
+          accent: BxAccent.warning,
+        ),
+      if (repo.levels.length > 1 || stranded)
+        _levelSwitcher(context, repo.levels, level),
       if (all.length > _searchThreshold)
         BxSearchField(
           controller: _search,
@@ -156,7 +180,10 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
         ),
     ];
 
-    if (all.isEmpty) {
+    if (all.isEmpty && stranded) {
+      // The banner above already says what happened; a second empty
+      // state blaming Tutor Bello for not uploading would contradict it.
+    } else if (all.isEmpty) {
       blocks.add(
         BxEmptyState(
           icon: Icons.menu_book_rounded,
@@ -244,7 +271,7 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
             children: [
               for (final l in levels)
                 BxChip(
-                  l.title.isEmpty ? '${l.code} Level' : l.title,
+                  _levelName(l),
                   selected: l.code == current,
                   icon: l.owned ? null : Icons.lock_outline_rounded,
                   onTap: _switching ? null : () => _switchLevel(l),
@@ -255,6 +282,9 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
       ],
     );
   }
+
+  static String _levelName(StudyLevel l) =>
+      l.title.isEmpty ? '${l.code} Level' : l.title;
 
   static String _semesterLabel(int semester) => switch (semester) {
         1 => 'First semester',
@@ -277,15 +307,22 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
   }
 }
 
-class _CourseCard extends StatelessWidget {
+class _CourseCard extends ConsumerWidget {
   final Course course;
   final String counts;
 
   const _CourseCard({required this.course, required this.counts});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.bx;
+    // Read, not watched into a download: this row only ever REPORTS.
+    // Watching the family here is what puts a live badge on a shelf of
+    // twenty courses without any of them costing a request.
+    final download = ref.watch(courseDownloadProvider(course.id));
+    // When TUTOR BELLO last changed this course. Not when the student
+    // downloaded it — that is a different question and nobody asks it.
+    final stamp = ref.watch(courseStampsProvider)[course.id];
     return BxCard(
       onTap: () => context.push(Routes.course(Uri.encodeComponent(course.code))),
       child: Row(
@@ -308,6 +345,16 @@ class _CourseCard extends StatelessWidget {
                 ),
                 const SizedBox(height: BxSpace.xxs),
                 Text(counts, style: BxType.tiny(c.muted)),
+                if (stamp?.updatedAt != null)
+                  Text(
+                    'Tutor Bello last updated '
+                    '${bxBelloDate(stamp!.updatedAt!)}',
+                    style: BxType.tiny(c.muted),
+                  ),
+                if (download.held || download.isRunning) ...[
+                  const SizedBox(height: BxSpace.xs),
+                  _offlineChip(download),
+                ],
               ],
             ),
           ),
@@ -315,6 +362,34 @@ class _CourseCard extends StatelessWidget {
           Icon(Icons.chevron_right_rounded, size: 22, color: c.muted),
         ],
       ),
+    );
+  }
+
+  Widget _offlineChip(CourseDownloadState s) {
+    if (s.isRunning) {
+      return BxChip(
+        s.total > 0 ? 'Downloading ${(s.progress * 100).round()}%'
+            : 'Downloading',
+        icon: Icons.downloading_rounded,
+        dense: true,
+      );
+    }
+    if (s.updateAvailable) {
+      // Short on purpose. The full sentence lives on the course itself,
+      // where there is room for it; here it shares a row with the
+      // course code and title on phones as narrow as 320dp.
+      return const BxChip(
+        'Update ready',
+        accent: BxAccent.warning,
+        icon: Icons.sync_problem_rounded,
+        dense: true,
+      );
+    }
+    return const BxChip(
+      'Works offline',
+      accent: BxAccent.success,
+      icon: Icons.offline_pin_rounded,
+      dense: true,
     );
   }
 }

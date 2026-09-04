@@ -35,6 +35,28 @@ class AuthRepository {
   Profile? _cached;
   Profile? get cachedProfile => _cached;
 
+  /// The student this phone was signed in as last time, read with no
+  /// await at all so boot can show them their own app in the first
+  /// frame instead of a splash screen.
+  ///
+  /// Returns null on a fresh install, after a sign-out, and after a
+  /// sign-in that never completed — every case where showing somebody
+  /// a dashboard would be a lie.
+  Profile? rememberedProfile() {
+    try {
+      final raw = _store.readJsonSync(BxKeys.cachedProfile);
+      if (raw == null) return null;
+      final p = Profile.fromJson(raw);
+      return p.id.isEmpty ? null : p;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Seeds the in-memory profile from the remembered one, so the first
+  /// screen and the first request agree about who is using the app.
+  void adopt(Profile p) => _cached ??= p;
+
   String deviceId() {
     var id = _store.getString(BxKeys.deviceId);
     if (id == null || id.isEmpty) {
@@ -46,6 +68,19 @@ class AuthRepository {
   }
 
   Stream<AuthState> get authChanges => _b.auth.onAuthStateChange;
+
+  /// Fires only when the auth client itself lets the session go — an
+  /// expired or revoked refresh token — never for a network failure,
+  /// which Supabase reports separately and retries.
+  ///
+  /// This is the ONE signal allowed to end a live session on its own.
+  /// Everything else the app might read as "signed out" (a timeout, a
+  /// 401 from a website route, an unreachable profile) is a guess, and
+  /// acting on a guess is how a student on a bad line gets thrown back
+  /// to the login screen mid-question.
+  Stream<void> get sessionEnded => _b.auth.onAuthStateChange
+      .where((s) => s.event == AuthChangeEvent.signedOut && s.session == null)
+      .map((_) {});
   bool get signedIn => _b.signedIn;
 
   /// Accepts an email OR a username. A username is resolved to its email
@@ -307,7 +342,8 @@ class AuthRepository {
       final rows = await _b.select('profiles', eq: {'id': uid}, limit: 1);
       if (rows.isNotEmpty) {
         _cached = Profile.fromJson(rows.first);
-        await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson());
+        await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson(),
+            mirror: true);
         await _store.setBool(BxKeys.activated, _cached!.isActivated);
         return _cached!;
       }
@@ -322,12 +358,18 @@ class AuthRepository {
           ? Map<String, dynamic>.from(r['profile'])
           : r;
       _cached = Profile.fromJson(raw);
-      await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson());
+      await _store.writeJson(BxKeys.cachedProfile, _cached!.toJson(),
+          mirror: true);
       return _cached!;
     } catch (_) {
       final cachedRaw = await _store.readJson(BxKeys.cachedProfile);
       if (cachedRaw != null) {
         _cached = Profile.fromJson(cachedRaw);
+        // Upgrades from a build that only ever wrote the file get the
+        // synchronous copy here, so the NEXT launch is instant.
+        unawaited(
+          _store.writeJson(BxKeys.cachedProfile, cachedRaw, mirror: true),
+        );
         return _cached!;
       }
       rethrow;
@@ -412,6 +454,138 @@ class AuthRepository {
   /// session the row changes and this device is pushed a logout
   /// instantly. Cheaper AND faster than polling.
   /// ------------------------------------------------------------
+  /// One check-in, feeding everything that needs one.
+  ///
+  /// On the legacy path this IS the heartbeat — the same three-minute
+  /// request that enforces the single-session rule now also carries the
+  /// content revision and the student's own standing, so learning that
+  /// an account was frozen costs nothing it was not already spending.
+  ///
+  /// On the direct path the session rule is a Realtime subscription
+  /// rather than a poll, so the standing gets its own timer: one cheap
+  /// RPC and one row read every three minutes.
+  ///
+  /// Broadcast and memoised, because two listeners must not become two
+  /// requests.
+  Stream<SessionPulse>? _standing;
+
+  Stream<SessionPulse> watchStanding() =>
+      _standing ??= (_b.isDirect ? _directStanding() : _legacyStanding())
+          .asBroadcastStream();
+
+  /// One check-in, now, rather than waiting for the timer.
+  ///
+  /// Used by the reconnect screen — a student who has been out of
+  /// contact too long taps once and is let straight back in — and by
+  /// the journey harness, which proves the mechanism without driving a
+  /// three-minute clock.
+  Future<SessionPulse> standingNow() =>
+      _b.isDirect ? _directPulse() : _pulse();
+
+  Stream<SessionPulse> _legacyStanding() =>
+      Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
+          .asyncMap((_) => _pulse())
+          .handleError((_) => SessionPulse.unknown);
+
+  Stream<SessionPulse> _directStanding() =>
+      Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
+          .asyncMap((_) => _directPulse())
+          .handleError((_) => SessionPulse.unknown);
+
+  /// The legacy heartbeat, read for everything it now says.
+  Future<SessionPulse> _pulse() async {
+    // No token to present is not the same as a stolen session, and the
+    // website cannot tell them apart — /api/auth/heartbeat answers 401
+    // "superseded" whether another device took the row or the header was
+    // simply absent. So the app has to know the difference itself.
+    //
+    // Without this, any state that loses the token — a reinstall that
+    // kept the Supabase session, a cleared preference, a first launch
+    // after an upgrade that changed the key — reads as "somebody else
+    // signed in" and ejects a paying student.
+    if (_b.mobileSessionToken == null) {
+      try {
+        await _bindDevice();
+        return SessionPulse(alive: _b.mobileSessionToken != null);
+      } catch (e) {
+        // Could not re-bind (usually offline). Staying signed in is the
+        // right way to be wrong: the next successful bind settles it.
+        debugPrint('[session] could not re-bind: $e');
+        return SessionPulse.unknown;
+      }
+    }
+
+    try {
+      final r = await _b.apiGet('/api/auth/heartbeat', retries: 0);
+      return SessionPulse.fromJson(r);
+    } on BxError catch (e) {
+      if (e.code == 'unauthenticated') return const SessionPulse(alive: false);
+      return SessionPulse.unknown; // offline is not a crime
+    } catch (_) {
+      return SessionPulse.unknown;
+    }
+  }
+
+  /// The same three answers on the Supabase path, where there is no
+  /// heartbeat route to carry them.
+  Future<SessionPulse> _directPulse() async {
+    final uid = _b.userId;
+    if (uid == null) return SessionPulse.unknown;
+    try {
+      final rev = await _b.rpc('bx_revision');
+
+      // Whether this device still holds the session, answered by the
+      // SERVER rather than inferred from an empty Realtime snapshot.
+      //
+      // The watcher next door maps "no row" to "still mine" on purpose,
+      // and that reasoning is right — an empty result is also what a
+      // race looks like, and treating it as superseded logged people
+      // out at random the first time this ran. The cost was that a
+      // deliberate force-logout or device reset looked exactly like a
+      // race, so the student stayed signed in for ever while the admin
+      // panel said "Session killed ✓".
+      //
+      // bx_session_standing can tell them apart because bind writes
+      // user_devices and active_sessions together: a device row with no
+      // session row is a revocation, not a row that has not arrived
+      // yet. It answers 'unknown' whenever it cannot be certain, and
+      // nothing here signs anybody out on a guess.
+      var alive = true;
+      try {
+        final standing = await _b.rpc('bx_session_standing', params: {
+          'p_device_id': deviceId(),
+        });
+        final verdict = standing['verdict']?.toString();
+        if (verdict == 'superseded' || verdict == 'revoked') alive = false;
+      } catch (e) {
+        // An older database with no such function. The Realtime watcher
+        // still stands behind the single-session rule.
+        debugPrint('[session] standing check unavailable: $e');
+      }
+
+      Map<String, dynamic> me = const {};
+      try {
+        final rows = await _b.select('profiles',
+            columns: 'is_frozen, frozen_reason, current_level, is_activated',
+            eq: {'id': uid},
+            limit: 1);
+        if (rows.isNotEmpty) me = rows.first;
+      } catch (e) {
+        // RLS may decline; the revision half still stands on its own.
+        debugPrint('[session] standing unavailable: $e');
+      }
+      return SessionPulse.fromJson({
+        'ok': alive,
+        'rev': rev['rev'],
+        'revAvailable': true,
+        if (me.isNotEmpty) 'me': me,
+      });
+    } catch (e) {
+      debugPrint('[session] revision unavailable: $e');
+      return SessionPulse.unknown;
+    }
+  }
+
   Stream<bool> watchSession() {
     final uid = _b.userId;
     if (uid == null) return const Stream.empty();
@@ -444,47 +618,14 @@ class AuthRepository {
     // showed 45s buys nothing over 3 minutes for a rule that only has to
     // catch a second sign-in.
     //
-    // The tick type must be nullable, or carry a computation. Stream
-    // .periodic has nothing to emit without one, so for a non-nullable
-    // element type it throws from the constructor rather than at the
-    // first tick — which is how `Stream<bool>.periodic(...)` here stopped
-    // every student on the legacy path from ever finishing a login.
-    return Stream<int>.periodic(const Duration(minutes: 3), (tick) => tick)
-        .asyncMap((_) => _heartbeat())
-        .handleError((_) => true);
-  }
-
-  Future<bool> _heartbeat() async {
-    // No token to present is not the same as a stolen session, and the
-    // website cannot tell them apart — /api/auth/heartbeat answers 401
-    // "superseded" whether another device took the row or the header was
-    // simply absent. So the app has to know the difference itself.
-    //
-    // Without this, any state that loses the token — a reinstall that
-    // kept the Supabase session, a cleared preference, a first launch
-    // after an upgrade that changed the key — reads as "somebody else
-    // signed in" and ejects a paying student.
-    if (_b.mobileSessionToken == null) {
-      try {
-        await _bindDevice();
-        return _b.mobileSessionToken != null;
-      } catch (e) {
-        // Could not re-bind (usually offline). Staying signed in is the
-        // right way to be wrong: the next successful bind settles it.
-        debugPrint('[session] could not re-bind: $e');
-        return true;
-      }
-    }
-
-    try {
-      await _b.apiGet('/api/auth/heartbeat', retries: 0);
-      return true;
-    } on BxError catch (e) {
-      if (e.code == 'unauthenticated') return false;
-      return true; // offline is not a crime
-    } catch (_) {
-      return true;
-    }
+    // Derived from the SAME pulse the standing watcher reads, so the two
+    // are one request rather than two. (Historic note worth keeping: the
+    // tick type must be nullable or carry a computation — Stream.periodic
+    // has nothing to emit without one, so for a non-nullable element type
+    // it throws from the CONSTRUCTOR rather than at the first tick, which
+    // is how `Stream<bool>.periodic(...)` here once stopped every student
+    // on the legacy path from finishing a login.)
+    return watchStanding().map((p) => p.alive).handleError((_) => true);
   }
 
   Future<void> signOut() async {
@@ -508,6 +649,11 @@ class AuthRepository {
     _b.mobileSessionToken = null;
     await _store.remove(BxKeys.mobileSession);
     await _store.remove(BxKeys.activated);
+    // The screen this phone was going to reopen on belonged to whoever
+    // just left. Restoring it for the next student would push them into
+    // somebody else's practice attempt — which the server refuses, so
+    // what they would actually see is an error page on launch.
+    await _store.remove(BxKeys.lastRoute);
     await _store.clearCache();
   }
 }
@@ -540,8 +686,15 @@ class ContentRepository {
 
   /// One bootstrap that fills the course shelf and every material header.
   /// Falls back to the last good copy on disk so the app opens offline.
-  Future<void> loadContent({required String level, bool force = false}) async {
-    if (!force && _courses.isNotEmpty) return;
+  /// Loads the shelf for a level.
+  ///
+  /// Returns true only when the answer came from the SERVER. A cached
+  /// answer is still served — the app must keep working with the data
+  /// off — but the caller has to be able to tell the difference,
+  /// because "Last synced just now" after a run that never left the
+  /// phone is a lie the student acts on.
+  Future<bool> loadContent({required String level, bool force = false}) async {
+    if (!force && _courses.isNotEmpty) return false;
     try {
       if (_b.isDirect) {
         final r = await _b.rpc('bx_content', params: {'p_level': level});
@@ -558,20 +711,197 @@ class ContentRepository {
         }
         _ingest(r);
         await _store.writeJson(BxKeys.cachedContent, r);
-        return;
+        return true;
       }
       final r = await _b.apiGet('/api/mobile/content');
       final shielded = _b.shieldDeep(r) as Map<String, dynamic>;
       _ingest(shielded);
       await _store.writeJson(BxKeys.cachedContent, shielded);
+      return true;
     } catch (e) {
       final cached = await _store.readJson(BxKeys.cachedContent);
       if (cached != null) {
         _ingest(cached);
-        return;
+        return false;
       }
       if (_courses.isEmpty) rethrow;
+      return false;
     }
+  }
+
+  // ------------------------------------------------------------
+  // Downloading a whole course
+  // ------------------------------------------------------------
+
+  /// The one number that moves whenever ANYTHING changes on the
+  /// backend. One row, one column — cheap enough to ask on every
+  /// resume, which is the whole point of it existing.
+  ///
+  /// Answers "unavailable" rather than throwing when migration 0014 has
+  /// not been applied; the caller then falls back to comparing the
+  /// manifest, which is what it did before this existed.
+  Future<ContentRevision> revision() async {
+    try {
+      final r = _b.isDirect
+          ? await _b.rpc('bx_revision')
+          : await _b.apiGet('/api/mobile/revision', retries: 0);
+      return ContentRevision.fromJson({
+        ...r,
+        if (_b.isDirect) 'available': true,
+      });
+    } catch (e) {
+      debugPrint('[content] revision unavailable: $e');
+      return const ContentRevision();
+    }
+  }
+
+  /// How much of each course the server is publishing right now.
+  ///
+  /// The cheapest question the app asks, and the whole of the "there's
+  /// a change in this course, download now" badge. Deliberately not a
+  /// diff: a diff costs the server real work on every app open, and the
+  /// app has to fetch the changed rows anyway.
+  /// The revision the last manifest was read at, so the caller can tell
+  /// whether asking again could possibly say anything new.
+  int lastManifestRev = 0;
+
+  Future<List<CourseStamp>> manifest() async {
+    final r = _b.isDirect
+        ? await _b.rpc('bx_manifest')
+        : await _b.apiGet('/api/mobile/manifest');
+    lastManifestRev = ContentRevision.fromJson({
+      ...r,
+      if (_b.isDirect) 'available': true,
+    }).rev;
+    final rows = r['courses'];
+    if (rows is! List) return const [];
+    return rows
+        .whereType<Map>()
+        .map((e) => CourseStamp.fromJson(Map<String, dynamic>.from(e)))
+        .where((c) => c.id.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  /// One page of one course: materials with their bodies, questions
+  /// with their keys.
+  ///
+  /// [part] is 'all', 'materials' or 'questions'. The downloader walks
+  /// the two halves separately so a course with three materials and
+  /// nine hundred questions does not re-send the materials on every
+  /// page.
+  Future<CourseBundlePage> courseBundle(
+    String courseId, {
+    int offset = 0,
+    int limit = 200,
+    String part = 'all',
+  }) async {
+    final Map<String, dynamic> r;
+    if (_b.isDirect) {
+      r = await _b.rpc('bx_course_bundle', params: {
+        'p_course_id': courseId,
+        'p_offset': offset,
+        'p_limit': limit,
+        'p_part': part,
+      });
+      final err = r['error']?.toString();
+      if (err != null) throw BxError(_bundleMessage(err));
+    } else {
+      r = await _b.apiGet(
+        '/api/mobile/course-bundle?courseId=$courseId&offset=$offset'
+        '&limit=$limit&part=$part',
+      );
+    }
+    // Every storage URL in the payload goes through the shield, so an
+    // image inside a note body or a question resolves the same way it
+    // would have on the path the app is running.
+    return CourseBundlePage.fromJson(
+      _b.shieldDeep(r) as Map<String, dynamic>,
+    );
+  }
+
+  /// Every id the course still publishes, withheld ones included.
+  ///
+  /// This is what lets a download DROP what Tutor Bello withdrew. It
+  /// cannot be worked out from the bundle pages: those deliberately
+  /// hold back the questions pinned to a test, so "not sent" and "no
+  /// longer there" look identical from the app's side.
+  Future<CourseIndex> courseIndex(String courseId) async {
+    try {
+      final r = _b.isDirect
+          ? await _b.rpc('bx_course_ids', params: {'p_course_id': courseId})
+          : await _b.apiGet(
+              '/api/mobile/course-bundle?courseId=$courseId&part=ids');
+      if (r['error'] != null) return const CourseIndex();
+      return CourseIndex.fromJson({
+        ...r,
+        if (_b.isDirect) 'complete': r['complete'] ?? true,
+      });
+    } catch (e) {
+      // A list the app could not read must never be pruned against.
+      debugPrint('[content] course index unavailable: $e');
+      return const CourseIndex();
+    }
+  }
+
+  /// Whether a course the phone still holds has been withdrawn.
+  ///
+  /// "Not in the manifest" is NOT enough to answer this. The manifest is
+  /// filtered to the student's current level, so a course they simply
+  /// are not standing on right now looks exactly like one Tutor Bello
+  /// deleted — and deleting a student's downloaded material because
+  /// they switched level would be unforgivable.
+  ///
+  /// So it is asked directly. bx_course_ids and the ids route both look
+  /// only at is_visible, not at level, so `not_found` means genuinely
+  /// gone or hidden and anything else means it is still there.
+  ///
+  /// Returns null when the question could not be answered — offline, a
+  /// timeout — and null must never be treated as gone.
+  Future<bool?> isCourseWithdrawn(String courseId) async {
+    if (courseId.isEmpty) return null;
+    try {
+      if (_b.isDirect) {
+        final r = await _b.rpc('bx_course_ids', params: {
+          'p_course_id': courseId,
+        });
+        final err = r['error']?.toString();
+        if (err == 'not_found') return true;
+        if (err != null) return null;
+        return false;
+      }
+      final r = await _b.apiGet(
+        '/api/mobile/course-bundle?courseId=$courseId&part=ids',
+        retries: 0,
+      );
+      return r['error']?.toString() == 'not_found';
+    } on BxError catch (e) {
+      // 404 is an answer. Everything else is a failure to ask.
+      if (e.code == 'not_found') return true;
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _bundleMessage(String code) => switch (code) {
+        'not_found' => 'That course is not on your shelf.',
+        'not_activated' => 'Activate your account to download a course.',
+        _ => 'That course could not be downloaded.',
+      };
+
+  /// Throws the previous student's shelf away.
+  ///
+  /// The repository is a long-lived object and its lists are plain
+  /// fields, so signing out left the courses, the levels and the
+  /// SCREENSHOT POLICY of whoever just left sitting in memory — ready
+  /// to be shown to the next person to sign in on that phone, for as
+  /// long as it took the first content read to come back.
+  void forget() {
+    _courses = const [];
+    _materials = const [];
+    _levels = const [];
+    _policy = const AppPolicy();
+    lastManifestRev = 0;
   }
 
   void _ingest(Map<String, dynamic> r) {
@@ -682,18 +1012,50 @@ class ContentRepository {
       }
       return m;
     } catch (e) {
-      if (savedHtml != null) {
-        final header = _materials.where((m) => m.id == id).firstOrNull;
-        final saved = offline?.item(id);
-        return StudyMaterial(
-          id: id,
-          courseId: header?.courseId ?? saved?.courseId ?? '',
-          kind: header?.kind ?? MaterialKind.note,
-          title: header?.title ?? saved?.title ?? 'Saved note',
-          contentHtml: savedHtml,
-        );
-      }
-      rethrow;
+      final header = _materials.where((m) => m.id == id).firstOrNull;
+      final saved = offline?.item(id);
+
+      // A saved DOCUMENT counts, not only a saved note.
+      //
+      // This is the whole of "when I downloaded some pdf, it showed in
+      // the offline vault that it's downloaded, when I put off my
+      // internet connection it was saying that internet connection
+      // issues". The reader asks for the material before it asks for
+      // the file, and this fallback only ever recognised a note body —
+      // so a slide or a past question sitting complete on the disk
+      // threw a network error before anything got as far as looking at
+      // the disk. The file was always there. Nothing ever opened it.
+      if (savedHtml == null && saved?.hasDoc != true) rethrow;
+
+      return StudyMaterial(
+        id: id,
+        courseId: header?.courseId ?? saved?.courseId ?? '',
+        kind: header?.kind ??
+            (saved != null
+                ? materialKindOf(saved.kind)
+                : MaterialKind.note),
+        title: header?.title ??
+            saved?.title ??
+            (savedHtml != null ? 'Saved note' : 'Saved document'),
+        topic: header?.topic ?? '',
+        // The URL is carried through so a student who comes back online
+        // can still refresh, and so the office branch has something to
+        // hand to the viewer.
+        url: header?.url ?? '',
+        contentHtml: savedHtml ?? '',
+        // The date has to describe the BODY on this screen.
+        //
+        // `header` comes off the shelf, which refreshes from the server
+        // on its own. So a note Tutor Bello rewrote last night was
+        // stamped with last night's date over the copy from last month
+        // that the student is actually reading — the freshest-looking
+        // thing in the app was the one piece of it guaranteed to be
+        // stale. The saved copy's own signature is the truth about
+        // what is in front of them.
+        updatedAt: saved?.updatedAt ?? header?.updatedAt,
+        createdAt: header?.createdAt,
+        sortOrder: header?.sortOrder ?? 0,
+      );
     }
   }
 
@@ -759,6 +1121,14 @@ class AssessmentRepository {
   Future<String> startShareCode(String code) =>
       _start(mode: 'test', shareCode: code.toUpperCase());
 
+  /// Refuses a server-side start while the platform is closed.
+  ///
+  /// Set from the app policy on every resume. Deliberately narrow: it
+  /// stops things that need the SERVER, and leaves everything already
+  /// on the phone alone — a student practising a downloaded course
+  /// during a twenty-minute deploy should not be interrupted at all.
+  AppPolicy policyForStart = const AppPolicy();
+
   Future<String> _start({
     required String mode,
     String? courseId,
@@ -766,6 +1136,9 @@ class AssessmentRepository {
     String? shareCode,
     int count = 20,
   }) async {
+    if (policyForStart.maintenance) {
+      throw BxError(policyForStart.closedMessage, code: 'maintenance');
+    }
     if (_b.isDirect) {
       final r = await _b.rpc('bx_start_attempt', params: {
         'p_mode': mode,
@@ -812,6 +1185,29 @@ class AssessmentRepository {
         'not_found' => 'That test could not be found.',
         _ => 'Could not start. Try again.',
       };
+
+  /// Starts practice, and falls back to the phone's own bank when the
+  /// server cannot be reached.
+  ///
+  /// Only for a TRANSPORT failure. "This course has no questions loaded
+  /// yet" is a real answer from a reachable server and a student needs
+  /// to read it — quietly substituting a different round would hide the
+  /// thing they should be telling Tutor Bello about.
+  Future<String> startPracticeOrOffline(
+    String courseId, {
+    int count = 20,
+  }) async {
+    try {
+      return await startPractice(courseId, count: count);
+    } catch (e) {
+      final code = e is BxError ? e.code : null;
+      if (code != 'offline' && code != 'timeout') rethrow;
+      // The offline attempt's own message is the more useful one here:
+      // "no saved questions yet, download this course" beats "no
+      // internet connection", because the student can act on it.
+      return startOfflinePractice(courseId: courseId, count: count);
+    }
+  }
 
   Future<AttemptSession> openAttempt(String attemptId) async {
     // A round taken with no signal never reaches a server.
@@ -880,30 +1276,108 @@ class AssessmentRepository {
       return answerOffline(attemptId, questionId,
           choice: choice, answerText: answerText);
     }
-    if (_b.isDirect) {
-      final r = await _b.rpc('bx_answer', params: {
-        'p_attempt_id': attemptId,
-        'p_question_id': questionId,
-        'p_choice': choice.isEmpty ? null : choice,
-        'p_answer_text': answerText.isEmpty ? null : answerText,
+    try {
+      if (_b.isDirect) {
+        final r = await _b.rpc('bx_answer', params: {
+          'p_attempt_id': attemptId,
+          'p_question_id': questionId,
+          'p_choice': choice.isEmpty ? null : choice,
+          'p_answer_text': answerText.isEmpty ? null : answerText,
+        });
+        final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
+        // NOT awaited. Both of these are bookkeeping; neither is anything
+        // the student is waiting to see, and putting disk work between
+        // the tap and the right/wrong is how an answer starts to feel
+        // slow halfway through a semester.
+        unawaited(_rememberVerdict(questionId, verdict));
+        unawaited(_rememberAnswer(attemptId, questionId,
+            choice: choice, answerText: answerText, correct: verdict.correct));
+        return verdict;
+      }
+      final r = await _b.apiSend('/api/practice/answer', body: {
+        'attemptId': attemptId,
+        'questionId': questionId,
+        'choice': choice,
+        'answerText': answerText,
       });
       final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
-      await _rememberVerdict(questionId, verdict);
-      await _rememberAnswer(attemptId, questionId,
-          choice: choice, answerText: answerText, correct: verdict.correct);
+      unawaited(_rememberVerdict(questionId, verdict));
+      unawaited(_rememberAnswer(attemptId, questionId,
+          choice: choice, answerText: answerText, correct: verdict.correct));
       return verdict;
+    } catch (e) {
+      // THE LINE DROPPED MID-ROUND.
+      //
+      // "I left a practice questions I suppose to meet it back."
+      //
+      // The answer used to be thrown away with a toast about the
+      // connection: the tap did nothing, the round could not be
+      // continued, and everything before it was still only in the
+      // screen's memory. Three outcomes are possible here and losing
+      // the answer is the worst of them.
+      // `hasConnection` is nullable: null means the watcher has not
+      // reported yet, which is not the same as "there is a line". Only
+      // a positive true rules the fallback out.
+      if (_b.hasConnection == true) rethrow;
+      final saved = await _answerWithNoLine(attemptId, questionId,
+          choice: choice, answerText: answerText);
+      if (saved != null) return saved;
+      rethrow;
     }
-    final r = await _b.apiSend('/api/practice/answer', body: {
-      'attemptId': attemptId,
-      'questionId': questionId,
-      'choice': choice,
-      'answerText': answerText,
-    });
-    final verdict = AnswerVerdict.fromJson(_b.shieldDeep(r));
-    await _rememberVerdict(questionId, verdict);
-    await _rememberAnswer(attemptId, questionId,
-        choice: choice, answerText: answerText, correct: verdict.correct);
-    return verdict;
+  }
+
+  /// Keeps an answer the server could not be told about.
+  ///
+  /// Marks it here when the phone genuinely holds the key — which it
+  /// does on the website path, and on the direct path for any course
+  /// the student downloaded. When it does not, the answer is still
+  /// written down and comes back UNMARKED rather than wrong: guessing
+  /// on a student's behalf, in a feature whose whole job is telling
+  /// them whether they are right, would be worse than saying so.
+  Future<AnswerVerdict?> _answerWithNoLine(
+    String attemptId,
+    String questionId, {
+    required String choice,
+    required String answerText,
+  }) async {
+    final store = _store;
+    if (store == null) return null;
+    try {
+      final raw = await store.attempt(attemptId);
+      if (raw == null) return null;
+      final row = (raw['questions'] as List? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .firstWhere((e) => '${e['id']}' == questionId,
+              orElse: () => <String, dynamic>{});
+      if (row.isEmpty) return null;
+
+      final q = Question.fromJson(row);
+      final hasKey = (q.correctKey ?? '').trim().isNotEmpty ||
+          q.acceptedAnswer.trim().isNotEmpty;
+      if (hasKey) {
+        return await answerOffline(attemptId, questionId,
+            choice: choice, answerText: answerText);
+      }
+
+      final answers = Map<String, dynamic>.from(
+          (raw['answers'] as Map?)?.cast<String, dynamic>() ?? {});
+      answers[questionId] = {
+        'choice': choice,
+        'answer_text': answerText,
+        // Deliberately null, not false. `_boolOrNull` reads it back as
+        // "not marked yet", and the score line counts only true.
+        'is_correct': null,
+        'pending': true,
+      };
+      raw['answers'] = answers;
+      raw['at'] = DateTime.now().millisecondsSinceEpoch;
+      await store.putAttempt(attemptId, raw);
+      return const AnswerVerdict.pending();
+    } catch (e) {
+      debugPrint('[practice] could not keep the answer: $e');
+      return null;
+    }
   }
 
   /// Writes one committed answer into the locally-held copy of the
@@ -960,30 +1434,21 @@ class AssessmentRepository {
   Future<void> _rememberVerdict(String questionId, AnswerVerdict v) async {
     final store = _store;
     if (store == null) return;
-    if ((v.correctKey ?? '').isEmpty &&
-        (v.acceptedAnswer ?? '').isEmpty &&
-        (v.explanationHtml ?? '').isEmpty) {
-      return;
-    }
+
+    final fields = <String, dynamic>{
+      if ((v.correctKey ?? '').isNotEmpty) 'correct_key': v.correctKey,
+      if ((v.acceptedAnswer ?? '').isNotEmpty) 'answer_text': v.acceptedAnswer,
+      if ((v.explanationHtml ?? '').isNotEmpty)
+        'explanation_html': v.explanationHtml,
+      if ((v.explanationImageUrl ?? '').isNotEmpty)
+        'explanation_image_url': v.explanationImageUrl,
+      if ((v.explanationAudioUrl ?? '').isNotEmpty)
+        'explanation_audio_url': v.explanationAudioUrl,
+    };
+    if (fields.isEmpty) return;
+
     try {
-      for (final item in store.items.where((i) => i.kind == 'questions')) {
-        final rows = await store.questions(item.courseId);
-        if (!rows.any((r) => '${r['id']}' == questionId)) continue;
-        await store.putQuestions(item.courseId, [
-          {
-            'id': questionId,
-            if ((v.correctKey ?? '').isNotEmpty) 'correct_key': v.correctKey,
-            if ((v.acceptedAnswer ?? '').isNotEmpty)
-              'answer_text': v.acceptedAnswer,
-            if ((v.explanationHtml ?? '').isNotEmpty)
-              'explanation_html': v.explanationHtml,
-            if ((v.explanationImageUrl ?? '').isNotEmpty)
-              'explanation_image_url': v.explanationImageUrl,
-            if ((v.explanationAudioUrl ?? '').isNotEmpty)
-              'explanation_audio_url': v.explanationAudioUrl,
-          }
-        ]);
-      }
+      await store.patchQuestion(questionId, fields);
     } catch (e) {
       debugPrint('[offline] could not fold in the verdict: $e');
     }
@@ -1464,8 +1929,8 @@ class AssessmentRepository {
     }
     if (rows.isEmpty) {
       throw const BxError(
-          'No saved questions yet. Do one round with data and they save '
-          'themselves.');
+          'No saved questions for this course yet. Open the course and tap '
+          'Download — it pulls every question onto this phone.');
     }
 
     // Only questions that can actually be MARKED. A round where every
@@ -1475,8 +1940,9 @@ class AssessmentRepository {
     final markable = rows.where(isMarkableOffline).toList();
     if (markable.isEmpty) {
       throw const BxError(
-          'Your saved questions cannot be marked without data yet. Answer a '
-          'few with your data on and they will be ready offline.');
+          'The questions on this phone cannot be marked without data yet. '
+          'Open the course and tap Download — that brings the answers down '
+          'too.');
     }
     rows = markable;
     rows.shuffle();

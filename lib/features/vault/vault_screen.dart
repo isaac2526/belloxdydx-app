@@ -2,13 +2,11 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/local_store.dart';
 import '../../data/offline/offline_store.dart';
-import '../../data/offline/sync_engine.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
 
@@ -43,12 +41,6 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     ref.invalidate(offlineSummaryProvider);
   }
 
-  Future<void> _syncNow() async {
-    final level = ref.read(sessionProvider).profile?.currentLevel;
-    await ref.read(syncStatusProvider.notifier).start(now: true, level: level);
-    if (!mounted) return;
-    await _refresh();
-  }
 
   void _open(OfflineItem e) {
     context.push(e.kind == 'note' ? Routes.note(e.id) : Routes.view(e.id));
@@ -72,7 +64,6 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
 
   Future<void> _setAutoDocs(bool on) async {
     await ref.read(localStoreProvider).setBool(BxKeys.autoDownloadDocs, on);
-    ref.read(syncStatusProvider.notifier).autoDocuments = on;
     if (!mounted) return;
     setState(() {});
     if (on) {
@@ -84,33 +75,21 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final status = ref.watch(syncStatusProvider);
+    // No "Sync now" here any more. One way onto the phone: the Download
+    // button on each course.
     return Scaffold(
-      appBar: BxAppBar(
+      appBar: const BxAppBar(
         title: 'Offline Vault',
         subtitle: 'Zero-data reading',
-        actions: [
-          IconButton(
-            onPressed: status.isRunning ? null : _syncNow,
-            tooltip: 'Sync now',
-            icon: status.isRunning
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.sync_rounded, size: 20),
-          ),
-        ],
       ),
       body: BxPage(
         onRefresh: _refresh,
-        child: BxSwitcher(child: _body(status)),
+        child: BxSwitcher(child: _body()),
       ),
     );
   }
 
-  Widget _body(SyncStatus status) {
+  Widget _body() {
     final entries = ref.watch(vaultProvider);
     final summary = ref.watch(offlineSummaryProvider);
     final supported = ref.watch(offlineStoreProvider) != null;
@@ -135,7 +114,7 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
             accent: BxAccent.warning,
           )
         else
-          _SyncCard(status: status, onSync: _syncNow),
+          const _VaultHeadCard(),
         const SizedBox(height: BxSpace.md),
         if (supported) ...[
           summary.when(
@@ -150,14 +129,12 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
         if (entries.isEmpty)
           BxEmptyState(
             icon: Icons.inventory_2_outlined,
-            title: status.isRunning ? 'Filling your vault…' : 'Nothing saved yet',
-            message: status.isRunning
-                ? 'Your notes are coming down now. You can keep using the app '
-                    '— this finishes in the background.'
-                : 'Tap sync above and every note on your shelf saves itself. '
-                    'Open a material and tap Save to keep the big documents too.',
-            actionLabel: status.isRunning ? null : 'Sync now',
-            onAction: status.isRunning ? null : _syncNow,
+            title: 'Nothing saved yet',
+            message: 'Open a course and tap Download. It pulls every note, '
+                'slide, past question, picture and question for that course '
+                'in one go, and you watch it happen.',
+            actionLabel: 'Go to my courses',
+            onAction: () => context.go(Routes.courses),
           )
         else
           BxStagger(
@@ -190,24 +167,88 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
           const SizedBox(height: BxSpace.xs),
           Divider(height: 1, color: c.line),
           const SizedBox(height: BxSpace.xs),
+          // The date that matters is TUTOR BELLO'S.
+          //
+          // This card used to lead with "Last synced 3:14 PM", which
+          // answers a question nobody asked — the student knows when
+          // they pressed the button. What they cannot see is how fresh
+          // the material itself is, and only Tutor Bello moves that.
+          // So his date leads, and the phone's own clock is demoted to
+          // the second line where it belongs.
           Row(
             children: [
-              Icon(Icons.sd_storage_outlined, size: 15, color: c.muted),
+              Icon(Icons.edit_calendar_outlined, size: 15, color: c.goldDeep),
               const SizedBox(width: BxSpace.xs),
               Expanded(
                 child: Text(
-                  s.syncedAt == null
-                      ? 'Not synced yet'
-                      : 'Last synced ${DateFormat('d MMM, h:mm a').format(s.syncedAt!)}',
-                  style: BxType.tiny(c.muted),
+                  _belloLine(),
+                  style: BxType.tiny(c.inkSoft),
                 ),
               ),
               Text(formatBytes(s.bytes), style: BxType.mono(c.inkSoft, size: 12)),
             ],
           ),
+          const SizedBox(height: 2),
+          Row(
+            children: [
+              Icon(Icons.sd_storage_outlined, size: 14, color: c.muted),
+              const SizedBox(width: BxSpace.xs),
+              Expanded(
+                child: Text(
+                  _lastDownloadLine(),
+                  style: BxType.tiny(c.muted),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
+  }
+
+  /// When this phone last pulled a course down.
+  ///
+  /// Was "Last synced", from a background sync that no longer exists.
+  /// The honest answer now is the newest download record on the disk —
+  /// and it stays the SECOND line, under Tutor Bello's date, because
+  /// his is the one that says how fresh the material is.
+  String _lastDownloadLine() {
+    final store = ref.watch(offlineStoreProvider);
+    ref.watch(offlineRecordTick);
+    if (store == null) return 'This phone cannot keep offline copies';
+    DateTime? newest;
+    for (final id in store.downloadedCourses) {
+      final at = (store.courseRecord(id)?['at'] as num?)?.toInt() ?? 0;
+      if (at <= 0) continue;
+      final d = DateTime.fromMillisecondsSinceEpoch(at);
+      if (newest == null || d.isAfter(newest)) newest = d;
+    }
+    if (newest == null) return 'No course downloaded on this phone yet';
+    return 'You last downloaded ${bxBelloDate(newest)}';
+  }
+
+  /// "Tutor Bello last updated …" across every course on the shelf.
+  ///
+  /// Falls back to saying nothing is known rather than borrowing the
+  /// phone's clock — a made-up date here is worse than an absent one.
+  String _belloLine() {
+    final stamps = ref.watch(courseStampsProvider);
+    final pending = ref.watch(coursesWithUpdatesProvider);
+    DateTime? newest;
+    for (final st in stamps.values) {
+      final d = st.updatedAt;
+      if (d == null) continue;
+      if (newest == null || d.isAfter(newest)) newest = d;
+    }
+    if (pending > 0) {
+      return newest == null
+          ? '$pending ${pending == 1 ? 'course has' : 'courses have'} new '
+              'material — tap sync'
+          : 'Tutor Bello last updated ${bxBelloDate(newest)} · '
+              '$pending ${pending == 1 ? 'course' : 'courses'} to pull';
+    }
+    if (newest == null) return 'Sync to see when Tutor Bello last updated';
+    return 'Tutor Bello last updated ${bxBelloDate(newest)}';
   }
 
   Widget _autoDocsSwitch() {
@@ -229,11 +270,13 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Also download PDFs on Wi-Fi', style: BxType.smallStrong(c.ink)),
+                Text('Include whole PDFs on Wi-Fi',
+                    style: BxType.smallStrong(c.ink)),
                 Text(
-                  'Notes, pictures and questions always save themselves. '
-                  'Whole documents are big, so they only come down when you '
-                  'ask and only on Wi-Fi.',
+                  'A course Download always brings its notes, pictures, '
+                  'voice notes and questions. Whole documents are big, so '
+                  'they only come down when this is on and you are on '
+                  'Wi-Fi.',
                   style: BxType.tiny(c.muted),
                 ),
               ],
@@ -247,10 +290,19 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
 
   Widget _row(OfflineItem e) {
     final c = context.bx;
-    final saved = DateFormat('d MMM').format(e.savedAt);
+    // TUTOR BELLO'S date where it is knowable, the student's only where
+    // it is not.
+    //
+    // "subject last updated from Bello o not the download" — every row
+    // here said "saved 12 Aug", which answers when the student pressed
+    // a button. What they actually want to know about a note is how
+    // fresh it is, and only Tutor Bello moves that.
+    final bello = e.updatedAt;
     final parts = <String>[
       if (e.courseCode.isNotEmpty) e.courseCode,
-      'saved $saved',
+      bello != null
+          ? 'updated ${bxBelloDate(bello)}'
+          : 'saved ${bxBelloDate(e.savedAt)}',
       if (e.bytes > 0) e.sizeLabel,
       if (e.pinned) 'kept',
     ];
@@ -319,52 +371,49 @@ class _Stat extends StatelessWidget {
   }
 }
 
-/// What the sync is doing, in words. A progress bar that says nothing is
-/// how "background downloading" turns into a rumour.
-class _SyncCard extends StatelessWidget {
-  final SyncStatus status;
-  final Future<void> Function() onSync;
-
-  const _SyncCard({required this.status, required this.onSync});
+/// WHERE MATERIAL COMES FROM NOW.
+///
+/// There used to be a "Sync now" button here that promised to fill the
+/// vault by itself. It did not, and having two ways to get material
+/// onto a phone meant neither was ever clearly the answer — a student
+/// who tapped sync and saw nothing arrive had no idea whether to wait
+/// or to go and press something else.
+///
+/// One way now: the Download button on each course. This card says what
+/// is here and sends them to the right place for more.
+class _VaultHeadCard extends ConsumerWidget {
+  const _VaultHeadCard();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.bx;
+    final held = ref.watch(vaultProvider).isNotEmpty;
+    final pending = ref.watch(coursesWithUpdatesProvider);
 
-    final (icon, accent, title, message) = switch (status.phase) {
-      SyncPhase.running => (
-          Icons.cloud_download_outlined,
-          BxAccent.info,
-          status.total > 0
-              ? '${status.label} · ${status.done} of ${status.total}'
-              : status.label,
-          'Keep using the app. This finishes on its own.',
-        ),
-      SyncPhase.failed => (
-          Icons.cloud_off_rounded,
-          BxAccent.warning,
-          'Sync stopped',
-          status.message ?? 'Try again when you have a steadier connection.',
-        ),
-      SyncPhase.unsupported => (
-          Icons.phonelink_off_rounded,
-          BxAccent.warning,
-          'This device cannot keep offline copies',
-          'Everything still works online.',
-        ),
-      SyncPhase.done => (
-          Icons.offline_pin_rounded,
-          BxAccent.success,
-          'Your material is on this phone',
-          'Notes, pictures and questions open with your data off.',
-        ),
-      SyncPhase.idle => (
-          Icons.wifi_off_rounded,
-          BxAccent.gold,
-          'Ready to save your material',
-          'Tap sync and your notes come down in the background.',
-        ),
-    };
+    final (icon, accent, title, message) = pending > 0
+        ? (
+            Icons.sync_problem_rounded,
+            BxAccent.warning,
+            pending == 1
+                ? 'One course has a change'
+                : '$pending courses have a change',
+            'Tutor Bello has added or changed something. Open the course '
+                'and tap Update.',
+          )
+        : held
+            ? (
+                Icons.offline_pin_rounded,
+                BxAccent.success,
+                'Your material is on this phone',
+                'Notes, pictures and questions open with your data off.',
+              )
+            : (
+                Icons.download_for_offline_outlined,
+                BxAccent.gold,
+                'Nothing downloaded yet',
+                'Open a course and tap Download. It pulls every note, '
+                    'file, picture and question for that course in one go.',
+              );
 
     return Container(
       padding: const EdgeInsets.all(BxSpace.sm),
@@ -373,30 +422,27 @@ class _SyncCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(BxRadius.md),
         border: Border.all(color: accent.stroke(c)),
       ),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(icon, size: 18, color: accent.ink(c)),
-              const SizedBox(width: BxSpace.xs),
-              Expanded(child: Text(title, style: BxType.smallStrong(c.ink))),
-            ],
-          ),
-          const SizedBox(height: 2),
-          Text(message, style: BxType.tiny(c.inkSoft)),
-          if (status.isRunning) ...[
-            const SizedBox(height: BxSpace.xs),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(BxRadius.pill),
-              child: LinearProgressIndicator(
-                value: status.total > 0 ? status.progress : null,
-                minHeight: 4,
-                backgroundColor: c.line,
-                valueColor: AlwaysStoppedAnimation(c.gold),
-              ),
+          Icon(icon, size: 20, color: accent.ink(c)),
+          const SizedBox(width: BxSpace.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: BxType.smallStrong(accent.ink(c))),
+                const SizedBox(height: 2),
+                Text(message, style: BxType.tiny(c.inkSoft)),
+                const SizedBox(height: BxSpace.xs),
+                BxButton.secondary(
+                  held && pending == 0 ? 'My courses' : 'Go to my courses',
+                  icon: Icons.menu_book_rounded,
+                  onPressed: () => context.go(Routes.courses),
+                ),
+              ],
             ),
-          ],
+          ),
         ],
       ),
     );

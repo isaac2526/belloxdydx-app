@@ -1,9 +1,11 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -12,6 +14,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
 import 'watermark.dart';
@@ -66,6 +69,11 @@ _DocKind _sniffKind(Uint8List bytes) {
 
 /// Downloads a document. Returns null on any failure — the caller turns
 /// that into a sentence the student can act on.
+///
+/// Only for SAVING now. Reading goes through [fetchDocumentToFile]: a
+/// forty-megabyte past-question paper held in a Uint8List, and then
+/// decoded from that same Uint8List, is two copies of it in the heap of
+/// a phone that may only have a gigabyte.
 Future<Uint8List?> fetchDocumentBytes(String url) async {
   if (url.isEmpty) return null;
   try {
@@ -81,6 +89,67 @@ Future<Uint8List?> fetchDocumentBytes(String url) async {
   return null;
 }
 
+/// Streams a document to a scratch file and hands back the path.
+///
+/// This is what lets a big document open on a cheap phone. pdfx maps a
+/// file rather than holding it, so the peak cost of reading a 40 MB
+/// paper becomes one 64 KB chunk instead of 40 MB of Uint8List plus
+/// whatever the decoder copies out of it. On a 1 GB Tecno that is the
+/// difference between a page and an out-of-memory kill.
+///
+/// The scratch copy lives in the cache directory, which the OS may
+/// reclaim whenever it likes — that is correct: the Offline Vault is
+/// where a document a student wants to KEEP goes, and that is a
+/// separate, deliberate act.
+Future<({String path, Uint8List head})?> fetchDocumentToFile(
+  String url,
+  String id,
+) async {
+  if (url.isEmpty) return null;
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final client = http.Client();
+  try {
+    final dir = Directory('${(await getTemporaryDirectory()).path}/bxdocs');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    final file = File('${dir.path}/${_safeFileName(id)}');
+
+    final res = await client.send(http.Request('GET', uri))
+        .timeout(const Duration(seconds: 120));
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+
+    final sink = file.openWrite();
+    final head = <int>[];
+    var total = 0;
+    try {
+      await for (final chunk in res.stream) {
+        if (head.length < 8) {
+          head.addAll(chunk.take(8 - head.length));
+        }
+        total += chunk.length;
+        sink.add(chunk);
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    if (total == 0) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      return null;
+    }
+    return (path: file.path, head: Uint8List.fromList(head));
+  } catch (_) {
+    return null;
+  } finally {
+    client.close();
+  }
+}
+
+String _safeFileName(String id) =>
+    id.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+
 class ViewerScreen extends ConsumerStatefulWidget {
   final String id;
   const ViewerScreen({super.key, required this.id});
@@ -95,6 +164,17 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   bool _busy = false;
   bool _opened = false;
   bool _offline = false;
+
+  /// True when the copy on this phone is OLDER than what Tutor Bello
+  /// now publishes. The reader used to serve the saved copy for ever
+  /// with nothing on screen to say so, so a corrected past-question
+  /// paper never reached the student who had already saved the wrong
+  /// one.
+  bool _stale = false;
+
+  /// When Tutor Bello last changed this document — never when the
+  /// student downloaded it.
+  DateTime? _belloAt;
   String? _error;
   String? _filePath;
   Uint8List? _bytes;
@@ -138,13 +218,39 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     var offline = false;
     String? error;
 
+    // What the server says about this document, and what the phone
+    // actually holds. `sig` was written from updatedAt at save time, so
+    // the two are directly comparable.
+    final live = m.updatedAt?.toIso8601String() ?? url;
+    final held = store?.item(widget.id);
+    var stale = false;
+    final belloAt = m.updatedAt ?? held?.updatedAt;
+
     final saved = await store?.documentPath(widget.id);
     if (saved != null) {
-      final local = _kindFromExtension(documentExtension(saved));
-      if (local == _DocKind.pdf || (local == null && kind == _DocKind.pdf)) {
+      // The FILE decides, not its name.
+      //
+      // On the legacy path — the one production runs — every storage
+      // link is rewritten to `/api/file?u=<base64>`, so the URL carries
+      // no extension and the saved copy is written as `.bin`. Judging
+      // the vaulted copy by its name therefore came out "unknown" on
+      // both sides, the branch fell through, and a document sitting
+      // complete on the disk went to the network anyway — which is
+      // exactly what a student with their data off was seeing.
+      final local = _kindFromExtension(documentExtension(saved)) ??
+          await _sniffFile(saved);
+      if (local == _DocKind.pdf ||
+          (local == null && kind == _DocKind.pdf)) {
         path = saved;
         offline = true;
         kind = _DocKind.pdf;
+        // An empty sig on either side means we cannot tell, and
+        // "cannot tell" must not raise a false alarm on a document
+        // that never changed.
+        stale = held != null &&
+            held.sig.isNotEmpty &&
+            live.isNotEmpty &&
+            held.sig != live;
       }
     }
 
@@ -152,13 +258,25 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       if (url.isEmpty) {
         error = _missing;
       } else if (kind != _DocKind.office) {
-        // A PDF has to be in memory to be drawn, and an unknown file has
-        // to be read before it can be named — one download serves both.
-        bytes = await fetchDocumentBytes(url);
-        if (bytes == null) {
+        // Streamed to a scratch file rather than into a Uint8List. An
+        // unknown file still has to be READ before it can be named, so
+        // the first eight bytes come back with the path and one
+        // download serves both jobs — without a forty-megabyte paper
+        // ever sitting in the heap of a phone that has a gigabyte.
+        final got = await fetchDocumentToFile(url, widget.id);
+        if (got == null) {
           error = _noDownload;
         } else {
-          kind ??= _sniffKind(bytes);
+          kind ??= _sniffKind(got.head);
+          if (kind == _DocKind.pdf) {
+            path = got.path;
+          } else {
+            // Not a PDF after all — the office branch takes it from
+            // here and the scratch copy is not needed.
+            try {
+              await File(got.path).delete();
+            } catch (_) {}
+          }
         }
       }
     }
@@ -169,11 +287,41 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       _filePath = path;
       _bytes = bytes;
       _offline = offline;
+      _stale = stale;
+      _belloAt = belloAt;
       _error = error;
       _preparing = false;
       _page = 0;
       _pages = 0;
     });
+  }
+
+  /// Reads the first bytes of a file on disk and says what it is.
+  Future<_DocKind?> _sniffFile(String path) async {
+    try {
+      final f = File(path);
+      if (!await f.exists()) return null;
+      final head = await f.openRead(0, 8).expand((c) => c).toList();
+      if (head.isEmpty) return null;
+      return _sniffKind(Uint8List.fromList(head));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The bytes of whatever is currently on screen, if it came from a
+  /// file. Returns null when there is nothing prepared, or when the
+  /// prepared copy is the vault's own — saving that again is a no-op.
+  Future<Uint8List?> _readPrepared() async {
+    final path = _filePath;
+    if (path == null) return null;
+    try {
+      final f = File(path);
+      if (!await f.exists()) return null;
+      return await f.readAsBytes();
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _save(StudyMaterial m, String code) async {
@@ -188,7 +336,11 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         return;
       }
       final url = _sourceUrl(m);
-      final bytes = _bytes ?? await fetchDocumentBytes(url);
+      // Read back from the scratch copy already on disk where there is
+      // one, so saving a document the student is looking at costs no
+      // second download.
+      final bytes = _bytes ?? await _readPrepared() ??
+          await fetchDocumentBytes(url);
       if (bytes == null) {
         if (!mounted) return;
         bxToast(context,
@@ -228,6 +380,54 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         failure ?? 'Saved. It opens now with no data at all.',
         error: failure != null,
       );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Throws away the saved copy and pulls Tutor Bello's new one.
+  ///
+  /// The reader had no way to do this at all: pull-to-refresh reloaded
+  /// the material row and then handed the same old file straight back,
+  /// because a vaulted copy always wins. That is right for every other
+  /// case and wrong for exactly this one, so the student gets a button.
+  Future<void> _getNewCopy(StudyMaterial m, String code) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final store = ref.read(offlineStoreProvider);
+      final url = _sourceUrl(m);
+      if (store == null || url.isEmpty) return;
+      final bytes = await fetchDocumentBytes(url);
+      if (bytes == null) {
+        if (!mounted) return;
+        bxToast(context,
+            'Could not reach the new copy. Your saved one still opens.',
+            error: true);
+        return;
+      }
+      var ext = documentExtension(url);
+      if (ext.isEmpty) ext = 'pdf';
+      await store.putDocument(
+        id: m.id,
+        title: m.title,
+        courseCode: code,
+        courseId: m.courseId,
+        kind: m.kind.name,
+        bytes: bytes,
+        extension: ext,
+        sig: m.updatedAt?.toIso8601String() ?? m.url,
+      );
+      await store.flush();
+      ref.read(vaultProvider.notifier).refresh();
+      _preparedFor = null;
+      if (!mounted) return;
+      setState(() {});
+      bxToast(context, 'You now have Tutor Bello\'s latest copy.');
+    } catch (e) {
+      if (!mounted) return;
+      bxToast(context, ref.read(backendProvider).faultFor(e).message,
+          error: true);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -319,12 +519,12 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
             ),
         ],
       ),
-      body: _body(async, material, activated),
+      body: _body(async, material, activated, code ?? ''),
     );
   }
 
   Widget _body(AsyncValue<StudyMaterial> async, StudyMaterial? material,
-      bool activated) {
+      bool activated, String code) {
     if (material == null) {
       if (async.hasError) {
         final e = async.error;
@@ -402,13 +602,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     }
 
     return switch (_kind) {
-      _DocKind.pdf => _pdfBody(),
+      _DocKind.pdf => _pdfBody(material, code),
       _DocKind.office => _officeBody(material),
       _DocKind.other => _otherBody(material),
     };
   }
 
-  Widget _pdfBody() {
+  Widget _pdfBody(StudyMaterial m, String code) {
     final c = context.bx;
     return BxPage(
       scrollable: false,
@@ -418,12 +618,42 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const ThreatStrip(),
-          if (_offline) ...[
+          // TUTOR BELLO'S date, on the document itself.
+          //
+          // A saved paper looked identical whether it was written last
+          // night or last session. Now the chip carries the date he
+          // last changed it, and a copy that has fallen behind says so
+          // and offers the new one — the reader had no way to replace
+          // a saved file at all before this.
+          if (_offline || _belloAt != null) ...[
             const SizedBox(height: BxSpace.xs),
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: BxChip('Offline copy',
-                  accent: BxAccent.success, icon: Icons.offline_pin_rounded),
+            Wrap(
+              spacing: BxSpace.xs,
+              runSpacing: BxSpace.xs,
+              children: [
+                if (_offline)
+                  const BxChip('Offline copy',
+                      accent: BxAccent.success,
+                      icon: Icons.offline_pin_rounded),
+                if (_belloAt != null)
+                  BxChip(
+                    'Tutor Bello last updated ${bxBelloDate(_belloAt!)}',
+                    accent: BxAccent.neutral,
+                    icon: Icons.edit_calendar_outlined,
+                  ),
+              ],
+            ),
+          ],
+          if (_stale) ...[
+            const SizedBox(height: BxSpace.xs),
+            BxBanner(
+              title: 'Tutor Bello changed this document',
+              message: 'You are reading the copy you saved earlier. The new '
+                  'one is ready whenever you have a connection.',
+              icon: Icons.system_update_alt_rounded,
+              accent: BxAccent.warning,
+              actionLabel: _busy ? null : 'Get the new copy',
+              onAction: _busy ? null : () => _getNewCopy(m, code),
             ),
           ],
           const SizedBox(height: BxSpace.sm),

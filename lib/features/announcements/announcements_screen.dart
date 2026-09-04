@@ -219,7 +219,15 @@ class _AnnouncementCard extends StatelessWidget {
     final c = context.bx;
     final a = announcement;
     final stamp = _stamp(a.createdAt);
-    final meta = a.isActive ? stamp : '$stamp · past'.trim();
+    // Say when he CHANGED it, not only when he first posted it. A
+    // student seeing a notice they had already dismissed needs to know
+    // why it is back.
+    final edited = a.wasEdited ? 'edited ${_stamp(a.updatedAt)}' : '';
+    final meta = [
+      if (stamp.isNotEmpty) stamp,
+      if (edited.isNotEmpty) edited,
+      if (!a.isActive) 'past',
+    ].join(' · ');
 
     return BxCard(
       accent: unread ? BxAccent.gold : BxAccent.neutral,

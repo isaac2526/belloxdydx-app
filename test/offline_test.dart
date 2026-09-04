@@ -3,7 +3,11 @@ import 'dart:io';
 
 import 'package:belloxdydx/data/models.dart';
 import 'package:belloxdydx/data/offline/offline_store.dart';
+import 'package:belloxdydx/data/backend.dart';
+import 'package:belloxdydx/data/local_store.dart';
+import 'package:belloxdydx/data/repositories.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
@@ -30,6 +34,14 @@ class _FakePaths extends PathProviderPlatform
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  courseDownloadRecords();
+  pruningWithdrawnContent();
+  whoseDateIsShown();
+  clearingAWithdrawnCourse();
+  syncingWithNoSignal();
+  aSavedCopyThatFellBehind();
+  belloDateReadsRight();
+  aRoundThatLostItsLine();
 
   late Directory docs;
   late _FakePaths paths;
@@ -352,6 +364,184 @@ void main() {
   });
 
   // ------------------------------------------------------------
+  group('the store tells the truth about storage', () {
+    // This app has now been wrong about storage in BOTH directions.
+    // First it told a student with 256 GB free to clear room, because
+    // every save failure was reported as a full disk. Then the sync
+    // announced "Saved for offline" after a run in which every write
+    // had failed with ENOSPC — each caught, each logged, none of them
+    // reaching the student — so a nearly full phone reported success
+    // and then could not open a thing.
+    //
+    // Being wrong either way destroys trust in the whole feature.
+
+    test('a claim is not a fact: verifyItem checks the disk', () async {
+      final store = await open();
+      await store.putDocument(
+        id: 'd1',
+        title: 'Past questions',
+        kind: 'pq',
+        bytes: List<int>.filled(64, 3),
+        extension: 'pdf',
+      );
+      expect(await store.verifyItem('d1'), isTrue);
+
+      // The catalogue still says it is there. The file is not.
+      await File(store.resolve(store.item('d1')!.docRel!)).delete();
+      expect(await store.verifyItem('d1'), isFalse,
+          reason: 'an index entry must never be taken as proof');
+    });
+
+    test('an empty file is not a saved file', () async {
+      final store = await open();
+      await store.putDocument(
+        id: 'd1',
+        title: 'T',
+        kind: 'pq',
+        bytes: [1, 2, 3],
+        extension: 'pdf',
+      );
+      await File(store.resolve(store.item('d1')!.docRel!)).writeAsBytes([]);
+      expect(await store.verifyItem('d1'), isFalse);
+    });
+
+    test('an asset is verified the same way', () async {
+      final store = await open();
+      const url = 'https://p.supabase.co/storage/v1/object/public/x/a.png';
+      await store.putAsset(url, [9, 9, 9]);
+      expect(await store.verifyAsset(url), isTrue);
+      await File(store.assetPath(url)!).delete();
+      expect(await store.verifyAsset(url), isFalse);
+      expect(await store.verifyAsset('https://nope.test/x.png'), isFalse);
+    });
+
+    test('the library has a ceiling and it is enforced', () async {
+      final store = await open();
+      final room = await store.canWrite(OfflineStore.maxTotalBytes + 1);
+      expect(room.ok, isFalse);
+      expect(room.reason, contains('full'));
+      expect(room.reason, isNot(contains('Exception')));
+    });
+
+    test('a small write is allowed', () async {
+      final store = await open();
+      expect((await store.canWrite(1024)).ok, isTrue);
+    });
+
+    test('eviction takes the oldest unpinned item and never a pinned one',
+        () async {
+      final store = await open();
+      // Pinned means the student chose it by hand. It is never the
+      // thing we throw away to make room for something they did not.
+      await store.putDocument(
+        id: 'kept',
+        title: 'Chosen',
+        kind: 'pq',
+        bytes: List<int>.filled(32, 1),
+        extension: 'pdf',
+        pinned: true,
+      );
+      await store.putDocument(
+        id: 'auto',
+        title: 'Synced',
+        kind: 'pq',
+        bytes: List<int>.filled(32, 1),
+        extension: 'pdf',
+        pinned: false,
+      );
+      await store.flush();
+
+      // Ask for more than the ceiling so eviction has to act.
+      await store.evictFor(OfflineStore.maxTotalBytes);
+      expect(store.has('kept'), isTrue, reason: 'pinned is never evicted');
+      expect(store.has('auto'), isFalse);
+    });
+
+    test('the sweep reclaims staging files and orphans', () async {
+      final store = await open();
+      await store.putNote(id: 'n1', title: 'T', html: '<p>x</p>');
+      await store.flush();
+
+      // What a phone that killed the app mid-sync leaves behind.
+      final notes = Directory('${docs.path}/offline/notes');
+      await File('${notes.path}/half-written.html.3.part')
+          .writeAsString('incomplete');
+      // And a file whose catalogue row was lost: invisible in the Vault,
+      // impossible to delete from it, still counted against storage.
+      await File('${notes.path}/orphan.html').writeAsString('nobody owns me');
+
+      final reclaimed = await store.sweep();
+      expect(reclaimed, greaterThan(0));
+      expect(File('${notes.path}/half-written.html.3.part').existsSync(),
+          isFalse);
+      expect(File('${notes.path}/orphan.html').existsSync(), isFalse);
+      expect(await store.readNote('n1'), '<p>x</p>',
+          reason: 'the sweep must not touch a live file');
+    });
+  });
+
+  // ------------------------------------------------------------
+  group('finding one question does not decode all of them', () {
+    // Folding an answer verdict back into a cached question used to
+    // read and jsonDecode EVERY bucket to find the one row it wanted,
+    // on the UI isolate, before the student could be shown whether they
+    // were right. The cost grew with every round anybody ever played.
+    test('patchQuestion updates exactly the row it names', () async {
+      final store = await open();
+      await store.putQuestions('PHY101', [
+        {'id': 'q1', 'question_html': '<p>a</p>'},
+        {'id': 'q2', 'question_html': '<p>b</p>'},
+      ]);
+      await store.putQuestions('CHM101', [
+        {'id': 'q3', 'question_html': '<p>c</p>'},
+      ]);
+
+      final ok = await store.patchQuestion('q2', {
+        'correct_key': 'B',
+        'explanation_html': '<p>because</p>',
+      });
+      expect(ok, isTrue);
+
+      final phy = await store.questions('PHY101');
+      final q2 = phy.firstWhere((r) => r['id'] == 'q2');
+      expect(q2['correct_key'], 'B');
+      expect(q2['explanation_html'], '<p>because</p>');
+      expect(q2['question_html'], '<p>b</p>', reason: 'nothing else changes');
+
+      final q1 = phy.firstWhere((r) => r['id'] == 'q1');
+      expect(q1.containsKey('correct_key'), isFalse,
+          reason: 'a sibling row is untouched');
+    });
+
+    test('it finds a question in any bucket', () async {
+      final store = await open();
+      await store.putQuestions('A', [{'id': 'qa'}]);
+      await store.putQuestions('B', [{'id': 'qb'}]);
+      await store.putQuestions('C', [{'id': 'qc'}]);
+      expect(await store.bucketFor('qc'), 'C');
+      expect(await store.patchQuestion('qc', {'correct_key': 'D'}), isTrue);
+      expect((await store.questions('C')).first['correct_key'], 'D');
+    });
+
+    test('an unknown question is a quiet no, not a throw', () async {
+      final store = await open();
+      await store.putQuestions('A', [{'id': 'qa'}]);
+      expect(await store.bucketFor('nope'), isNull);
+      expect(await store.patchQuestion('nope', {'correct_key': 'A'}), isFalse);
+    });
+
+    test('empty fields change nothing', () async {
+      final store = await open();
+      await store.putQuestions('A', [
+        {'id': 'qa', 'correct_key': 'B'},
+      ]);
+      await store.patchQuestion('qa', {'correct_key': '', 'answer_text': null});
+      expect((await store.questions('A')).first['correct_key'], 'B',
+          reason: 'a blank from the server must not erase what we hold');
+    });
+  });
+
+  // ------------------------------------------------------------
   group('assets', () {
     test('are found synchronously, which is what build() needs', () async {
       final store = await open();
@@ -591,6 +781,852 @@ void main() {
       expect(formatBytes(900), '900 B');
       expect(formatBytes(2048), '2 KB');
       expect(formatBytes(5 * 1024 * 1024), '5.0 MB');
+    });
+  });
+}
+
+/// ============================================================
+/// THE PER-COURSE DOWNLOAD
+///
+/// "every course should have its own download materials button ... it
+///  should say that, there's a change in course, download now"
+///
+/// The badge is one comparison, and getting it wrong in either
+/// direction is bad in a different way. Too eager and every course
+/// nags forever; too shy and a student sits an exam on questions their
+/// phone never fetched. These pin the comparison down.
+/// ============================================================
+void courseDownloadRecords() {
+  group('deciding whether a course has changed', () {
+    const server = CourseStamp(
+      id: 'c1',
+      code: 'CHM 101',
+      materials: 8,
+      questions: 240,
+      tests: 2,
+      pins: 12,
+      pinPrint: 'abc123',
+      courseStamp: '2026-08-20T08:00:00Z',
+      stamp: '2026-09-01T10:00:00Z',
+    );
+
+    Map<String, dynamic> held({
+      int materials = 8,
+      int questions = 240,
+      int tests = 2,
+      int pins = 12,
+      String pinPrint = 'abc123',
+      String courseStamp = '2026-08-20T08:00:00Z',
+      String stamp = '2026-09-01T10:00:00Z',
+      bool ok = true,
+    }) =>
+        {
+          'materials': materials,
+          'questions': questions,
+          'tests': tests,
+          'pins': pins,
+          'pin_print': pinPrint,
+          'course_stamp': courseStamp,
+          'stamp': stamp,
+          'ok': ok,
+        };
+
+    test('a course never downloaded has no update, it has a download', () {
+      expect(server.differsFrom(null), isTrue);
+    });
+
+    test('an exact match is not a change', () {
+      expect(server.differsFrom(held()), isFalse);
+    });
+
+    test('a new question moves the count AND the stamp', () {
+      expect(
+        server.differsFrom(held(questions: 239, stamp: '2026-08-30T09:00:00Z')),
+        isTrue,
+      );
+    });
+
+    test('an EDITED question moves only the stamp', () {
+      // The count is unchanged, which is exactly why a count alone is
+      // not enough: a corrected answer key would never reach the phone.
+      expect(server.differsFrom(held(stamp: '2026-08-30T09:00:00Z')), isTrue);
+    });
+
+    test('a WITHDRAWN question moves only the count', () {
+      // updated_at cannot see a deletion — unpublish a question and the
+      // newest stamp does not move — which is why a stamp alone is not
+      // enough either.
+      expect(server.differsFrom(held(questions: 241)), isTrue);
+    });
+
+    test('a new material moves it too', () {
+      expect(server.differsFrom(held(materials: 7)), isTrue);
+    });
+
+    test('A QUESTION PINNED TO A TEST moves nothing else at all', () {
+      // The sharpest case, and the one the first version of this missed
+      // completely. A pin decides which questions the bundle WITHHOLDS,
+      // so pinning one changes the correct content of every download of
+      // that course without touching a single question or material row.
+      // Measured against a real PostgreSQL: pinning one question took a
+      // download from five questions to four while the material count,
+      // the question count and both timestamps stayed byte-identical.
+      expect(
+        server.differsFrom(held(pins: 11)),
+        isTrue,
+        reason: 'a phone would keep a question that is now on an exam',
+      );
+    });
+
+    test('a pin SWAP keeps the count and still gets caught', () {
+      // Unpin one question and pin another in the same sitting: the
+      // count is identical and the set the bundle withholds has
+      // completely changed. Measured against a real PostgreSQL — pins
+      // 3 -> 3, questions 7 -> 7, question stamp unmoved, checksum
+      // 0c39052b86… -> d521a1e128…
+      expect(
+        server.differsFrom(held(pinPrint: 'a-different-checksum')),
+        isTrue,
+        reason: 'the phone would hold the key to whichever question was '
+            'just put on the exam',
+      );
+    });
+
+    test('a test published moves the test count', () {
+      expect(server.differsFrom(held(tests: 1)), isTrue);
+    });
+
+    test('a course RENAMED or HIDDEN moves only its own stamp', () {
+      // courses has carried an updated_at trigger since the first
+      // migration and nothing ever read it, so a rename, a hide, a
+      // re-order and a move to another level were all invisible.
+      expect(
+        server.differsFrom(held(courseStamp: '2026-08-19T08:00:00Z')),
+        isTrue,
+      );
+    });
+
+    test('a run that did not finish keeps asking', () {
+      // Everything matches, but the download reported failures. A
+      // half-downloaded course must not sit there looking finished.
+      expect(server.differsFrom(held(ok: false)), isTrue);
+    });
+
+    test('a record written by an older build counts as different', () {
+      // No tests, pins or course_stamp keys at all. One extra download
+      // on the upgrade launch, and correct from then on — the other way
+      // round would leave every existing phone permanently blind to the
+      // three fields this release added.
+      expect(
+        server.differsFrom({
+          'materials': 8,
+          'questions': 240,
+          'stamp': '2026-09-01T10:00:00Z',
+          'ok': true,
+        }),
+        isTrue,
+      );
+    });
+
+    test('an empty course is not offered as a download', () {
+      const nothing = CourseStamp(id: 'c2');
+      expect(nothing.isEmpty, isTrue);
+      expect(server.isEmpty, isFalse);
+    });
+
+    test('it reads both spellings the two backends use', () {
+      // The SQL half and the website half must be indistinguishable.
+      final fromSql = CourseStamp.fromJson(const {
+        'id': 'c1',
+        'code': 'CHM 101',
+        'materials': 8,
+        'questions': 240,
+        'tests': 2,
+        'pins': 12,
+        'pin_print': 'abc123',
+        'course_stamp': '2026-08-20T08:00:00Z',
+        'material_stamp': '2026-08-21T08:00:00Z',
+        'stamp': '2026-09-01T10:00:00Z',
+      });
+      expect(fromSql.pins, 12);
+      expect(fromSql.courseStamp, '2026-08-20T08:00:00Z');
+      expect(fromSql.differsFrom(held()), isFalse);
+      expect(fromSql.updatedAt, isNotNull,
+          reason: 'the date shown to a student comes off this');
+    });
+  });
+
+  group('the one number that says something changed', () {
+    test('a moved revision means go and look', () {
+      const now = ContentRevision(rev: 41, available: true);
+      expect(now.movedFrom(40), isTrue);
+      expect(now.movedFrom(41), isFalse);
+    });
+
+    test('an UNAVAILABLE revision always means go and look', () {
+      // Migration 0014 not applied. The app falls back to comparing the
+      // manifest, which is what it did before this existed: slower to
+      // notice, never wrong. Reading "unavailable" as "nothing changed"
+      // would blind every phone until the migration ran.
+      const missing = ContentRevision(rev: 0, available: false);
+      expect(missing.movedFrom(0), isTrue);
+      expect(missing.movedFrom(99), isTrue);
+    });
+
+    test('a zero revision is never trusted', () {
+      const zero = ContentRevision(rev: 0, available: true);
+      expect(zero.movedFrom(0), isTrue);
+    });
+
+    test('it reads both spellings the two backends use', () {
+      expect(
+        ContentRevision.fromJson(const {'rev': 7, 'revAvailable': true}).rev,
+        7,
+      );
+      expect(
+        ContentRevision.fromJson(const {'rev': 7, 'available': true}).available,
+        isTrue,
+      );
+      expect(ContentRevision.fromJson(const {}).available, isFalse);
+    });
+  });
+
+  group('the record of what landed', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_course_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      final opened = await OfflineStore.open();
+      expect(opened, isNotNull);
+      store = opened!;
+    });
+
+    tearDown(() async {
+      await dir.delete(recursive: true);
+    });
+
+    test('a course with no record has never been downloaded', () {
+      expect(store.courseRecord('c1'), isNull);
+    });
+
+    test('the record survives being read back from disk', () async {
+      await store.putCourseRecord(
+        'c1',
+        materials: 8,
+        questions: 240,
+        stamp: '2026-09-01T10:00:00Z',
+        ok: true,
+        bytes: 12345,
+      );
+      await store.flush();
+
+      final reopened = await OfflineStore.open();
+      expect(reopened, isNotNull);
+      final rec = reopened!.courseRecord('c1');
+      expect(rec, isNotNull,
+          reason: 'a record only in RAM is a badge that comes back on every '
+              'launch');
+      expect(rec!['questions'], 240);
+      expect(rec['ok'], isTrue);
+      expect(rec['bytes'], 12345);
+    });
+
+    test('signing in as somebody else throws the records away', () async {
+      await store.claim('student-1');
+      await store.putCourseRecord('c1',
+          materials: 1, questions: 1, stamp: 's', ok: true);
+      await store.claim('student-2');
+      expect(store.courseRecord('c1'), isNull,
+          reason: "another student's downloads are not this one's to see");
+    });
+  });
+}
+
+/// ============================================================
+/// DROPPING WHAT TUTOR BELLO WITHDREW
+///
+/// The offline bank only ever merged. A question he unpublished or
+/// deleted stayed on the phone for ever — practisable, with its answer
+/// key, long after he had decided it was wrong.
+///
+/// It cannot be worked out from the download pages, because those
+/// deliberately withhold the questions pinned to a published test: "the
+/// server did not send it" and "the server no longer has it" look
+/// exactly alike. So the phone asks for the full id list, withheld ones
+/// included, and prunes against that.
+///
+/// The dangerous direction is deleting too much. These pin that shut.
+/// ============================================================
+void pruningWithdrawnContent() {
+  group('dropping what was withdrawn', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    Map<String, dynamic> q(String id, {String why = '<p>because</p>'}) => {
+          'id': id,
+          'course_id': 'c1',
+          'question_html': '<p>Q$id</p>',
+          'correct_key': 'A',
+          'explanation_html': why,
+          'options': [
+            {'key': 'A', 'text': 'one'},
+          ],
+        };
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_prune_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      final opened = await OfflineStore.open();
+      expect(opened, isNotNull);
+      store = opened!;
+      await store.putQuestions('c1', [q('a'), q('b'), q('c'), q('d')]);
+      await store.flush();
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    test('a withdrawn question is really gone from the disk', () async {
+      final dropped = await store.pruneQuestions('c1', {'a', 'b', 'c'});
+      expect(dropped, 1);
+
+      final held = await store.questions('c1');
+      expect(held.map((r) => r['id']), unorderedEquals(['a', 'b', 'c']));
+
+      // And from a store that has never seen this session — a prune
+      // that only lives in RAM is a question that comes back.
+      final reopened = await OfflineStore.open();
+      expect((await reopened!.questions('c1')).length, 3);
+    });
+
+    test('a question PINNED after the download loses its key', () async {
+      // The reverse of what this used to assert, and the reversal is
+      // the point. The alive set is what the server still SERVES, so a
+      // question Tutor Bello puts on an exam drops out of it — and the
+      // phone that already holds it, with its answer key, must let it
+      // go. Keeping it "because the server still publishes it" was
+      // stepping over precisely the row that most needed removing.
+      final dropped = await store.pruneQuestions('c1', {'a', 'b', 'c'});
+      expect(dropped, 1);
+      expect((await store.questions('c1')).map((r) => r['id']),
+          isNot(contains('d')));
+    });
+
+    test('an EMPTY list is an answer, and it prunes', () async {
+      // A course whose every question is now pinned to a published
+      // test, or one Tutor Bello emptied out. Refusing to act on
+      // emptiness left exactly those courses holding withdrawn
+      // questions for ever, with their answer keys, and a manual
+      // "Check for anything new" refused to clear them.
+      expect(await store.pruneQuestions('c1', {}), 4);
+      expect((await store.questions('c1')), isEmpty);
+    });
+
+    test('a read that FAILED never gets this far', () async {
+      // The safety lives one level up, in CourseIndex.isUsable, and it
+      // has to: emptiness and failure look identical to pruneQuestions
+      // and only the caller can tell them apart.
+      const failed = CourseIndex(complete: false);
+      expect(failed.isUsable, isFalse);
+
+      const emptyButReal = CourseIndex(complete: true);
+      expect(emptyButReal.isUsable, isTrue,
+          reason: 'a course with nothing left to serve must still prune');
+
+      const normal = CourseIndex(questionIds: {'a'}, complete: true);
+      expect(normal.isUsable, isTrue);
+    });
+
+    test('another course is never touched', () async {
+      await store.putQuestions('c2', [q('x'), q('y')]);
+      await store.pruneQuestions('c1', {'a'});
+      expect((await store.questions('c2')).length, 2,
+          reason: 'pruning one course must not reach into another');
+    });
+
+    test('pruning twice is not a second deletion', () async {
+      expect(await store.pruneQuestions('c1', {'a', 'b', 'c'}), 1);
+      expect(await store.pruneQuestions('c1', {'a', 'b', 'c'}), 0);
+    });
+  });
+
+  group('an edit that clears a field', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_clear_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      store = (await OfflineStore.open())!;
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    Map<String, dynamic> row(String why) => {
+          'id': 'q1',
+          'course_id': 'c1',
+          'question_html': '<p>Q</p>',
+          'correct_key': 'A',
+          'explanation_html': why,
+        };
+
+    test('a PARTIAL row still must not strip what the phone holds',
+        () async {
+      // The reason the merge exists. On the direct path an attempt opens
+      // with the answer key stripped and fills it in only once the
+      // student has answered; overwriting would throw the key away and a
+      // question with no key cannot be marked offline.
+      await store.putQuestions('c1', [row('<p>the long explanation</p>')]);
+      await store.putQuestions('c1', [
+        {'id': 'q1', 'course_id': 'c1', 'question_html': '<p>Q</p>'},
+      ]);
+      final held = (await store.questions('c1')).first;
+      expect(held['explanation_html'], '<p>the long explanation</p>');
+      expect(held['correct_key'], 'A');
+    });
+
+    test('a COMPLETE row lets Tutor Bello clear something', () async {
+      // The same rule, unchanged, meant a wrong explanation he deleted
+      // stayed on the phone for ever, because "empty" always lost to
+      // "held". A course download sends whole rows and says so.
+      await store.putQuestions('c1', [row('<p>this was wrong</p>')]);
+      await store.putQuestions('c1', [row('')], complete: true);
+      final held = (await store.questions('c1')).first;
+      expect(held['explanation_html'], '',
+          reason: 'a cleared field must really clear');
+      expect(held['correct_key'], 'A',
+          reason: 'and the rest of the row must survive');
+    });
+  });
+}
+
+/// ============================================================
+/// WHOSE DATE IS ON THE SCREEN
+///
+/// "Check the code, also subject last updated from Bello o not the
+///  download"
+///
+/// Every recency string in the app used to answer "when did the student
+/// press a button" — savedAt, syncedAt, "Saved on this phone". Nobody
+/// has ever wanted to know that about a note. What they want is how
+/// fresh the material is, and only Tutor Bello moves that.
+/// ============================================================
+void whoseDateIsShown() {
+  group('the date on screen is Tutor Bello\'s', () {
+    OfflineItem item(String sig) => OfflineItem(
+          id: 'm1',
+          title: 'Note',
+          kind: 'note',
+          sig: sig,
+          savedAtMs: DateTime(2026, 8, 12).millisecondsSinceEpoch,
+        );
+
+    test('a material carries the date he last changed it', () {
+      // sig is already the material's own updated_at wherever the
+      // backend sends one, so the date is on the disk and costs nothing.
+      final e = item('2026-09-01T10:30:00.000Z');
+      expect(e.updatedAt, isNotNull);
+      expect(e.updatedAt!.toUtc().month, 9);
+      expect(e.updatedAt!.toUtc().day, 1);
+      expect(e.savedAt.month, 8,
+          reason: 'and it is NOT the day the student downloaded it');
+    });
+
+    test('the URL form of a signature is not a date', () {
+      // Older backends, and anything the sync could only fingerprint by
+      // URL. Showing "updated 1970" would be worse than showing nothing.
+      expect(item('https://example.com/a.pdf#3').updatedAt, isNull);
+      expect(item('carried-over').updatedAt, isNull);
+      expect(item('').updatedAt, isNull);
+    });
+
+    test('a course carries it too, and holds it offline', () {
+      const stamp = CourseStamp(
+        id: 'c1',
+        materials: 3,
+        questions: 40,
+        stamp: '2026-09-01T10:30:00.000Z',
+      );
+      expect(stamp.updatedAt, isNotNull);
+      expect(stamp.updatedAt!.toUtc().day, 1);
+    });
+
+    test('an unstamped course shows nothing rather than a wrong date', () {
+      const stamp = CourseStamp(id: 'c1', materials: 3, questions: 40);
+      expect(stamp.updatedAt, isNull);
+    });
+  });
+}
+
+/// ============================================================
+/// CLEARING A COURSE TUTOR BELLO TOOK DOWN
+///
+/// The app announces a withdrawn course and tells the student to free
+/// the space. Nothing could actually free it: the question bank is
+/// stored as an item of kind 'questions', which the Vault filters out
+/// of its list and the evictor skips — while its bytes still count
+/// against the storage ceiling. So the banner pointed at a screen that
+/// could not show the thing it was talking about, the record was never
+/// removed, and the notice stayed up for the life of the install.
+/// ============================================================
+void clearingAWithdrawnCourse() {
+  group('a withdrawn course can actually be cleared', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_forget_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      store = (await OfflineStore.open())!;
+
+      await store.putQuestions('gone', [
+        {'id': 'q1', 'course_id': 'gone', 'question_html': '<p>a</p>'},
+        {'id': 'q2', 'course_id': 'gone', 'question_html': '<p>b</p>'},
+      ]);
+      await store.putNote(
+        id: 'n1',
+        title: 'A note',
+        html: '<p>body</p>',
+        courseId: 'gone',
+      );
+      await store.putNote(
+        id: 'keep',
+        title: 'Another course',
+        html: '<p>body</p>',
+        courseId: 'staying',
+      );
+      await store.putCourseRecord('gone',
+          materials: 1, questions: 2, stamp: 's', ok: true, bytes: 10);
+      await store.flush();
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    test('the question bank is invisible in the Vault but real on disk',
+        () async {
+      // The reason the old banner was unfollowable.
+      expect(store.readable.any((i) => i.kind == 'questions'), isFalse,
+          reason: 'the Vault cannot show it');
+      expect((await store.questions('gone')).length, 2,
+          reason: 'and yet there it is');
+      expect(store.totalBytes, greaterThan(0),
+          reason: 'counting against the ceiling the whole time');
+    });
+
+    test('forgetting the course takes all of it', () async {
+      final freed = await store.forgetCourse('gone');
+      expect(freed, greaterThan(0));
+      expect(await store.questions('gone'), isEmpty);
+      expect(store.item('n1'), isNull);
+      expect(store.courseRecord('gone'), isNull,
+          reason: 'the record must go too, or the banner never clears');
+    });
+
+    test('and leaves every other course alone', () async {
+      await store.forgetCourse('gone');
+      expect(store.item('keep'), isNotNull);
+    });
+
+    test('it survives being read back from disk', () async {
+      await store.forgetCourse('gone');
+      final reopened = await OfflineStore.open();
+      expect(reopened!.courseRecord('gone'), isNull);
+      expect(await reopened.questions('gone'), isEmpty);
+      expect(reopened.item('keep'), isNotNull);
+    });
+
+    test('forgetting nothing is not an error', () async {
+      expect(await store.forgetCourse('never-existed'), 0);
+      expect(await store.forgetCourse(''), 0);
+    });
+  });
+
+  group('the record says what LANDED, not what the server has', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_record_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      store = (await OfflineStore.open())!;
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    test('the two counts are kept apart', () async {
+      // With offline_questions switched off nothing is fetched, and the
+      // manifest's count was stored anyway — so from the next launch the
+      // course announced "works without data · 412 questions" with none
+      // of them on the phone. The server's numbers must stay the
+      // server's, or the badge can never settle; what the student is
+      // TOLD they have has to be what landed.
+      await store.putCourseRecord(
+        'c1',
+        materials: 8,
+        questions: 412,
+        heldQuestions: 0,
+        heldFiles: 8,
+        stamp: 's',
+        ok: true,
+      );
+      final rec = store.courseRecord('c1')!;
+      expect(rec['questions'], 412, reason: 'what the server has');
+      expect(rec['heldQuestions'], 0, reason: 'what is on the phone');
+    });
+
+    test('a failure records WHY, so it is not blamed on Tutor Bello',
+        () async {
+      // A file that can never be fetched latched ok:false, and the card
+      // then told the student, in his name, every launch for ever, that
+      // he had changed something. He had not.
+      await store.putCourseRecord(
+        'c1',
+        materials: 8,
+        questions: 40,
+        stamp: 's',
+        ok: false,
+        reason: 'Your offline library is full.',
+      );
+      final rec = store.courseRecord('c1')!;
+      expect(rec['ok'], isFalse);
+      expect(rec['reason'], 'Your offline library is full.');
+    });
+  });
+}
+
+/// ============================================================
+/// A SYNC THAT NEVER LEFT THE PHONE MUST NOT CLAIM TO HAVE SYNCED
+///
+/// loadContent falls back to the cached shelf whenever it cannot reach
+/// the server. That is right for reading — the app has to keep working
+/// with the data off — and it was catastrophic for syncing, because the
+/// sync engine treated the cached answer as a successful check: no jobs
+/// were planned, markSynced() stamped the clock, and the Vault said
+/// "Last synced 3:14 PM". A student in a lecture hall with no signal
+/// tapped Sync, read that, turned their data off and believed they were
+/// holding today's material.
+///
+/// So loadContent now says WHERE its answer came from, and the sync
+/// refuses to stamp anything it did not actually check.
+/// ============================================================
+void syncingWithNoSignal() {
+  group('a sync that never reached the server', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      LocalStore.resetForTest();
+    });
+
+    test('serves the cached shelf but reports that it is cached', () async {
+      final store = await LocalStore.init();
+      await store.writeJson(BxKeys.cachedContent, {
+        'courses': [
+          {'id': 'c1', 'code': 'PHY 101', 'title': 'General Physics I'},
+        ],
+        'materials': const [],
+      });
+
+      // Backend() with nothing configured cannot reach anything, which
+      // is exactly the lecture-hall case.
+      final repo = ContentRepository(Backend(), store);
+      final fresh = await repo.loadContent(level: '100', force: true);
+
+      expect(fresh, isFalse,
+          reason: 'nothing was checked, so nothing may be claimed');
+      expect(repo.courses, hasLength(1),
+          reason: 'the student still reads what they already have');
+    });
+
+    test('a shelf that is neither on the server nor on the phone throws',
+        () async {
+      final store = await LocalStore.init();
+      final repo = ContentRepository(Backend(), store);
+      await expectLater(
+        repo.loadContent(level: '100', force: true),
+        throwsA(anything),
+      );
+    });
+  });
+}
+
+/// ============================================================
+/// A SAVED DOCUMENT THAT TUTOR BELLO HAS SINCE CHANGED
+///
+/// The reader always preferred the vaulted copy, which is right, and
+/// then never checked it against what the server publishes, which is
+/// not. A corrected past-question paper could never reach a student who
+/// had already saved the wrong one: the screen said nothing, carried no
+/// date, and pull-to-refresh reloaded the row and handed back the same
+/// file.
+/// ============================================================
+void aSavedCopyThatFellBehind() {
+  group('a saved document knows when it has fallen behind', () {
+    // The comparison the reader makes: the sig written at save time
+    // against the material's updated_at now.
+    bool stale({required String held, required String live}) =>
+        held.isNotEmpty && live.isNotEmpty && held != live;
+
+    test('a re-uploaded document is stale', () {
+      expect(
+        stale(
+          held: '2026-08-01T09:00:00.000Z',
+          live: '2026-09-03T16:20:00.000Z',
+        ),
+        isTrue,
+      );
+    });
+
+    test('the same document is not', () {
+      expect(
+        stale(
+          held: '2026-08-01T09:00:00.000Z',
+          live: '2026-08-01T09:00:00.000Z',
+        ),
+        isFalse,
+      );
+    });
+
+    test('an unknown date on either side raises no false alarm', () {
+      // A backend that sends no updated_at, or a copy saved by an older
+      // build. "We cannot tell" must not become "yours is out of date"
+      // on a document that never changed — that sends a student to
+      // spend data re-downloading a file they already hold.
+      expect(stale(held: '', live: '2026-09-03T16:20:00.000Z'), isFalse);
+      expect(stale(held: '2026-08-01T09:00:00.000Z', live: ''), isFalse);
+      expect(stale(held: '', live: ''), isFalse);
+    });
+
+    test('the date the student sees comes off the saved copy', () {
+      final e = OfflineItem(
+        id: 'm1',
+        title: 'PHY 101 · 2023 past questions',
+        kind: 'pq',
+        sig: '2026-09-03T16:20:00.000Z',
+        savedAtMs: DateTime(2026, 9, 4).millisecondsSinceEpoch,
+      );
+      expect(e.updatedAt!.toUtc().day, 3,
+          reason: "Tutor Bello's date, not the download's");
+    });
+  });
+}
+
+/// ============================================================
+/// THE ONE LINE THE OWNER ASKED FOR
+///
+/// "subject last updated from Bello o not the download."
+///
+/// It was printed in UTC while "today" was read from the phone's own
+/// clock, so a note Tutor Bello posted at half past midnight in Lagos
+/// told the whole country it was "yesterday" — and the year was dropped
+/// entirely, which on an app that runs the same PHY 101 session after
+/// session makes last year's material indistinguishable from this
+/// year's. CI now runs the suite with TZ=Africa/Lagos so a regression
+/// here cannot hide behind a UTC runner.
+/// ============================================================
+void belloDateReadsRight() {
+  group("Tutor Bello's date", () {
+    test('is rendered in the student\'s own time, not UTC', () {
+      // Half past midnight in Lagos on 4 September is 23:30 UTC on the
+      // 3rd. Rendered as UTC it reads "yesterday" to every student in
+      // the country.
+      final instant = DateTime.utc(2026, 9, 3, 23, 30);
+      final local = instant.toLocal();
+      final noonThatLocalDay =
+          DateTime(local.year, local.month, local.day, 12);
+      expect(bxBelloDate(instant, now: noonThatLocalDay), 'today');
+    });
+
+    test('says today, yesterday, then days, then the date', () {
+      final now = DateTime(2026, 9, 10, 12);
+      expect(bxBelloDate(DateTime(2026, 9, 10, 6), now: now), 'today');
+      expect(bxBelloDate(DateTime(2026, 9, 9, 23), now: now), 'yesterday');
+      expect(bxBelloDate(DateTime(2026, 9, 7), now: now), '3 days ago');
+      expect(bxBelloDate(DateTime(2026, 9, 1), now: now), '1 Sep');
+    });
+
+    test('carries the year on anything from another session', () {
+      final now = DateTime(2026, 9, 10, 12);
+      expect(bxBelloDate(DateTime(2025, 10, 12), now: now), '12 Oct 2025');
+      expect(bxBelloDate(DateTime(2026, 1, 4), now: now), '4 Jan');
+    });
+
+    test('a date in the future is not called "-1 days ago"', () {
+      // Clock skew on a cheap phone, or a stamp written by a server an
+      // hour ahead. It must still read as a date.
+      final now = DateTime(2026, 9, 10, 12);
+      expect(bxBelloDate(DateTime(2026, 9, 12), now: now), '12 Sep');
+    });
+  });
+}
+
+/// ============================================================
+/// THE LINE DROPS IN THE MIDDLE OF A ROUND
+///
+/// "I left a practice questions I suppose to meet it back."
+///
+/// A practice round opened against the server used to lose the answer
+/// outright the moment the connection went: the tap raised a toast
+/// about the network and nothing was written anywhere. On the direct
+/// path — which strips the answer key until a student commits — the
+/// phone often cannot mark it either.
+///
+/// Three outcomes are possible and only one of them is acceptable:
+/// lose it (what it did), guess at it, or keep it and say plainly that
+/// it is not marked yet.
+/// ============================================================
+void aRoundThatLostItsLine() {
+  group('an answer taken with no line', () {
+    test('a verdict that could not be marked says so', () {
+      const pending = AnswerVerdict.pending();
+      expect(pending.graded, isFalse);
+      expect(pending.correct, isFalse,
+          reason: 'and correct stays false, so nothing reads it as a pass');
+    });
+
+    test('a real verdict is graded', () {
+      expect(const AnswerVerdict(correct: true).graded, isTrue);
+      expect(const AnswerVerdict(correct: false).graded, isTrue);
+      expect(
+        AnswerVerdict.fromJson({'correct': true, 'correct_key': 'B'}).graded,
+        isTrue,
+        reason: 'anything the server answered has been marked',
+      );
+    });
+
+    test('an unmarked answer reads back as unmarked, not as wrong', () {
+      // This is the row written to disk. `is_correct: null` has to
+      // survive the round trip: read back as false it would tell a
+      // student they got it wrong because nobody could check.
+      final given = GivenAnswer.fromJson({
+        'choice': 'C',
+        'answer_text': '',
+        'is_correct': null,
+        'pending': true,
+      });
+      expect(given.isAnswered, isTrue, reason: 'the answer is kept');
+      expect(given.isCorrect, isNull, reason: 'and it is NOT marked wrong');
+    });
+
+    test('a marked answer still reads back marked', () {
+      expect(
+        GivenAnswer.fromJson({'choice': 'A', 'is_correct': true}).isCorrect,
+        isTrue,
+      );
+      expect(
+        GivenAnswer.fromJson({'choice': 'A', 'is_correct': false}).isCorrect,
+        isFalse,
+      );
+    });
+
+    test('an unmarked answer is not counted as correct', () {
+      // The score line counts `isCorrect == true`, so an unmarked
+      // answer must never inflate it.
+      final answers = <String, GivenAnswer>{
+        'q1': const GivenAnswer(choice: 'A', isCorrect: true),
+        'q2': const GivenAnswer(choice: 'B', isCorrect: false),
+        'q3': const GivenAnswer(choice: 'C'),
+      };
+      expect(answers.values.where((a) => a.isCorrect == true).length, 1);
     });
   });
 }

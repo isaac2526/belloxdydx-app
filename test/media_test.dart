@@ -56,6 +56,17 @@ class _FakePaths extends PathProviderPlatform with MockPlatformInterfaceMixin {
   Future<String?> getApplicationSupportPath() async => root;
 }
 
+/// True when these bytes come off the disk, whatever the provider has
+/// been wrapped in on the way. Every picture is now handed to the
+/// decoder through a ResizeImage so it is decoded at the size it will
+/// be drawn — the wrapper says nothing about WHERE the bytes came from,
+/// which is what these tests are about.
+bool _isFromDisk(ImageProvider provider) {
+  if (provider is FileImage) return true;
+  if (provider is ResizeImage) return _isFromDisk(provider.imageProvider);
+  return false;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -213,21 +224,58 @@ void main() {
 
       // The PROVIDER is what is under test — where the bytes come from.
       // Waiting for a decode would only be testing the codec.
+      //
+      // Unwrapped, because a saved picture is now handed to the decoder
+      // through a ResizeImage: it still comes off the disk, and it is
+      // no longer decoded at whatever resolution it was uploaded at.
       expect(
-        find.byWidgetPredicate((w) => w is Image && w.image is FileImage),
+        find.byWidgetPredicate((w) => w is Image && _isFromDisk(w.image)),
         findsOneWidget,
         reason: 'a synced picture must come off the disk, not the network',
       );
+    });
+
+    testWidgets('a picture is decoded at screen size, not upload size',
+        (tester) async {
+      // The single biggest thing standing between this app and a cheap
+      // phone. Flutter decodes at FULL resolution unless told otherwise
+      // and holds the result as raw RGBA, so one 3000x2000 photograph
+      // out of a lecture slide costs 24 MB of heap and a note with six
+      // diagrams costs 144 MB. On a 1 GB phone that is a kill, not a
+      // slowdown.
+      final png = <int>[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, //
+        0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, //
+        68, 65, 84, 120, 218, 99, 252, 207, 192, 80, 15, 0, 4, 133, 1, 128, //
+        132, 169, 140, 33, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+      ];
+      await tester.runAsync(() => store.putAsset(imageUrl, png));
+      await tester.pumpWidget(host(const BxImage(imageUrl: imageUrl)));
+      await tester.pump();
+
+      final image = tester.widget<Image>(
+        find.byWidgetPredicate((w) => w is Image && _isFromDisk(w.image)),
+      );
+      final provider = image.image;
+      expect(provider, isA<ResizeImage>(),
+          reason: 'an uncapped decode is what fills a cheap phone');
+      final resize = provider as ResizeImage;
+      expect(resize.width, isNotNull);
+      expect(resize.width!, lessThanOrEqualTo(2048),
+          reason: 'nothing on a phone is drawn wider than this');
+      expect(resize.allowUpscaling, isFalse,
+          reason: 'a small picture must not be blown up into more memory '
+              'than it needs');
     });
 
     testWidgets('one that is not saved hands over to the network loader',
         (tester) async {
       await tester.pumpWidget(host(const BxImage(imageUrl: imageUrl)));
       await tester.pump(const Duration(milliseconds: 300));
-      // No FileImage, because there is no file — the widget did not
+      // No file provider, because there is no file — the widget did not
       // invent one, and did not draw the URL either.
       expect(
-        find.byWidgetPredicate((w) => w is Image && w.image is FileImage),
+        find.byWidgetPredicate((w) => w is Image && _isFromDisk(w.image)),
         findsNothing,
       );
     });

@@ -11,6 +11,7 @@ import '../../core/config.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart' show formatBytes;
 import '../../ui/ui.dart';
 import '../shell/app_drawer.dart';
 import '../shell/app_shell.dart';
@@ -230,6 +231,17 @@ class _DashboardBody extends ConsumerWidget {
     return BxStagger(
       spacing: BxSpace.md,
       children: [
+        // Tutor Bello has closed the platform. Said plainly, at the
+        // top, in his own words — and everything already downloaded
+        // keeps working, which is the point of the softer wall.
+        if (ref.watch(appPolicyProvider).maintenance)
+          BxBanner(
+            title: 'Belloxdydx is closed for a moment',
+            message: ref.watch(appPolicyProvider).closedMessage,
+            icon: Icons.construction_rounded,
+            accent: BxAccent.warning,
+          ),
+
         if (!activated)
           BxBanner(
             title: 'Preview mode',
@@ -239,6 +251,13 @@ class _DashboardBody extends ConsumerWidget {
             actionLabel: 'Activate now',
             onAction: () => context.push(Routes.activate),
           ),
+
+        // "it should say that, there's a change in course, download now"
+        //
+        // Here rather than only on the course itself, because a student
+        // who does not open CHM 101 for a week is exactly the one who
+        // needs telling that CHM 101 changed.
+        if (activated) const _CourseUpdatesBanner(),
 
         if (d.resume != null) _ResumeCard(d.resume!, activated: activated),
 
@@ -341,7 +360,8 @@ class _DashboardBody extends ConsumerWidget {
 
         if (d.wallOfFame.isNotEmpty) _WallOfFame(d.wallOfFame),
 
-        if (d.marathonAt != null) _MarathonCard(d.marathonAt!),
+        if (d.marathonAt != null)
+          _MarathonCard(d.marathonAt!, d.marathonTitle),
 
         _RecentResults(d.recent),
 
@@ -797,7 +817,12 @@ class _WallOfFame extends StatelessWidget {
 
 class _MarathonCard extends StatefulWidget {
   final DateTime at;
-  const _MarathonCard(this.at);
+
+  /// Tutor Bello's words. The card is drawn only when the backend
+  /// supplies a date at all, so clearing the date in the panel takes
+  /// the whole thing off every phone without a new build.
+  final String title;
+  const _MarathonCard(this.at, this.title);
 
   @override
   State<_MarathonCard> createState() => _MarathonCardState();
@@ -837,8 +862,10 @@ class _MarathonCardState extends State<_MarathonCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _Head(
-            eyebrow: 'Marathon countdown',
-            title: 'December is for history!!!',
+            eyebrow: 'Countdown',
+            title: widget.title.trim().isEmpty
+                ? 'Marathon'
+                : widget.title.trim(),
             trailing: Icon(Icons.timer_outlined, size: 20, color: c.violet),
           ),
           const SizedBox(height: BxSpace.xs),
@@ -1140,6 +1167,89 @@ class _ReferralCard extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The "download now" nudge, on the screen a student opens first.
+///
+/// Only ever counts courses this phone has ALREADY downloaded — a
+/// course that was never taken offline is not an update, it is simply
+/// not downloaded, which is a different sentence and a different
+/// button. Draws nothing at all when there is nothing to say.
+class _CourseUpdatesBanner extends ConsumerWidget {
+  const _CourseUpdatesBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // A course Tutor Bello withdrew is a different sentence from one he
+    // changed, and it wins: material he has taken down should not sit on
+    // a student's phone being revised from.
+    final gone = ref.watch(withdrawnCoursesProvider);
+    final n = ref.watch(coursesWithUpdatesProvider);
+
+    // BOTH, when both apply.
+    //
+    // The withdrawal banner used to return early, so a single deleted
+    // course permanently hid "there's a change in your courses" behind
+    // it — and since nothing could clear the withdrawal, permanently
+    // meant permanently. The badge Tutor Bello asked for was switched
+    // off by an unrelated, undismissable notice.
+    // Nothing to say: draw NOTHING, not an empty Column. An empty
+    // Column is still a child of the stagger above, so it took a gap on
+    // each side of it — a phantom band at the top of every activated
+    // student's dashboard, every day, with nothing in it.
+    if (gone.isEmpty && n == 0) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (gone.isNotEmpty) ...[
+          BxBanner(
+            title: gone.length == 1
+                ? 'One course was taken down'
+                : '${gone.length} courses were taken down',
+            // It says what the button does, because the Vault cannot
+            // show a question bank — that item is filtered out of it —
+            // so "go and clear it there" was an instruction nobody
+            // could follow.
+            message: 'Tutor Bello has removed material you had saved. It '
+                'is still taking up room on this phone and it is no '
+                'longer part of your course.',
+            icon: Icons.unpublished_rounded,
+            accent: BxAccent.danger,
+            actionLabel: 'Clear it and free the space',
+            onAction: () async {
+              final freed =
+                  await ref.read(withdrawnCoursesProvider.notifier).clear();
+              if (!context.mounted) return;
+              bxToast(
+                context,
+                freed > 0
+                    ? 'Cleared. ${formatBytes(freed)} back.'
+                    : 'Cleared.',
+              );
+            },
+          ),
+          if (n > 0) const SizedBox(height: BxSpace.md),
+        ],
+        if (n > 0) _updatesBanner(context, n),
+      ],
+    );
+  }
+
+  Widget _updatesBanner(BuildContext context, int n) {
+    return BxBanner(
+      title: n == 1
+          ? "There's a change in one of your courses"
+          : "There's a change in $n of your courses",
+      message: 'Tutor Bello has added or changed material since you last '
+          'downloaded. Open the course and tap Update — then it works '
+          'without data again.',
+      icon: Icons.sync_problem_rounded,
+      accent: BxAccent.warning,
+      actionLabel: 'Open my courses',
+      onAction: () => context.go(Routes.courses),
     );
   }
 }

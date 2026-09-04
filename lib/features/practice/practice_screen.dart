@@ -170,12 +170,20 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
         _answers[q.id] = GivenAnswer(
           choice: choice,
           answerText: text.isEmpty ? null : text,
-          isCorrect: verdict.correct,
+          // Null, not false, when the line dropped and the phone does
+          // not hold the key. Marking it wrong because nobody could
+          // check it is the one answer this screen must never give.
+          isCorrect: verdict.graded ? verdict.correct : null,
         );
         _busyId = null;
         _busyChoice = null;
       });
-      if (verdict.correct) HapticFeedback.lightImpact();
+      if (!verdict.graded) {
+        bxToast(context,
+            'Kept. Your line dropped, so this one is marked when you are '
+            'back.');
+      }
+      if (verdict.graded && verdict.correct) HapticFeedback.lightImpact();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -597,19 +605,37 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
     final picked = (given?.choice ?? '').toUpperCase();
     final correctKey = (q.correctKey ?? '').toUpperCase();
 
-    final isCorrect = answered && correctKey.isNotEmpty && key == correctKey;
+    // An answer nobody could mark yet — the line dropped and the phone
+    // does not hold the key. The pick is SHOWN, so the student can see
+    // what they chose, but it is not painted red: telling them they got
+    // it wrong because nothing could check it is a lie in the one place
+    // this app cannot afford one.
+    final unmarked = answered && given?.isCorrect == null;
+
+    final isCorrect =
+        answered && !unmarked && correctKey.isNotEmpty && key == correctKey;
     final isPicked = answered && picked.isNotEmpty && key == picked;
-    final isWrongPick = isPicked && !isCorrect;
-    final faded = answered && !isCorrect && !isPicked;
+    final isWrongPick = isPicked && !isCorrect && !unmarked;
+    final faded = answered && !unmarked && !isCorrect && !isPicked;
     final waiting = _busyId == q.id && _busyChoice == o.key;
 
     final fill = isCorrect
         ? BxAccent.success.fill(c)
-        : (isWrongPick ? BxAccent.danger.fill(c) : c.surfaceSunken);
+        : isWrongPick
+            ? BxAccent.danger.fill(c)
+            : (unmarked && isPicked ? BxAccent.info.fill(c) : c.surfaceSunken);
     final stroke = isCorrect
         ? c.success.withValues(alpha: 0.55)
-        : (isWrongPick ? c.danger.withValues(alpha: 0.55) : c.line);
-    final ink = isCorrect ? c.success : (isWrongPick ? c.danger : c.ink);
+        : isWrongPick
+            ? c.danger.withValues(alpha: 0.55)
+            : (unmarked && isPicked
+                ? c.info.withValues(alpha: 0.55)
+                : c.line);
+    final ink = isCorrect
+        ? c.success
+        : isWrongPick
+            ? c.danger
+            : (unmarked && isPicked ? c.info : c.ink);
 
     return AnimatedOpacity(
       duration: BxDuration.base,
@@ -627,7 +653,9 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
             borderRadius: BorderRadius.circular(BxRadius.sm),
             border: Border.all(
               color: stroke,
-              width: isCorrect || isWrongPick ? 1.5 : 1,
+              width: isCorrect || isWrongPick || (unmarked && isPicked)
+                  ? 1.5
+                  : 1,
             ),
           ),
           child: Row(
@@ -682,6 +710,10 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
                   size: 19,
                   color: ink,
                 ),
+              ] else if (unmarked && isPicked) ...[
+                // "This is what you chose", not "this is wrong".
+                const SizedBox(width: BxSpace.xs),
+                Icon(Icons.schedule_rounded, size: 19, color: ink),
               ],
             ],
           ),
@@ -743,6 +775,38 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
 
   Widget _verdict(Question q, GivenAnswer given) {
     final c = context.bx;
+    // An answer nobody could mark. It is kept, and it says so, rather
+    // than being shown as wrong.
+    if (given.isCorrect == null) {
+      return BxCard(
+        accent: BxAccent.info,
+        padding: const EdgeInsets.all(BxSpace.md),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.cloud_off_rounded, size: 20, color: c.info),
+            const SizedBox(width: BxSpace.xs),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Kept, not marked yet', style: BxType.h3(c.info)),
+                  const SizedBox(height: BxSpace.xxs),
+                  Text(
+                    'Your line dropped before this one could be checked. '
+                    'The answer is saved — keep going, and it is marked '
+                    'the moment you are back. Download this course and '
+                    'even that stops happening.',
+                    style: BxType.small(c.inkSoft),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     final ok = given.isCorrect == true;
     final accent = ok ? BxAccent.success : BxAccent.danger;
     final saved = _bookmarks.contains(q.id);

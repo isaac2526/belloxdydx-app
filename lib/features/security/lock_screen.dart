@@ -34,11 +34,14 @@ class _LockOverlayState extends ConsumerState<LockOverlay> {
   @override
   Widget build(BuildContext context) {
     final lock = ref.watch(appLockProvider);
-    final locked = lock == BxLockState.locked || lock == BxLockState.asking;
+    final locked = lock == BxLockState.locked ||
+        lock == BxLockState.enrolling ||
+        lock == BxLockState.asking;
 
     // The moment the lock comes down, ask — so the common case is one
     // touch of the sensor and back to work, with no button to find.
-    if (lock == BxLockState.locked && !_asked) {
+    if ((lock == BxLockState.locked || lock == BxLockState.enrolling) &&
+        !_asked) {
       _asked = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) ref.read(appLockProvider.notifier).unlock();
@@ -59,7 +62,10 @@ class _LockOverlayState extends ConsumerState<LockOverlay> {
         ),
         if (locked)
           Positioned.fill(
-            child: _LockFace(asking: lock == BxLockState.asking),
+            child: _LockFace(
+              asking: lock == BxLockState.asking,
+              enrolling: lock == BxLockState.enrolling,
+            ),
           ),
       ],
     );
@@ -68,7 +74,8 @@ class _LockOverlayState extends ConsumerState<LockOverlay> {
 
 class _LockFace extends ConsumerWidget {
   final bool asking;
-  const _LockFace({required this.asking});
+  final bool enrolling;
+  const _LockFace({required this.asking, this.enrolling = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -76,42 +83,84 @@ class _LockFace extends ConsumerWidget {
     return Material(
       color: c.ground,
       child: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 380),
-            child: Padding(
-              padding: const EdgeInsets.all(BxSpace.lg),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const BxAuthBrand(size: 72),
-                  const SizedBox(height: BxSpace.lg),
-                  Text('Locked', style: BxType.h1(c.ink)),
-                  const SizedBox(height: BxSpace.xs),
-                  Text(
-                    'You stepped away, so we closed it. Your fingerprint '
-                    'opens it again — no password needed.',
-                    style: BxType.body(c.inkSoft),
-                    textAlign: TextAlign.center,
+        // Scrollable, and centred only when there is room to centre it.
+        //
+        // This is the one screen in the app a student cannot navigate
+        // away from, so an overflow here is not a cosmetic complaint —
+        // it is the Unlock button pushed off the bottom of the screen
+        // with no way to reach it. Measured: on a 320x568 phone at the
+        // largest text size the app allows, the enrolment wording ran
+        // 40 pixels past the bottom.
+        child: LayoutBuilder(
+          builder: (context, box) => SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: box.maxHeight),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 380),
+                  child: Padding(
+                    padding: const EdgeInsets.all(BxSpace.lg),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const BxAuthBrand(size: 72),
+                        const SizedBox(height: BxSpace.lg),
+                        Text(
+                          enrolling ? 'Lock this to you' : 'Locked',
+                          style: BxType.h1(c.ink),
+                        ),
+                        const SizedBox(height: BxSpace.xs),
+                        Text(
+                          enrolling
+                              ? 'From now on Belloxdydx opens with your own '
+                                  'fingerprint, face or screen PIN — the same one '
+                                  'that opens this phone. Nobody who picks it up '
+                                  'gets into your account. Touch the sensor once '
+                                  'to set it.'
+                              : 'You stepped away, so we closed it. Your '
+                                  'fingerprint opens it again — no password '
+                                  'needed.',
+                          style: BxType.body(c.inkSoft),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: BxSpace.lg),
+                        BxButton(
+                          enrolling ? 'Set it now' : 'Unlock',
+                          icon: Icons.fingerprint_rounded,
+                          loading: asking,
+                          loadingLabel: 'Waiting for the sensor…',
+                          expand: true,
+                          large: true,
+                          onPressed: asking
+                              ? null
+                              : () =>
+                                  ref.read(appLockProvider.notifier).unlock(),
+                        ),
+                        const SizedBox(height: BxSpace.sm),
+                        if (enrolling)
+                          // A wet sensor must never be the reason a student
+                          // cannot open an app they have just paid for. The
+                          // lock stays on; this only means "not this second".
+                          TextButton(
+                            onPressed: asking
+                                ? null
+                                : () => ref
+                                    .read(appLockProvider.notifier)
+                                    .skipEnrolment(),
+                            child:
+                                Text('Not now', style: BxType.small(c.muted)),
+                          )
+                        else
+                          TextButton(
+                            onPressed: () =>
+                                ref.read(sessionProvider.notifier).signOut(),
+                            child: Text('Sign out instead',
+                                style: BxType.small(c.muted)),
+                          ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: BxSpace.lg),
-                  BxButton(
-                    'Unlock',
-                    icon: Icons.fingerprint_rounded,
-                    loading: asking,
-                    loadingLabel: 'Waiting for the sensor…',
-                    expand: true,
-                    large: true,
-                    onPressed: asking
-                        ? null
-                        : () => ref.read(appLockProvider.notifier).unlock(),
-                  ),
-                  const SizedBox(height: BxSpace.sm),
-                  TextButton(
-                    onPressed: () => ref.read(sessionProvider.notifier).signOut(),
-                    child: Text('Sign out instead', style: BxType.small(c.muted)),
-                  ),
-                ],
+                ),
               ),
             ),
           ),

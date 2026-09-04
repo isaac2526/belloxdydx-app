@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/theme/tokens.dart';
@@ -113,16 +115,42 @@ class BxStagger extends StatelessWidget {
     this.crossAxisAlignment = CrossAxisAlignment.stretch,
   });
 
+  /// How many children get an entrance. Past this they are simply
+  /// drawn.
+  ///
+  /// Two reasons, and both of them are about a cheap phone. Each
+  /// animated child costs an AnimationController and a pending timer,
+  /// so a shelf of twenty-two courses was twenty-two of each — on a
+  /// screen where at most four are visible. And the stagger is
+  /// cumulative: at 40 ms a step, the twenty-second card began its
+  /// entrance almost a second after the first, which reads as the app
+  /// being slow rather than as a flourish.
+  static const int maxAnimated = 10;
+
+  /// A child that draws nothing must not be spaced as though it did.
+  ///
+  /// A section that decides for itself whether it has anything to say —
+  /// a banner watching a provider, say — returns SizedBox.shrink() when
+  /// it has not. It was still a child, so it still got a gap on each
+  /// side of it: a phantom band of dead space at the top of a screen
+  /// with nothing in it. Dropping it here fixes every such section at
+  /// once rather than one screen at a time.
+  static bool _draws(Widget w) =>
+      !(w is SizedBox && w.width == 0 && w.height == 0);
+
   @override
   Widget build(BuildContext context) {
+    final visible = children.where(_draws).toList(growable: false);
     final items = <Widget>[];
-    for (var i = 0; i < children.length; i++) {
+    for (var i = 0; i < visible.length; i++) {
       if (i > 0) {
         items.add(direction == Axis.vertical
             ? SizedBox(height: spacing)
             : SizedBox(width: spacing));
       }
-      items.add(BxFadeIn(delay: step * i, child: children[i]));
+      items.add(i < maxAnimated
+          ? BxFadeIn(delay: step * i, child: visible[i])
+          : visible[i]);
     }
     return direction == Axis.vertical
         ? Column(crossAxisAlignment: crossAxisAlignment, children: items)
@@ -153,6 +181,21 @@ class _BxFadeInState extends State<BxFadeIn>
   late final AnimationController _c =
       AnimationController(vsync: this, duration: BxDuration.slow);
 
+  /// Built ONCE and disposed.
+  ///
+  /// It used to be constructed inside build(), which means a fresh
+  /// CurvedAnimation — and a fresh listener on the controller — on
+  /// every rebuild, none of them ever disposed. On a list that rebuilds
+  /// as it scrolls that is a leak that grows for as long as the screen
+  /// is open, and Flutter now asserts about exactly this in debug.
+  late final CurvedAnimation _curved =
+      CurvedAnimation(parent: _c, curve: BxCurves.enter);
+
+  /// Held so it can be cancelled. A bare Future.delayed keeps its
+  /// closure — and this State — alive until it fires, however long ago
+  /// the widget went away.
+  Timer? _start;
+
   @override
   void initState() {
     super.initState();
@@ -161,7 +204,7 @@ class _BxFadeInState extends State<BxFadeIn>
         if (mounted) _c.forward();
       });
     } else {
-      Future<void>.delayed(widget.delay, () {
+      _start = Timer(widget.delay, () {
         if (mounted) _c.forward();
       });
     }
@@ -169,6 +212,8 @@ class _BxFadeInState extends State<BxFadeIn>
 
   @override
   void dispose() {
+    _start?.cancel();
+    _curved.dispose();
     _c.dispose();
     super.dispose();
   }
@@ -176,14 +221,13 @@ class _BxFadeInState extends State<BxFadeIn>
   @override
   Widget build(BuildContext context) {
     if (reduceMotion(context)) return widget.child;
-    final curved = CurvedAnimation(parent: _c, curve: BxCurves.enter);
     return AnimatedBuilder(
-      animation: curved,
+      animation: _curved,
       child: widget.child,
       builder: (_, child) => Opacity(
-        opacity: curved.value,
+        opacity: _curved.value,
         child: Transform.translate(
-          offset: Offset(0, widget.offsetY * (1 - curved.value)),
+          offset: Offset(0, widget.offsetY * (1 - _curved.value)),
           child: child,
         ),
       ),

@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/config.dart';
 import 'failures.dart';
+import 'net_speed.dart';
 import 'offline/offline_store.dart';
 import 'models.dart';
 
@@ -88,6 +89,11 @@ class Backend {
 
   final http.Client _http;
 
+  /// How fast the connection actually is, measured from the traffic the
+  /// app is already making rather than from a test file nobody asked
+  /// to pay for.
+  final NetSpeedMeter speed = NetSpeedMeter();
+
   BackendMode _mode = BackendMode.legacy;
   BackendMode get mode => _mode;
   bool get isDirect => _mode == BackendMode.direct;
@@ -95,12 +101,48 @@ class Backend {
   int _capabilityVersion = 0;
   int get capabilityVersion => _capabilityVersion;
 
+  /// The name of the path this app ended on last time, for storing.
+  String get modeName => _mode.name;
+
+  /// Puts the app back on the path it used last launch, before the
+  /// probe has answered.
+  ///
+  /// The probe is a network call. Waiting for it before the first
+  /// request means every launch pays it, and a launch on a bad
+  /// connection pays it in full — eight seconds of splash screen for a
+  /// question the phone already knew the answer to. Only a SUCCESSFUL
+  /// probe is ever stored, so restoring `direct` can only put the app
+  /// on a path this database really served; the probe still runs behind
+  /// the first frame and corrects this within a second or two.
+  void restoreMode(String? name) {
+    if (BxConfig.forceLegacyApi) return;
+    if (name == BackendMode.direct.name) _mode = BackendMode.direct;
+  }
+
   SupabaseClient get sb => Supabase.instance.client;
   GoTrueClient get auth => sb.auth;
-  User? get user => sb.auth.currentUser;
-  String? get userId => sb.auth.currentUser?.id;
-  bool get signedIn => sb.auth.currentSession != null;
-  String? get accessToken => sb.auth.currentSession?.accessToken;
+  User? get user => _session()?.user;
+
+  /// These four are read during boot and inside every request, and all
+  /// four go through `Supabase.instance`, which THROWS when initialize()
+  /// failed — which main() catches and carries on from. An unguarded
+  /// read therefore turns a failed Supabase init into an exception out
+  /// of the session boot, which leaves the router holding `unknown` and
+  /// the student looking at a splash screen with no way forward.
+  ///
+  /// Answering "no session" is the honest reply: there is no client to
+  /// have one on.
+  Session? _session() {
+    try {
+      return Supabase.instance.client.auth.currentSession;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? get userId => _session()?.user.id;
+  bool get signedIn => _session() != null;
+  String? get accessToken => _session()?.accessToken;
 
   /// The mobile session token the website issues for the single-session
   /// rule. Only used on the legacy path.
@@ -155,6 +197,8 @@ class Backend {
           !(r.isEmpty || r.every((x) => x == ConnectivityResult.none));
       _unmetered = r.contains(ConnectivityResult.wifi) ||
           r.contains(ConnectivityResult.ethernet);
+      speed.setUnmetered(_unmetered);
+      speed.setReachable(_hasConnection ?? true);
     }
 
     // Wrapped whole, and each call wrapped again inside.
@@ -221,6 +265,7 @@ class Backend {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 25),
   }) async {
+    await ensureFreshToken();
     try {
       final res = await sb.rpc(fn, params: params).timeout(timeout);
       if (res == null) return const {};
@@ -241,6 +286,7 @@ class Backend {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 25),
   }) async {
+    await ensureFreshToken();
     try {
       final res = await sb.rpc(fn, params: params).timeout(timeout);
       if (res is List) {
@@ -275,6 +321,7 @@ class Backend {
     bool ascending = true,
     int? limit,
   }) async {
+    await ensureFreshToken();
     try {
       dynamic q = sb.from(table).select(columns);
       eq.forEach((k, v) => q = q.eq(k, v));
@@ -377,16 +424,76 @@ class Backend {
 
   Uri _uri(String path) => Uri.parse('${BxConfig.siteUrl}$path');
 
+  /// Makes sure the bearer token about to be sent is still valid.
+  ///
+  /// [accessToken] reads `currentSession.accessToken` and nothing else,
+  /// so it hands over whatever is in memory — expired or not. Supabase
+  /// access tokens last an hour and the auto-refresh only runs while
+  /// the app is in the FOREGROUND, so a phone that sat in a pocket all
+  /// afternoon wakes up holding a dead token and puts it in the header
+  /// of every website request. The website answers 401, and a 401 is
+  /// how the app decides a student is not signed in.
+  ///
+  /// So: refreshed here, once, before the request rather than after the
+  /// failure. De-duplicated, because three sync workers and a heartbeat
+  /// all arriving at an expired token would otherwise fire four
+  /// refreshes and let three of them invalidate the one that won.
+  Future<void>? _refreshing;
+
+  Future<void> ensureFreshToken() {
+    final running = _refreshing;
+    if (running != null) return running;
+
+    final session = sb.auth.currentSession;
+    if (session == null) return Future<void>.value();
+
+    // With the radio off there is nothing to refresh against, and
+    // waiting to find that out would put a timeout in front of a
+    // request that was going to fall back to the disk anyway.
+    if (_hasConnection == false) return Future<void>.value();
+
+    // A minute of headroom: a token that expires while the request is
+    // in flight is the same problem arriving slightly later.
+    final expiresAt = session.expiresAt;
+    if (expiresAt != null) {
+      final secondsLeft =
+          expiresAt - DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (secondsLeft > 60) return Future<void>.value();
+    } else if (!session.isExpired) {
+      return Future<void>.value();
+    }
+
+    final f = () async {
+      try {
+        await sb.auth
+            .refreshSession()
+            .timeout(const Duration(seconds: 8));
+      } catch (e) {
+        // A refresh that could not be made is not a reason to refuse
+        // the request. Send what we have and let the server decide —
+        // offline, that request was going to fail anyway; online with a
+        // genuinely dead token, the 401 handling takes it from here.
+        debugPrint('[auth] token refresh skipped: $e');
+      }
+    }()
+        .whenComplete(() => _refreshing = null);
+    _refreshing = f;
+    return f;
+  }
+
   Future<Map<String, dynamic>> apiGet(
     String path, {
     Duration timeout = const Duration(seconds: 25),
     int retries = 2,
   }) async {
+    await ensureFreshToken();
     Object? last;
     for (var attempt = 0; attempt <= retries; attempt++) {
       try {
+        final started = DateTime.now();
         final r =
             await _http.get(_uri(path), headers: _headers).timeout(timeout);
+        _timed(started, r);
         return _decode(r);
       } catch (e) {
         last = e;
@@ -405,9 +512,11 @@ class Backend {
     Map<String, dynamic>? body,
     Duration timeout = const Duration(seconds: 30),
   }) async {
+    await ensureFreshToken();
     try {
       final uri = _uri(path);
       final payload = body == null ? null : jsonEncode(body);
+      final started = DateTime.now();
       final r = await switch (method) {
         'PUT' => _http.put(uri, headers: _headers, body: payload),
         'PATCH' => _http.patch(uri, headers: _headers, body: payload),
@@ -415,10 +524,32 @@ class Backend {
         _ => _http.post(uri, headers: _headers, body: payload),
       }
           .timeout(timeout);
+      _timed(started, r);
       return _decode(r);
     } catch (e) {
       throw _mapGeneric(e);
     }
+  }
+
+  /// Files one completed response with the speed meter. Cannot throw and
+  /// cannot slow anything down — it is arithmetic on two numbers the
+  /// request already produced.
+  void _timed(DateTime started, http.Response r) {
+    try {
+      speed.sample(
+        bytes: r.bodyBytes.length,
+        millis: DateTime.now().difference(started).inMilliseconds,
+      );
+    } catch (_) {}
+  }
+
+  /// The same, for a transfer this class did not make — the sync engine
+  /// and the course downloader move far more bytes than the API does,
+  /// and they are where a real throughput number comes from.
+  void reportTransfer({required int bytes, required int millis}) {
+    try {
+      speed.sample(bytes: bytes, millis: millis);
+    } catch (_) {}
   }
 
   Map<String, dynamic> _decode(http.Response r) {
@@ -467,6 +598,7 @@ class Backend {
 
   void dispose() {
     _connWatch?.cancel();
+    speed.dispose();
     _http.close();
   }
 }
