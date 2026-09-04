@@ -337,8 +337,11 @@ class _CourseCard extends ConsumerWidget {
       );
     }
     if (s.updateAvailable) {
+      // Short on purpose. The full sentence lives on the course itself,
+      // where there is room for it; here it shares a row with the
+      // course code and title on phones as narrow as 320dp.
       return const BxChip(
-        'Change waiting · download now',
+        'Update ready',
         accent: BxAccent.warning,
         icon: Icons.sync_problem_rounded,
         dense: true,

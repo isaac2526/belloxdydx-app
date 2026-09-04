@@ -202,7 +202,19 @@ class BxChip extends StatelessWidget {
             Icon(icon, size: 13, color: fg),
             const SizedBox(width: 5),
           ],
-          Text(label, style: BxType.tiny(fg)),
+          // Flexible and clipped, because a chip lives in a row whose
+          // width it does not control. On a 320dp phone at the largest
+          // text size the app allows, an unconstrained label pushed the
+          // chip 56 pixels past the edge of the screen — a yellow-and-
+          // black overflow stripe across a course card.
+          Flexible(
+            child: Text(
+              label,
+              style: BxType.tiny(fg),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ],
       ),
     );
