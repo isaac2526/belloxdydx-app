@@ -251,46 +251,69 @@ jobs:
       - name: Build APK
         run: flutter build apk --release --split-debug-info=build/symbols
 
-      # Proof, in the log, of which key actually signed it - so
-      # "consistent signature" is something the build demonstrates
-      # rather than something a comment claims.
-      - name: Show the signature that shipped
-        run: |
-          APK=build/app/outputs/flutter-apk/app-release.apk
-          FP=$(keytool -printcert -jarfile "$APK" 2>/dev/null \
-                | grep -m1 "SHA256:" | tr -d ' ')
-          echo "$FP"
-          {
-            echo "### Signature"
-            if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
-              echo "- Signed with the permanent Belloxdydx release key."
-              echo "- Every future build carries this same fingerprint, so"
-              echo "  students update in place and keep their downloads."
-            else
-              echo "- ⚠️ Throwaway debug key - see the warning above."
-            fi
-            echo "- \`$FP\`"
-          } >> $GITHUB_STEP_SUMMARY
-
       - name: Build Play Store bundle
         run: flutter build appbundle --release --split-debug-info=build/symbols
 
       # A signature that silently reverted to debug is worse than a
       # failed build: it ships, it installs, and it breaks every future
-      # update. So when a key was supplied, this proves it was used.
+      # update. So when a key was supplied, this proves the finished
+      # files carry it - by FINGERPRINT, not by a name anyone could put
+      # in a certificate.
+      #
+      # The two formats need two different tools, which is what tripped
+      # the first attempt at this check up. An APK is signed with APK
+      # Signature Scheme v2/v3, a whole-file signature that `keytool
+      # -printcert -jarfile` cannot read at all - it answers "Not a
+      # signed jar file" for a perfectly signed APK. Only apksigner
+      # understands it. An AAB is a plain signed jar, so keytool is
+      # right for that one.
       - name: The key must actually have been used
         if: steps.signing.outputs.signed == 'true'
         run: |
-          for f in build/app/outputs/flutter-apk/app-release.apk \
-                   build/app/outputs/bundle/release/app-release.aab; do
-            OUT=$(keytool -printcert -jarfile "$f" 2>/dev/null)
-            echo "$OUT" | grep -q "O=Belloxdydx" || {
-              echo "::error::$f was NOT signed with the Belloxdydx release key."
-              echo "$OUT" | head -20
-              exit 1
-            }
-            echo "ok: $(basename $f) carries the Belloxdydx release key"
-          done
+          EXPECT=c175c91b17ec363d10adcba1e36fffd2d261c80ff68c119f62f511019103045d
+
+          APKSIGNER=$(ls -1 "$ANDROID_SDK_ROOT"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found under $ANDROID_SDK_ROOT/build-tools."
+            echo "::error::Cannot prove the APK signature; refusing to ship blind."
+            exit 1
+          fi
+
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          got=$("$APKSIGNER" verify --print-certs "$apk" 2>/dev/null \
+                 | grep -i "SHA-256 digest" | tr -d ' ' | tr 'A-Z' 'a-z')
+          echo "$got"
+          case "$got" in
+            *"$EXPECT"*) echo "ok: APK carries the Belloxdydx release key" ;;
+            *)
+              echo "::error::The APK is NOT signed with the Belloxdydx key."
+              echo "::error::Expected $EXPECT"
+              "$APKSIGNER" verify --print-certs "$apk" 2>&1 | head -20
+              exit 1 ;;
+          esac
+
+          aab=build/app/outputs/bundle/release/app-release.aab
+          gotb=$(keytool -printcert -jarfile "$aab" 2>/dev/null \
+                  | grep -i "SHA256:" | tr -d ' :' | tr 'A-Z' 'a-z')
+          echo "$gotb"
+          case "$gotb" in
+            *"$EXPECT"*) echo "ok: AAB carries the Belloxdydx release key" ;;
+            *)
+              echo "::error::The AAB is NOT signed with the Belloxdydx key."
+              echo "::error::Expected $EXPECT"
+              keytool -printcert -jarfile "$aab" 2>&1 | head -20
+              exit 1 ;;
+          esac
+
+          {
+            echo "### Signature verified"
+            echo "Both the APK and the AAB carry the permanent Belloxdydx key."
+            echo ""
+            echo "\`SHA-256 $EXPECT\`"
+            echo ""
+            echo "Every future build carries this same fingerprint, so students"
+            echo "update in place and keep their downloaded courses."
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: Report sizes
         run: |
