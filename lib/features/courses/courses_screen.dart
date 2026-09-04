@@ -143,8 +143,35 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
                 c.title.toLowerCase().contains(q))
             .toList();
 
+    // A LEVEL TUTOR BELLO CLOSED.
+    //
+    // Deactivate a level on the website and it stops being published.
+    // Every student standing on it then asked for a shelf that no
+    // longer exists, got an empty one, and — because the switcher only
+    // appeared when there were two or more levels to choose from — lost
+    // the one control that could have moved them off it. They sat on
+    // "No courses on this level yet" for good.
+    //
+    // So the switcher shows whenever the student's own level is gone,
+    // however few are left, and the banner says what happened instead
+    // of letting them think Tutor Bello has uploaded nothing.
+    final known = repo.levels.map((l) => l.code).toSet();
+    final stranded = repo.levels.isNotEmpty && !known.contains(level);
+
     final blocks = <Widget>[
-      if (repo.levels.length > 1) _levelSwitcher(context, repo.levels, level),
+      if (stranded)
+        BxBanner(
+          title: '$level level is closed',
+          message: repo.levels.length == 1
+              ? 'Tutor Bello has closed this level. Tap '
+                  '${_levelName(repo.levels.first)} below to carry on.'
+              : 'Tutor Bello has closed this level. Pick the one you are '
+                  'on below and your shelf comes back.',
+          icon: Icons.school_outlined,
+          accent: BxAccent.warning,
+        ),
+      if (repo.levels.length > 1 || stranded)
+        _levelSwitcher(context, repo.levels, level),
       if (all.length > _searchThreshold)
         BxSearchField(
           controller: _search,
@@ -153,7 +180,10 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
         ),
     ];
 
-    if (all.isEmpty) {
+    if (all.isEmpty && stranded) {
+      // The banner above already says what happened; a second empty
+      // state blaming Tutor Bello for not uploading would contradict it.
+    } else if (all.isEmpty) {
       blocks.add(
         BxEmptyState(
           icon: Icons.menu_book_rounded,
@@ -241,7 +271,7 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
             children: [
               for (final l in levels)
                 BxChip(
-                  l.title.isEmpty ? '${l.code} Level' : l.title,
+                  _levelName(l),
                   selected: l.code == current,
                   icon: l.owned ? null : Icons.lock_outline_rounded,
                   onTap: _switching ? null : () => _switchLevel(l),
@@ -252,6 +282,9 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
       ],
     );
   }
+
+  static String _levelName(StudyLevel l) =>
+      l.title.isEmpty ? '${l.code} Level' : l.title;
 
   static String _semesterLabel(int semester) => switch (semester) {
         1 => 'First semester',

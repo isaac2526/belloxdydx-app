@@ -278,6 +278,10 @@ const state = {
   // /__test/settings so a test can prove the app says something
   // truthful when Tutor Bello turns the offline bank off.
   offlineQuestions: true,
+  // Levels Tutor Bello has closed from the panel. Closing the one a
+  // student stands on strands them: the shelf empties and the switcher
+  // that would let them leave used to disappear with it.
+  closedLevels: [],
   // The content revision, exactly as migration 0014 keeps it: one
   // number that moves whenever anything a student can see is written.
   rev: 1,
@@ -486,13 +490,20 @@ const RPC = {
 
   bx_content: (u, p) => {
     const level = p.p_level || u.current_level || '100';
+    // Tutor Bello can close a level from the panel. When he closes the
+    // one a student is standing on, the level stops being published and
+    // their shelf goes empty — and the app has to say so and get them
+    // off it, rather than blaming him for uploading nothing.
+    const levels = [
+      { code: '100', title: '100 Level', owned: true },
+      { code: '200', title: '200 Level', owned: false },
+    ].filter((l) => !state.closedLevels.includes(l.code));
     return {
-      courses: COURSES.filter((c) => c.level_code === level),
+      courses: state.closedLevels.includes(level)
+          ? []
+          : COURSES.filter((c) => c.level_code === level),
       materials: MATERIALS.map(({ content_html, ...rest }) => rest),
-      levels: [
-        { code: '100', title: '100 Level', owned: true },
-        { code: '200', title: '200 Level', owned: false },
-      ],
+      levels,
       level,
       // Carried on the bootstrap, exactly as the real route does.
       settings: RPC.bx_app_settings(u, {}),
@@ -1152,6 +1163,14 @@ const server = http.createServer(async (req, res) => {
   if (path === '/__test/force-logout') {
     for (const u of Object.values(USERS)) state.revoked[u.id] = true;
     return send(res, 200, { ok: true });
+  }
+
+  // Tutor Bello closes a level from the panel.
+  if (path === '/__test/close-level') {
+    const code = String(body.level || '100');
+    if (!state.closedLevels.includes(code)) state.closedLevels.push(code);
+    state.rev += 1;
+    return send(res, 200, { ok: true, closed: state.closedLevels });
   }
 
   if (path === '/__test/publish') {

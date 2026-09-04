@@ -744,6 +744,33 @@ void main() {
         '$heldBefore -> $heldAfter (server still publishes '
         '${index.questionIds.length})');
 
+    // ---- Tutor Bello closes the level the student is standing on -----
+    //
+    // Deactivating a level on the website unpublishes it. Every student
+    // on it then asked for a shelf that no longer exists, got an empty
+    // one, and — because the level switcher only appeared when there
+    // were two or more levels to choose from — lost the one control
+    // that could have moved them off it. On the path production runs
+    // it was worse still: /api/mobile/content never sent `levels` at
+    // all, so the switcher had nothing to draw and opening a new level
+    // on the website reached nobody.
+    res = await tester
+        .runAsync(() => hit('/__test/close-level', '{"level":"100"}'));
+    expect(res!['status'], 200);
+
+    await tester.runAsync(() => container
+        .read(contentRepoProvider)
+        .loadContent(level: '100', force: true));
+    final repo = container.read(contentRepoProvider);
+    expect(repo.levels, isNotEmpty,
+        reason: 'THE APP MUST BE TOLD WHICH LEVELS EXIST. Without this '
+            'the switcher is blank on the path production runs, and a '
+            'student whose level Bello closed can never leave it.');
+    expect(repo.levels.map((l) => l.code), isNot(contains('100')),
+        reason: 'a closed level is not offered');
+    debugPrint('[journey] level closed -> the app is offered '
+        '${repo.levels.map((l) => l.code).join(', ')} instead');
+
     // ---- a revocation reaches a RUNNING app --------------------------
     //
     // Tutor Bello presses "Force logout" (or resets the device). The
