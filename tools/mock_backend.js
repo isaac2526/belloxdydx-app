@@ -278,6 +278,10 @@ const state = {
   // /__test/settings so a test can prove the app says something
   // truthful when Tutor Bello turns the offline bank off.
   offlineQuestions: true,
+  // The content revision, exactly as migration 0014 keeps it: one
+  // number that moves whenever anything a student can see is written.
+  rev: 1,
+  revChangedAt: new Date().toISOString(),
 };
 
 for (const u of Object.values(USERS)) {
@@ -497,9 +501,32 @@ const RPC = {
   // the two /api/mobile routes that shadow them. The pinned-question
   // rule is modelled too: TEST_PINNED holds the questions a published
   // test claims, and the bundle must never hand those over.
+  bx_revision: () => ({
+    rev: state.rev,
+    changedAt: state.revChangedAt,
+    lastTable: 'questions',
+  }),
+
+  bx_course_ids: (u, p) => {
+    const course = COURSES.find((c) => c.id === p.p_course_id);
+    if (!course) return { error: 'not_found' };
+    return {
+      course: { id: course.id, code: course.code, title: course.title },
+      // The WITHHELD ids are here too, on purpose: without them the app
+      // cannot tell "the server held this back because it is on a test"
+      // from "the server no longer has this", and would delete the
+      // wrong ones.
+      question_ids: QUESTIONS.filter((q) => q.course_id === course.id).map((q) => q.id),
+      material_ids: MATERIALS.filter((m) => m.course_id === course.id).map((m) => m.id),
+      complete: true,
+    };
+  },
+
   bx_manifest: (u) => {
     const level = u.current_level || '100';
     return {
+      rev: state.rev,
+      revAvailable: true,
       courses: COURSES.filter((c) => c.level_code === level).map((c) => {
         const mats = MATERIALS.filter((m) => m.course_id === c.id);
         const qs = QUESTIONS.filter((q) => q.course_id === c.id);
@@ -507,15 +534,31 @@ const RPC = {
           rows.map((r) => r[key] || '').sort().reverse()[0] || '';
         const ms = newest(mats, 'updated_at');
         const qsStamp = newest(qs, 'updated_at');
+        const myTests = TESTS.filter((t) => t.course_id === c.id);
+        const pinned = QUESTIONS
+          .filter((q) => q.course_id === c.id && TEST_PINNED.has(q.id))
+          .map((q) => q.id)
+          .sort();
         return {
           id: c.id,
           code: c.code,
           title: c.title,
+          semester: c.semester,
           materials: mats.length,
           questions: qs.length,
+          tests: myTests.length,
+          pins: pinned.length,
+          // A count catches a pin added or removed; only a checksum
+          // catches a SWAP, which changes what the bundle withholds
+          // while leaving every number identical.
+          pin_print: pinned.length
+            ? require('node:crypto').createHash('md5').update(pinned.join(',')).digest('hex')
+            : '',
           material_stamp: ms,
           question_stamp: qsStamp,
-          stamp: [ms, qsStamp].sort().reverse()[0] || '',
+          test_stamp: '',
+          course_stamp: c.updated_at || '',
+          stamp: [ms, qsStamp, c.updated_at || ''].sort().reverse()[0] || '',
         };
       }),
     };
@@ -1053,6 +1096,47 @@ const server = http.createServer(async (req, res) => {
 
   // Tutor Bello adding a question, from a test. The manifest must move
   // and the app must raise "there's a change in this course".
+  // Anything the driver does that Tutor Bello could do moves the
+  // counter, exactly as the database triggers do.
+  const bump = (table) => {
+    state.rev += 1;
+    state.revChangedAt = new Date().toISOString();
+    state.lastTable = table;
+  };
+
+  // Tutor Bello renames a course. No material and no question is
+  // touched, so nothing the ORIGINAL manifest compared would move.
+  if (path === '/__test/rename-course') {
+    const c = COURSES.find((x) => x.id === body.courseId) || COURSES[0];
+    c.title = body.title || (c.title + ' (revised)');
+    c.updated_at = new Date().toISOString();
+    bump('courses');
+    return send(res, 200, { ok: true, courseId: c.id, title: c.title });
+  }
+
+  // Tutor Bello pins one more question to a published test. Again no
+  // material and no question row moves — but the set of questions the
+  // bundle withholds does, so the correct content of a download has
+  // changed.
+  if (path === '/__test/pin') {
+    const c = COURSES.find((x) => x.id === body.courseId) || COURSES[0];
+    const victim = QUESTIONS.find(
+      (q) => q.course_id === c.id && !TEST_PINNED.has(q.id));
+    if (victim) TEST_PINNED.add(victim.id);
+    bump('test_questions');
+    return send(res, 200, { ok: true, pinned: victim ? victim.id : null });
+  }
+
+  // Tutor Bello withdraws a question. It must leave the phone.
+  if (path === '/__test/withdraw') {
+    const c = COURSES.find((x) => x.id === body.courseId) || COURSES[0];
+    const i = QUESTIONS.findIndex(
+      (q) => q.course_id === c.id && !TEST_PINNED.has(q.id));
+    const gone = i >= 0 ? QUESTIONS.splice(i, 1)[0] : null;
+    bump('questions');
+    return send(res, 200, { ok: true, withdrew: gone ? gone.id : null });
+  }
+
   if (path === '/__test/publish') {
     const courseId = body.courseId || COURSES[0].id;
     const course = COURSES.find((c) => c.id === courseId) || COURSES[0];
@@ -1078,6 +1162,7 @@ const server = http.createServer(async (req, res) => {
       created_at: now,
       updated_at: now,
     });
+    bump('questions');
     return send(res, 200, { ok: true, courseId: course.id,
       questions: QUESTIONS.filter((q) => q.course_id === course.id).length });
   }
@@ -1185,7 +1270,20 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { profile: profileOf(u) });
     }
     if (path === '/api/auth/heartbeat') {
-      return u ? send(res, 200, { ok: true }) : send(res, 401, { error: 'unauthenticated' });
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      // Carries the revision AND the student's own standing, so a
+      // freeze reaches a running phone in one poll instead of never.
+      return send(res, 200, {
+        ok: true,
+        rev: state.rev,
+        revAvailable: true,
+        me: {
+          is_frozen: !!u.is_frozen,
+          frozen_reason: u.frozen_reason || '',
+          current_level: u.current_level || '100',
+          is_activated: !!u.is_activated,
+        },
+      });
     }
     if (path === '/api/mobile/home2') {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
@@ -1228,8 +1326,18 @@ const server = http.createServer(async (req, res) => {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
       return send(res, 200, RPC.bx_manifest(u, {}));
     }
+    if (path === '/api/mobile/revision') {
+      if (!u) return send(res, 401, { error: 'unauthenticated' });
+      return send(res, 200, { ...RPC.bx_revision(u, {}), available: true });
+    }
     if (path === '/api/mobile/course-bundle') {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
+      if ((url.searchParams.get('part') || '') === 'ids') {
+        const ids = RPC.bx_course_ids(u, {
+          p_course_id: url.searchParams.get('courseId') || '',
+        });
+        return send(res, ids.error === 'not_found' ? 404 : 200, ids);
+      }
       const r = RPC.bx_course_bundle(u, {
         p_course_id: url.searchParams.get('courseId') || '',
         p_offset: Number(url.searchParams.get('offset') || 0),

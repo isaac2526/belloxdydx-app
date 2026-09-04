@@ -1,3 +1,4 @@
+import 'dart:convert' show Utf8Decoder;
 import 'dart:io';
 
 import 'package:belloxdydx/data/backend.dart';
@@ -643,6 +644,105 @@ void main() {
         reason: 'a badge that survives the update it asked for is a badge '
             'nobody will trust twice');
     debugPrint('[journey] badge cleared after update');
+
+    // ---- ANYTHING Tutor Bello changes reaches a RUNNING app ----------
+    //
+    // "if we change anything in the website in the backend like courses,
+    //  Level or we freeze account any fucking thing that I didn't even
+    //  say ... there's a lot of things I can't say"
+    //
+    // Three changes that the per-course manifest, as first built, could
+    // not see AT ALL. Each is made while the app is open, and each must
+    // move the one counter the database keeps.
+    Future<Map<String, dynamic>> hit(String path, [String body = '{}']) async {
+      final client = HttpClient();
+      try {
+        final req = await client.postUrl(Uri.parse('$backend$path'));
+        req.headers.contentType = ContentType.json;
+        req.write(body);
+        final res = await req.close();
+        final text = await res.transform(const Utf8Decoder()).join();
+        return {'status': res.statusCode, 'body': text};
+      } finally {
+        client.close();
+      }
+    }
+
+    Future<int> revNow() async {
+      final r = await tester
+          .runAsync(() => container.read(contentRepoProvider).revision());
+      return r?.rev ?? 0;
+    }
+
+    final revBefore = await revNow();
+    expect(revBefore, greaterThan(0),
+        reason: 'the backend must be keeping a content revision at all');
+    debugPrint('[journey] revision starts at $revBefore');
+
+    // 1 · a course RENAMED. No material, no question, no timestamp on
+    //     either of them moves. The original design was blind to this.
+    var res = await tester.runAsync(
+        () => hit('/__test/rename-course', '{"courseId":"${course.id}"}'));
+    expect(res!['status'], 200);
+    final revAfterRename = await revNow();
+    expect(revAfterRename, greaterThan(revBefore),
+        reason: 'RENAMING A COURSE MUST MOVE THE SIGNAL');
+    debugPrint('[journey] course renamed -> revision $revBefore '
+        '-> $revAfterRename');
+
+    // 2 · a question PINNED to a published test. This changes which
+    //     questions the bundle withholds — so it changes the correct
+    //     content of a download — while every count and every stamp
+    //     stays exactly where it was.
+    final beforePin = container.read(courseStampsProvider)[course.id];
+    res = await tester
+        .runAsync(() => hit('/__test/pin', '{"courseId":"${course.id}"}'));
+    expect(res!['status'], 200);
+    await tester.runAsync(() =>
+        container.read(courseStampsProvider.notifier).refresh(force: true));
+    await tester.pump(const Duration(seconds: 1));
+    final afterPin = container.read(courseStampsProvider)[course.id];
+    expect(afterPin, isNotNull);
+    expect(afterPin!.questions, beforePin!.questions,
+        reason: 'the point of this case is that the count does NOT move');
+    expect(afterPin.questionStamp, beforePin.questionStamp,
+        reason: 'nor does the question timestamp');
+    expect(afterPin.pinPrint, isNot(beforePin.pinPrint),
+        reason: 'A PIN SWAP MUST STILL BE CAUGHT — otherwise the phone '
+            'keeps the key to a question that is now on an exam');
+    expect(afterPin.differsFrom(store.courseRecord(course.id)), isTrue,
+        reason: 'and it must raise the badge');
+    debugPrint('[journey] question pinned -> pins '
+        '${beforePin.pins} -> ${afterPin.pins}, checksum changed, '
+        'counts unmoved');
+
+    // 3 · a question WITHDRAWN. It must leave the phone, and pruning
+    //     must not touch the ones merely withheld.
+    await tester.runAsync(() =>
+        container.read(courseDownloadProvider(course.id).notifier).start());
+    await tester.pump(const Duration(seconds: 1));
+    final heldBefore =
+        (await tester.runAsync(() => store.questions(course.id)))!.length;
+
+    res = await tester
+        .runAsync(() => hit('/__test/withdraw', '{"courseId":"${course.id}"}'));
+    expect(res!['status'], 200);
+    await tester.runAsync(() =>
+        container.read(courseDownloadProvider(course.id).notifier).start());
+    await tester.pump(const Duration(seconds: 1));
+    final heldAfter =
+        (await tester.runAsync(() => store.questions(course.id)))!.length;
+
+    expect(heldAfter, lessThan(heldBefore),
+        reason: 'A QUESTION TUTOR BELLO WITHDREW MUST LEAVE THE PHONE — '
+            'it used to stay for ever, practisable, with its answer key');
+    final index = await tester
+        .runAsync(() => container.read(contentRepoProvider).courseIndex(course.id));
+    expect(heldAfter, lessThanOrEqualTo(index!.questionIds.length),
+        reason: 'and nothing the server still publishes may be dropped');
+    debugPrint('[journey] question withdrawn -> on the phone '
+        '$heldBefore -> $heldAfter (server still publishes '
+        '${index.questionIds.length})');
 
     // ---- the server disappears ----------------------------------------
     // Everything above could be explained by a warm cache. This cannot:
