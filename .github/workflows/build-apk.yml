@@ -1,9 +1,34 @@
 name: Build Belloxdydx
 
+# WHAT COSTS MONEY, AND WHAT DOES NOT.
+#
+# A private repository gets 2,000 free Actions minutes a month, and the
+# macOS runner is billed at TEN TIMES the clock. One full build here was
+# measured at 56 billable minutes — 2 for the tests, 14 for Android, and
+# 40 for four real minutes of iOS. Every push was firing all three, so
+# thirty-five pushes emptied the month.
+#
+# Now: the tests run on every push, because they are 2 minutes and they
+# are the safety net. The installable files are built when Tutor Bello
+# ASKS for them — the "Run workflow" button on the Actions tab, or a
+# version tag. A normal day of work costs 2 minutes instead of 56.
 on:
   push:
     branches: ["**"]
+    # Tagging a version always builds everything.
+    tags: ["v*"]
+  # Press "Run workflow" on the Actions tab. Android is on by default;
+  # iOS is the expensive one, so it is a box you tick.
   workflow_dispatch:
+    inputs:
+      android:
+        description: "Build the Android APK and Play Store bundle"
+        type: boolean
+        default: true
+      ios:
+        description: "Build the unsigned iOS IPA (costs 10x the minutes)"
+        type: boolean
+        default: false
 
 concurrency:
   group: build-${{ github.ref }}
@@ -20,6 +45,7 @@ jobs:
   analyze:
     name: Analyze & test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +78,12 @@ jobs:
     name: Android APK + AAB
     runs-on: ubuntu-latest
     needs: analyze
+    timeout-minutes: 30
+    # Only when asked for, or when a version is tagged.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.android ||
+      startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +91,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          # The APK step measured twelve minutes, and most of that was
+          # Gradle downloading the same dependencies from scratch every
+          # single time. Caching them is one line and it is billed
+          # minutes, not seconds.
+          cache: gradle
 
       - uses: subosito/flutter-action@v2
         with:
@@ -137,6 +174,16 @@ jobs:
     name: iOS unsigned IPA
     runs-on: macos-14
     needs: analyze
+    timeout-minutes: 30
+    # THE EXPENSIVE ONE. macOS bills at ten times the clock, so four
+    # real minutes here cost forty of the month's two thousand — 71% of
+    # a full build, for a file that cannot be installed on a normal
+    # iPhone without an Apple developer account anyway. It is off by
+    # default and ticked when it is actually wanted.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.ios ||
+      startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
