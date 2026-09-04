@@ -1021,13 +1021,42 @@ final themeProvider = StateNotifierProvider<ThemeNotifier, ThemeMode>(
 // ------------------------------------------------------------
 
 /// Loads the course shelf and material index for the student's level.
+/// Bumped to make the next content read go to the SERVER.
+///
+/// Invalidating [contentProvider] on its own does nothing, and that is
+/// worth being precise about because it made every pull-to-refresh in
+/// the app a decoration. loadContent() begins with
+///
+///     if (!force && _courses.isNotEmpty) return;
+///
+/// and the repository is long-lived, so its courses are already
+/// populated. Invalidating re-ran the future, which returned on that
+/// first line without touching the network. A student pulling down to
+/// fetch the note Tutor Bello had just added got a spinner and their
+/// own cache, for ever.
+final contentRefreshTick = StateProvider<int>((_) => 0);
+
 final contentProvider = FutureProvider.autoDispose<ContentRepository>((ref) async {
   final repo = ref.watch(contentRepoProvider);
   final level = ref.watch(profileProvider).currentLevel;
-  await repo.loadContent(level: level);
+  final tick = ref.watch(contentRefreshTick);
+  await repo.loadContent(level: level, force: tick > 0);
   ref.keepAlive();
   return repo;
 });
+
+/// What every pull-to-refresh should call.
+///
+/// Asks the server, then rebuilds whatever is watching. Falls back to
+/// the cache inside loadContent when there is no signal, so pulling
+/// down with the data off is a no-op rather than an error.
+Future<void> refreshContent(WidgetRef ref) async {
+  ref.read(contentRefreshTick.notifier).state++;
+  ref.invalidate(contentProvider);
+  await ref.read(contentProvider.future);
+  // The badges hang off the same content, so they are re-read with it.
+  unawaited(ref.read(courseStampsProvider.notifier).refresh(force: true));
+}
 
 final dashboardProvider =
     FutureProvider.autoDispose<DashboardData>((ref) async {

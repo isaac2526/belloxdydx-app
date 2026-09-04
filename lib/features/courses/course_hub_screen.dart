@@ -115,10 +115,9 @@ class _CourseHubScreenState extends ConsumerState<CourseHubScreen> {
   }
 
   Future<void> _refresh(String? courseId) async {
-    ref.invalidate(contentProvider);
     if (courseId != null) ref.invalidate(testsForCourseProvider(courseId));
     try {
-      await ref.read(contentProvider.future);
+      await refreshContent(ref);
     } catch (e) {
       if (!mounted) return;
       bxToast(context, _friendly(e), error: true);

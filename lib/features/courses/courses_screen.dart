@@ -46,13 +46,8 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
       : 'That did not go through. Check your connection and try again.';
 
   Future<void> _refresh() async {
-    final level = ref.read(profileProvider).currentLevel;
     try {
-      await ref
-          .read(contentRepoProvider)
-          .loadContent(level: level, force: true);
-      ref.invalidate(contentProvider);
-      await ref.read(contentProvider.future);
+      await refreshContent(ref);
     } catch (e) {
       if (!mounted) return;
       bxToast(context, _friendly(e), error: true);
@@ -77,7 +72,7 @@ class _CoursesScreenState extends ConsumerState<CoursesScreen> {
           .loadContent(level: level.code, force: true);
       if (!mounted) return;
       ref.read(sessionProvider.notifier).setLevel(level.code);
-      ref.invalidate(contentProvider);
+      await refreshContent(ref);
       setState(() => _query = '');
       _search.clear();
     } catch (e) {

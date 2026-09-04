@@ -69,9 +69,8 @@ class _SectionScreenState extends ConsumerState<SectionScreen> {
       : 'That did not load. Check your connection and pull down to try again.';
 
   Future<void> _refresh() async {
-    ref.invalidate(contentProvider);
     try {
-      await ref.read(contentProvider.future);
+      await refreshContent(ref);
     } catch (e) {
       if (!mounted) return;
       bxToast(context, _friendly(e), error: true);
