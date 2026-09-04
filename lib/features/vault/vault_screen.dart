@@ -249,12 +249,11 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
       return newest == null
           ? '$pending ${pending == 1 ? 'course has' : 'courses have'} new '
               'material — tap sync'
-          : 'Tutor Bello updated ${DateFormat('d MMM').format(newest)} · '
+          : 'Tutor Bello last updated ${bxBelloDate(newest)} · '
               '$pending ${pending == 1 ? 'course' : 'courses'} to pull';
     }
     if (newest == null) return 'Sync to see when Tutor Bello last updated';
-    return 'Tutor Bello last updated '
-        '${DateFormat('d MMM, h:mm a').format(newest)}';
+    return 'Tutor Bello last updated ${bxBelloDate(newest)}';
   }
 
   Widget _autoDocsSwitch() {
@@ -305,8 +304,8 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     final parts = <String>[
       if (e.courseCode.isNotEmpty) e.courseCode,
       bello != null
-          ? 'updated ${DateFormat('d MMM').format(bello)}'
-          : 'saved ${DateFormat('d MMM').format(e.savedAt)}',
+          ? 'updated ${bxBelloDate(bello)}'
+          : 'saved ${bxBelloDate(e.savedAt)}',
       if (e.bytes > 0) e.sizeLabel,
       if (e.pinned) 'kept',
     ];

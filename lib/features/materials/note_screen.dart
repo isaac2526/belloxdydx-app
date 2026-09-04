@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/providers.dart';
@@ -416,6 +415,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       children: [
         const ThreatStrip(),
         _meta(material, saved),
+        if (_behind(material)) _behindBanner(),
         if (material.hasBody)
           _surface(material)
         else
@@ -434,6 +434,34 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     );
   }
 
+  /// True when the shelf knows of a newer version of this note than
+  /// the copy being read.
+  ///
+  /// Only reachable while offline: online, the reader is handed the
+  /// live note and the saved copy is refreshed behind it. Offline, the
+  /// shelf can still be newer than the body — the index refreshes on
+  /// its own and note bodies do not — and the student deserves to know
+  /// that before they revise from it.
+  bool _behind(StudyMaterial m) {
+    final held = m.updatedAt;
+    if (held == null) return false;
+    final shelf = ref
+        .read(contentRepoProvider)
+        .materials
+        .where((h) => h.id == m.id)
+        .firstOrNull
+        ?.updatedAt;
+    return shelf != null && shelf.isAfter(held);
+  }
+
+  Widget _behindBanner() => const BxBanner(
+        title: 'Tutor Bello has rewritten this note',
+        message: 'You are reading the copy saved on this phone. Open it '
+            'again with a connection and the new one comes down by itself.',
+        icon: Icons.system_update_alt_rounded,
+        accent: BxAccent.warning,
+      );
+
   Widget _meta(StudyMaterial m, bool saved) {
     final c = context.bx;
     final updated = m.updatedAt ?? m.createdAt;
@@ -447,7 +475,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           const BxChip('Offline copy',
               accent: BxAccent.success, icon: Icons.offline_pin_rounded),
         if (updated != null)
-          Text('Updated ${DateFormat('d MMM y').format(updated)}',
+          Text('Tutor Bello last updated ${bxBelloDate(updated)}',
               style: BxType.tiny(c.muted)),
       ],
     );

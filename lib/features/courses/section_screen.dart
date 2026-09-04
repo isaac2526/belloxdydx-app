@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
 
@@ -88,10 +88,15 @@ class _SectionScreenState extends ConsumerState<SectionScreen> {
   }
 
   String _subtitleFor(StudyMaterial m) {
+    // The date on a material row was its UPLOAD date, which never moves
+    // again. Tutor Bello could rewrite a whole note and every student
+    // would still be reading "12 Oct 2025" beside it. His last edit is
+    // the thing they are actually asking about.
+    final bello = m.updatedAt ?? m.createdAt;
     final parts = <String>[
       if (m.topic.trim().isNotEmpty) m.topic.trim(),
       if (m.durationLabel.trim().isNotEmpty) m.durationLabel.trim(),
-      if (m.createdAt != null) DateFormat('d MMM yyyy').format(m.createdAt!),
+      if (bello != null) 'updated ${bxBelloDate(bello)}',
     ];
     return parts.join(' · ');
   }

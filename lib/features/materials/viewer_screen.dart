@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdfx/pdfx.dart';
@@ -15,6 +14,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
 import 'watermark.dart';
@@ -637,8 +637,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                       icon: Icons.offline_pin_rounded),
                 if (_belloAt != null)
                   BxChip(
-                    'Tutor Bello updated '
-                    '${DateFormat('d MMM yyyy').format(_belloAt!)}',
+                    'Tutor Bello last updated ${bxBelloDate(_belloAt!)}',
                     accent: BxAccent.neutral,
                     icon: Icons.edit_calendar_outlined,
                   ),

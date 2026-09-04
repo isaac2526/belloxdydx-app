@@ -104,9 +104,15 @@ class OfflineItem {
   /// This is the date worth showing. [savedAt] answers "when did I press
   /// the button", which is a question no student has ever asked about a
   /// note.
+  /// When Tutor Bello last changed this, in the student's OWN time.
+  ///
+  /// The signature is stored as UTC. Printing it straight gives a Lagos
+  /// student "yesterday" for anything he posted after 11pm — which is
+  /// most of what he posts — so it comes back local and is formatted
+  /// local everywhere it is shown.
   DateTime? get updatedAt {
     if (sig.isEmpty || !sig.startsWith('20')) return null;
-    return DateTime.tryParse(sig);
+    return DateTime.tryParse(sig)?.toLocal();
   }
   bool get hasDoc => (docRel ?? '').isNotEmpty;
   bool get hasHtml => (htmlRel ?? '').isNotEmpty;
@@ -198,6 +204,37 @@ String formatBytes(int n) {
     return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
   return '${(n / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
+/// One phrasing for Tutor Bello's date, everywhere it appears.
+///
+/// The app grew five different renderings of the same fact — "updated
+/// 3 Sep", "Last updated 3 Sep", "on 3 Sep", a bare date and a green
+/// chip with no date at all — which reads as five different facts. It
+/// is one fact, so it is one sentence.
+///
+/// [t] is converted to the student's own time first: the stamps are
+/// stored as UTC and Lagos is an hour ahead, so anything Tutor Bello
+/// posts after midnight would otherwise read "yesterday" to the whole
+/// country. The year is carried on anything from another year, because
+/// Belloxdydx runs the same courses session after session and "12 Oct"
+/// cannot tell them apart.
+String bxBelloDate(DateTime t, {DateTime? now}) {
+  final local = t.toLocal();
+  final today = now?.toLocal() ?? DateTime.now();
+  final day = DateTime(local.year, local.month, local.day);
+  final ref = DateTime(today.year, today.month, today.day);
+  final days = ref.difference(day).inDays;
+  if (days == 0) return 'today';
+  if (days == 1) return 'yesterday';
+  if (days > 1 && days < 7) return '$days days ago';
+  final d = local.day;
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  final m = months[local.month - 1];
+  return local.year == today.year ? '$d $m' : '$d $m ${local.year}';
 }
 
 /// Reduces any URL for the same file to one stable key.

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 
 import '../../core/providers.dart';
 import '../../data/models.dart';
@@ -207,21 +206,20 @@ class CourseDownloadCard extends ConsumerWidget {
   /// step with the manifest — so the date is still there with the data
   /// off, which is exactly when a student wants to know how old their
   /// copy is.
+  /// The stamp is stored as UTC and compared below against a LOCAL
+  /// "today", so it has to come back local first. Without this, an
+  /// edit Tutor Bello makes just after midnight in Lagos reads
+  /// "yesterday" to every student in the country.
   DateTime? _bello(CourseDownloadState s) =>
-      s.updatedAt.isEmpty ? null : DateTime.tryParse(s.updatedAt);
+      s.updatedAt.isEmpty ? null : DateTime.tryParse(s.updatedAt)?.toLocal();
 
-  /// A date a student reads without doing arithmetic. "Today" and
-  /// "yesterday" are what they would say out loud; past that, the day
-  /// itself.
+  /// A date a student reads without doing arithmetic, in the one
+  /// phrasing the whole app uses for this fact.
   static String _when(DateTime t) {
-    final now = DateTime.now();
-    final day = DateTime(t.year, t.month, t.day);
-    final today = DateTime(now.year, now.month, now.day);
-    final days = today.difference(day).inDays;
-    if (days <= 0) return 'today';
-    if (days == 1) return 'yesterday';
-    if (days < 7) return '$days days ago';
-    return 'on ${DateFormat('d MMM').format(t)}';
+    final s = bxBelloDate(t);
+    return s == 'today' || s == 'yesterday' || s.endsWith('ago')
+        ? s
+        : 'on $s';
   }
 
   String _held(CourseDownloadState s) {

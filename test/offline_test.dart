@@ -40,6 +40,7 @@ void main() {
   clearingAWithdrawnCourse();
   syncingWithNoSignal();
   aSavedCopyThatFellBehind();
+  belloDateReadsRight();
 
   late Directory docs;
   late _FakePaths paths;
@@ -1504,6 +1505,55 @@ void aSavedCopyThatFellBehind() {
       );
       expect(e.updatedAt!.toUtc().day, 3,
           reason: "Tutor Bello's date, not the download's");
+    });
+  });
+}
+
+/// ============================================================
+/// THE ONE LINE THE OWNER ASKED FOR
+///
+/// "subject last updated from Bello o not the download."
+///
+/// It was printed in UTC while "today" was read from the phone's own
+/// clock, so a note Tutor Bello posted at half past midnight in Lagos
+/// told the whole country it was "yesterday" — and the year was dropped
+/// entirely, which on an app that runs the same PHY 101 session after
+/// session makes last year's material indistinguishable from this
+/// year's. CI now runs the suite with TZ=Africa/Lagos so a regression
+/// here cannot hide behind a UTC runner.
+/// ============================================================
+void belloDateReadsRight() {
+  group("Tutor Bello's date", () {
+    test('is rendered in the student\'s own time, not UTC', () {
+      // Half past midnight in Lagos on 4 September is 23:30 UTC on the
+      // 3rd. Rendered as UTC it reads "yesterday" to every student in
+      // the country.
+      final instant = DateTime.utc(2026, 9, 3, 23, 30);
+      final local = instant.toLocal();
+      final noonThatLocalDay =
+          DateTime(local.year, local.month, local.day, 12);
+      expect(bxBelloDate(instant, now: noonThatLocalDay), 'today');
+    });
+
+    test('says today, yesterday, then days, then the date', () {
+      final now = DateTime(2026, 9, 10, 12);
+      expect(bxBelloDate(DateTime(2026, 9, 10, 6), now: now), 'today');
+      expect(bxBelloDate(DateTime(2026, 9, 9, 23), now: now), 'yesterday');
+      expect(bxBelloDate(DateTime(2026, 9, 7), now: now), '3 days ago');
+      expect(bxBelloDate(DateTime(2026, 9, 1), now: now), '1 Sep');
+    });
+
+    test('carries the year on anything from another session', () {
+      final now = DateTime(2026, 9, 10, 12);
+      expect(bxBelloDate(DateTime(2025, 10, 12), now: now), '12 Oct 2025');
+      expect(bxBelloDate(DateTime(2026, 1, 4), now: now), '4 Jan');
+    });
+
+    test('a date in the future is not called "-1 days ago"', () {
+      // Clock skew on a cheap phone, or a stamp written by a server an
+      // hour ahead. It must still read as a date.
+      final now = DateTime(2026, 9, 10, 12);
+      expect(bxBelloDate(DateTime(2026, 9, 12), now: now), '12 Sep');
     });
   });
 }

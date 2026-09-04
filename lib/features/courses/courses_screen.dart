@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart';
 import '../../data/offline/course_downloader.dart';
 import '../../data/repositories.dart';
 import '../../ui/ui.dart';
@@ -314,7 +314,8 @@ class _CourseCard extends ConsumerWidget {
                 Text(counts, style: BxType.tiny(c.muted)),
                 if (stamp?.updatedAt != null)
                   Text(
-                    'Updated ${DateFormat('d MMM').format(stamp!.updatedAt!)}',
+                    'Tutor Bello last updated '
+                    '${bxBelloDate(stamp!.updatedAt!)}',
                     style: BxType.tiny(c.muted),
                   ),
                 if (download.held || download.isRunning) ...[

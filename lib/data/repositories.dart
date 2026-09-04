@@ -1041,7 +1041,16 @@ class ContentRepository {
         // hand to the viewer.
         url: header?.url ?? '',
         contentHtml: savedHtml ?? '',
-        updatedAt: header?.updatedAt,
+        // The date has to describe the BODY on this screen.
+        //
+        // `header` comes off the shelf, which refreshes from the server
+        // on its own. So a note Tutor Bello rewrote last night was
+        // stamped with last night's date over the copy from last month
+        // that the student is actually reading — the freshest-looking
+        // thing in the app was the one piece of it guaranteed to be
+        // stale. The saved copy's own signature is the truth about
+        // what is in front of them.
+        updatedAt: saved?.updatedAt ?? header?.updatedAt,
         createdAt: header?.createdAt,
         sortOrder: header?.sortOrder ?? 0,
       );

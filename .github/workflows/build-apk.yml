@@ -34,8 +34,16 @@ jobs:
       - name: Analyze
         run: flutter analyze --no-fatal-infos
 
+      # Run in the students' own timezone, not the runner's UTC.
+      #
+      # Every student of this app is in Nigeria. A date bug that only
+      # appears at a non-zero UTC offset — and the "Tutor Bello last
+      # updated" line had exactly one — is invisible on a UTC runner
+      # and visible on every phone that matters.
       - name: Unit & widget tests
         run: flutter test --reporter expanded
+        env:
+          TZ: Africa/Lagos
 
   # ============================================================
   # Android — APK for direct install, AAB for the Play Store.
