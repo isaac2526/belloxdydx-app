@@ -338,6 +338,30 @@ class WithdrawnCoursesNotifier extends StateNotifier<Set<String>> {
       _busy = false;
     }
   }
+
+  /// Clears them off the phone and stops asking.
+  ///
+  /// Without this the banner was permanent: nothing anywhere called
+  /// forgetCourseRecord, so `downloadedCourses` kept yielding the dead
+  /// course, the check kept saying "withdrawn", and the banner stayed
+  /// up for the life of the install — telling the student to open the
+  /// Vault and clear something the Vault cannot show them, because the
+  /// question bank is filtered out of it.
+  Future<int> clear() async {
+    final store = _ref.read(offlineStoreProvider);
+    if (store == null || state.isEmpty) return 0;
+    var freed = 0;
+    for (final id in state.toList()) {
+      try {
+        freed += await store.forgetCourse(id);
+      } catch (e) {
+        debugPrint('[course] could not clear $id: $e');
+      }
+    }
+    if (mounted) state = const {};
+    _ref.read(offlineRecordTick.notifier).state++;
+    return freed;
+  }
 }
 
 final withdrawnCoursesProvider =

@@ -33,6 +33,7 @@ void main() {
   courseDownloadRecords();
   pruningWithdrawnContent();
   whoseDateIsShown();
+  clearingAWithdrawnCourse();
 
   late Directory docs;
   late _FakePaths paths;
@@ -1091,22 +1092,42 @@ void pruningWithdrawnContent() {
       expect((await reopened!.questions('c1')).length, 3);
     });
 
-    test('a question WITHHELD from the download is not withdrawn',
-        () async {
-      // 'd' is pinned to a published test, so the bundle never sent it —
-      // and it is still on the course. Pruning it would delete a
-      // question Tutor Bello still publishes.
-      final dropped = await store.pruneQuestions('c1', {'a', 'b', 'c', 'd'});
-      expect(dropped, 0);
-      expect((await store.questions('c1')).length, 4);
+    test('a question PINNED after the download loses its key', () async {
+      // The reverse of what this used to assert, and the reversal is
+      // the point. The alive set is what the server still SERVES, so a
+      // question Tutor Bello puts on an exam drops out of it — and the
+      // phone that already holds it, with its answer key, must let it
+      // go. Keeping it "because the server still publishes it" was
+      // stepping over precisely the row that most needed removing.
+      final dropped = await store.pruneQuestions('c1', {'a', 'b', 'c'});
+      expect(dropped, 1);
+      expect((await store.questions('c1')).map((r) => r['id']),
+          isNot(contains('d')));
     });
 
-    test('an EMPTY list never deletes anything', () async {
-      // The read failed, or the course really has nothing. Either way
-      // emptying the bank on it would be catastrophic and unrecoverable
-      // offline.
-      expect(await store.pruneQuestions('c1', {}), 0);
-      expect((await store.questions('c1')).length, 4);
+    test('an EMPTY list is an answer, and it prunes', () async {
+      // A course whose every question is now pinned to a published
+      // test, or one Tutor Bello emptied out. Refusing to act on
+      // emptiness left exactly those courses holding withdrawn
+      // questions for ever, with their answer keys, and a manual
+      // "Check for anything new" refused to clear them.
+      expect(await store.pruneQuestions('c1', {}), 4);
+      expect((await store.questions('c1')), isEmpty);
+    });
+
+    test('a read that FAILED never gets this far', () async {
+      // The safety lives one level up, in CourseIndex.isUsable, and it
+      // has to: emptiness and failure look identical to pruneQuestions
+      // and only the caller can tell them apart.
+      const failed = CourseIndex(complete: false);
+      expect(failed.isUsable, isFalse);
+
+      const emptyButReal = CourseIndex(complete: true);
+      expect(emptyButReal.isUsable, isTrue,
+          reason: 'a course with nothing left to serve must still prune');
+
+      const normal = CourseIndex(questionIds: {'a'}, complete: true);
+      expect(normal.isUsable, isTrue);
     });
 
     test('another course is never touched', () async {
@@ -1226,6 +1247,142 @@ void whoseDateIsShown() {
     test('an unstamped course shows nothing rather than a wrong date', () {
       const stamp = CourseStamp(id: 'c1', materials: 3, questions: 40);
       expect(stamp.updatedAt, isNull);
+    });
+  });
+}
+
+/// ============================================================
+/// CLEARING A COURSE TUTOR BELLO TOOK DOWN
+///
+/// The app announces a withdrawn course and tells the student to free
+/// the space. Nothing could actually free it: the question bank is
+/// stored as an item of kind 'questions', which the Vault filters out
+/// of its list and the evictor skips — while its bytes still count
+/// against the storage ceiling. So the banner pointed at a screen that
+/// could not show the thing it was talking about, the record was never
+/// removed, and the notice stayed up for the life of the install.
+/// ============================================================
+void clearingAWithdrawnCourse() {
+  group('a withdrawn course can actually be cleared', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_forget_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      store = (await OfflineStore.open())!;
+
+      await store.putQuestions('gone', [
+        {'id': 'q1', 'course_id': 'gone', 'question_html': '<p>a</p>'},
+        {'id': 'q2', 'course_id': 'gone', 'question_html': '<p>b</p>'},
+      ]);
+      await store.putNote(
+        id: 'n1',
+        title: 'A note',
+        html: '<p>body</p>',
+        courseId: 'gone',
+      );
+      await store.putNote(
+        id: 'keep',
+        title: 'Another course',
+        html: '<p>body</p>',
+        courseId: 'staying',
+      );
+      await store.putCourseRecord('gone',
+          materials: 1, questions: 2, stamp: 's', ok: true, bytes: 10);
+      await store.flush();
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    test('the question bank is invisible in the Vault but real on disk',
+        () async {
+      // The reason the old banner was unfollowable.
+      expect(store.readable.any((i) => i.kind == 'questions'), isFalse,
+          reason: 'the Vault cannot show it');
+      expect((await store.questions('gone')).length, 2,
+          reason: 'and yet there it is');
+      expect(store.totalBytes, greaterThan(0),
+          reason: 'counting against the ceiling the whole time');
+    });
+
+    test('forgetting the course takes all of it', () async {
+      final freed = await store.forgetCourse('gone');
+      expect(freed, greaterThan(0));
+      expect(await store.questions('gone'), isEmpty);
+      expect(store.item('n1'), isNull);
+      expect(store.courseRecord('gone'), isNull,
+          reason: 'the record must go too, or the banner never clears');
+    });
+
+    test('and leaves every other course alone', () async {
+      await store.forgetCourse('gone');
+      expect(store.item('keep'), isNotNull);
+    });
+
+    test('it survives being read back from disk', () async {
+      await store.forgetCourse('gone');
+      final reopened = await OfflineStore.open();
+      expect(reopened!.courseRecord('gone'), isNull);
+      expect(await reopened.questions('gone'), isEmpty);
+      expect(reopened.item('keep'), isNotNull);
+    });
+
+    test('forgetting nothing is not an error', () async {
+      expect(await store.forgetCourse('never-existed'), 0);
+      expect(await store.forgetCourse(''), 0);
+    });
+  });
+
+  group('the record says what LANDED, not what the server has', () {
+    late Directory dir;
+    late OfflineStore store;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('bx_record_test');
+      PathProviderPlatform.instance = _FakePaths(dir.path);
+      store = (await OfflineStore.open())!;
+    });
+
+    tearDown(() async => dir.delete(recursive: true));
+
+    test('the two counts are kept apart', () async {
+      // With offline_questions switched off nothing is fetched, and the
+      // manifest's count was stored anyway — so from the next launch the
+      // course announced "works without data · 412 questions" with none
+      // of them on the phone. The server's numbers must stay the
+      // server's, or the badge can never settle; what the student is
+      // TOLD they have has to be what landed.
+      await store.putCourseRecord(
+        'c1',
+        materials: 8,
+        questions: 412,
+        heldQuestions: 0,
+        heldFiles: 8,
+        stamp: 's',
+        ok: true,
+      );
+      final rec = store.courseRecord('c1')!;
+      expect(rec['questions'], 412, reason: 'what the server has');
+      expect(rec['heldQuestions'], 0, reason: 'what is on the phone');
+    });
+
+    test('a failure records WHY, so it is not blamed on Tutor Bello',
+        () async {
+      // A file that can never be fetched latched ok:false, and the card
+      // then told the student, in his name, every launch for ever, that
+      // he had changed something. He had not.
+      await store.putCourseRecord(
+        'c1',
+        materials: 8,
+        questions: 40,
+        stamp: 's',
+        ok: false,
+        reason: 'Your offline library is full.',
+      );
+      final rec = store.courseRecord('c1')!;
+      expect(rec['ok'], isFalse);
+      expect(rec['reason'], 'Your offline library is full.');
     });
   });
 }

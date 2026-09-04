@@ -513,6 +513,10 @@ class OfflineStore {
     String pinPrint = '',
     String courseStamp = '',
     int bytes = 0,
+    int heldQuestions = 0,
+    int heldFiles = 0,
+    int heldAssets = 0,
+    String reason = '',
   }) async {
     if (courseId.isEmpty) return;
     _courses[courseId] = {
@@ -533,16 +537,72 @@ class OfflineStore {
       'stamp': stamp,
       'ok': ok,
       'bytes': bytes,
+      // WHAT THE SERVER HAS is above; WHAT ACTUALLY LANDED is here.
+      //
+      // They are not the same number and conflating them made the card
+      // lie. With offline_questions switched off, nothing is fetched
+      // and the manifest's count was stored anyway — so from the next
+      // launch the course announced "works without data · 412
+      // questions" with none of them on the phone. The counts above
+      // must stay the server's, or the badge could never settle; the
+      // ones below are what the student is told they have.
+      'heldQuestions': heldQuestions,
+      'heldFiles': heldFiles,
+      'heldAssets': heldAssets,
+      // Why it did not finish, so the app can say THAT rather than
+      // telling the student in Tutor Bello's name, every launch for
+      // ever, that he changed something.
+      'reason': reason,
       'at': DateTime.now().millisecondsSinceEpoch,
     };
     _touch();
     await flush();
   }
 
-  Future<void> forgetCourseRecord(String courseId) async {
-    if (_courses.remove(courseId) == null) return;
+  /// Removes a course from the phone entirely — its record, its
+  /// question bank, and every note, file and picture belonging to it.
+  ///
+  /// This is what clears a course Tutor Bello took down. The Vault
+  /// cannot do it: `readable` filters out the question bucket (kind
+  /// 'questions') so the bank is invisible there, and `evictFor` skips
+  /// it too — yet its bytes still count against the ceiling in
+  /// [canWrite]. A withdrawn course's dead megabytes were therefore
+  /// unreachable through any screen in the app while still being able
+  /// to produce "your offline library is full".
+  ///
+  /// Returns the bytes reclaimed.
+  Future<int> forgetCourse(String courseId) async {
+    if (courseId.isEmpty) return 0;
+    var freed = 0;
+
+    // The question bank first: one item, one file, invisible everywhere.
+    final safe = _safeName(courseId);
+    final bank = _items['q:$safe'];
+    if (bank != null) {
+      freed += bank.bytes;
+      for (final id in (await questions(courseId)).map((r) => '${r['id']}')) {
+        _questionHome.remove(id);
+      }
+      try {
+        final f = File(resolve('questions/$safe.json'));
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+      _items.remove('q:$safe');
+    }
+
+    // Then everything else belonging to it.
+    for (final i in _items.values
+        .where((i) => i.courseId == courseId)
+        .toList(growable: false)) {
+      freed += i.bytes;
+      await removeItem(i.id);
+    }
+
+    _courses.remove(courseId);
     _touch();
     await flush();
+    debugPrint('[offline] forgot $courseId, reclaimed ${formatBytes(freed)}');
+    return freed;
   }
 
   /// Every course this phone has downloaded, in no particular order.
@@ -1059,13 +1119,19 @@ class OfflineStore {
   /// deleted stayed here for ever — practisable, with its answer key,
   /// long after he had decided it was wrong.
   ///
-  /// [alive] must be the FULL set of ids the course still publishes,
-  /// including the ones withheld from the download because they are
-  /// pinned to a test. An empty or partial list would delete the bank,
-  /// so a caller that could not read the list must not call this.
+  /// [alive] must be the FULL set of ids the course still SERVES —
+  /// which excludes the ones pinned to a published test, so a question
+  /// Tutor Bello puts on an exam after a download has its answer key
+  /// taken off the phone.
+  ///
+  /// An empty set is a legitimate answer and prunes everything: a
+  /// course whose every question is now pinned, or one emptied out.
+  /// Refusing to act on emptiness left exactly those courses holding
+  /// withdrawn questions for ever. A caller that could not READ the
+  /// list must not call this at all — see CourseIndex.isUsable.
+  ///
   /// Returns how many were dropped.
   Future<int> pruneQuestions(String bucket, Set<String> alive) async {
-    if (alive.isEmpty) return 0;
     final held = await questions(bucket);
     if (held.isEmpty) return 0;
 

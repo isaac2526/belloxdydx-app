@@ -11,6 +11,7 @@ import '../../core/config.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/offline/offline_store.dart' show formatBytes;
 import '../../ui/ui.dart';
 import '../shell/app_drawer.dart';
 import '../shell/app_shell.dart';
@@ -1166,23 +1167,53 @@ class _CourseUpdatesBanner extends ConsumerWidget {
     // changed, and it wins: material he has taken down should not sit on
     // a student's phone being revised from.
     final gone = ref.watch(withdrawnCoursesProvider);
-    if (gone.isNotEmpty) {
-      return BxBanner(
-        title: gone.length == 1
-            ? 'One course was taken down'
-            : '${gone.length} courses were taken down',
-        message: 'Tutor Bello has removed material you had saved. It is '
-            'still on this phone, but it is no longer part of your '
-            'course — open the Vault to clear it and free the space.',
-        icon: Icons.unpublished_rounded,
-        accent: BxAccent.danger,
-        actionLabel: 'Open the Vault',
-        onAction: () => context.push(Routes.vault),
-      );
-    }
-
     final n = ref.watch(coursesWithUpdatesProvider);
-    if (n == 0) return const SizedBox.shrink();
+
+    // BOTH, when both apply.
+    //
+    // The withdrawal banner used to return early, so a single deleted
+    // course permanently hid "there's a change in your courses" behind
+    // it — and since nothing could clear the withdrawal, permanently
+    // meant permanently. The badge Tutor Bello asked for was switched
+    // off by an unrelated, undismissable notice.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (gone.isNotEmpty) ...[
+          BxBanner(
+            title: gone.length == 1
+                ? 'One course was taken down'
+                : '${gone.length} courses were taken down',
+            // It says what the button does, because the Vault cannot
+            // show a question bank — that item is filtered out of it —
+            // so "go and clear it there" was an instruction nobody
+            // could follow.
+            message: 'Tutor Bello has removed material you had saved. It '
+                'is still taking up room on this phone and it is no '
+                'longer part of your course.',
+            icon: Icons.unpublished_rounded,
+            accent: BxAccent.danger,
+            actionLabel: 'Clear it and free the space',
+            onAction: () async {
+              final freed =
+                  await ref.read(withdrawnCoursesProvider.notifier).clear();
+              if (!context.mounted) return;
+              bxToast(
+                context,
+                freed > 0
+                    ? 'Cleared. ${formatBytes(freed)} back.'
+                    : 'Cleared.',
+              );
+            },
+          ),
+          if (n > 0) const SizedBox(height: BxSpace.md),
+        ],
+        if (n > 0) _updatesBanner(context, n),
+      ],
+    );
+  }
+
+  Widget _updatesBanner(BuildContext context, int n) {
     return BxBanner(
       title: n == 1
           ? "There's a change in one of your courses"

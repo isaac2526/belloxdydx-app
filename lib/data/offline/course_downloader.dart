@@ -253,6 +253,11 @@ class CourseDownloader {
   bool _cancelled = false;
   Future<void>? _inFlight;
 
+  /// Set the first time a write is refused for want of space, so the
+  /// record can say THAT rather than a generic failure — and so the
+  /// next launch does not report it as a change Tutor Bello made.
+  String? _outOfRoom;
+
   void _emit(CourseDownloadState s) {
     _state = s;
     if (!_controller.isClosed) _controller.add(s);
@@ -267,19 +272,42 @@ class CourseDownloader {
       return CourseDownloadState(courseId: courseId);
     }
     final ok = rec['ok'] == true;
+    int held(String key, String fallback) =>
+        (rec[key] as num?)?.toInt() ?? (rec[fallback] as num?)?.toInt() ?? 0;
     return CourseDownloadState(
       courseId: courseId,
       phase: ok ? CourseDownloadPhase.done : CourseDownloadPhase.failed,
       held: true,
-      questions: (rec['questions'] as num?)?.toInt() ?? 0,
-      materials: (rec['materials'] as num?)?.toInt() ?? 0,
+      // What is ON THE PHONE, not what the server has. Records written
+      // by an older build carry only the server's numbers, so those are
+      // the fallback.
+      questions: held('heldQuestions', 'questions'),
+      materials: held('heldFiles', 'materials'),
+      assets: held('heldAssets', 'assets'),
       bytes: (rec['bytes'] as num?)?.toInt() ?? 0,
       savedAtMs: (rec['at'] as num?)?.toInt() ?? 0,
       updatedAt: '${rec['stamp'] ?? ''}',
-      // A run that did not finish must keep asking. Anything else and a
-      // half-downloaded course sits there looking finished.
-      updateAvailable: !ok,
+      // NOT `updateAvailable: !ok`.
+      //
+      // A file that can never be fetched — deleted from the bucket, a
+      // dead URL, over the size cap, a full phone — latched ok:false
+      // into the record, and the card then told the student, in Tutor
+      // Bello's name, every launch for ever, that he had changed
+      // something. He had not. A run that did not finish says so in its
+      // own words instead, and offers to try again.
+      message: ok
+          ? null
+          : _whyItStopped('${rec['reason'] ?? ''}'),
     );
+  }
+
+  static String _whyItStopped(String reason) {
+    if (reason.isEmpty || reason == 'incomplete') {
+      return 'Some of this course did not save last time. Tap Update on a '
+          'steadier connection and only the missing pieces are fetched.';
+    }
+    // Anything else came from the store, which writes sentences.
+    return reason;
   }
 
   /// Folds a fresh manifest row in without downloading anything. This
@@ -325,6 +353,7 @@ class CourseDownloader {
     }
 
     _cancelled = false;
+    _outOfRoom = null;
     _emit(_state.copyWith(
       phase: CourseDownloadPhase.checking,
       label: 'Checking what has changed',
@@ -451,6 +480,11 @@ class CourseDownloader {
       final ok = missing == 0 && failed == 0;
       await store.putCourseRecord(
         courseId,
+        // What actually landed, kept apart from what the server has.
+        heldQuestions: heldQuestions,
+        heldFiles: savedNotes,
+        heldAssets: savedAssets,
+        reason: ok ? '' : (_outOfRoom ?? 'incomplete'),
         // The MANIFEST's numbers, not what we saved. They differ when
         // the server withheld a question pinned to a sitting, and
         // storing what we saved would leave the badge lit forever.
@@ -783,6 +817,7 @@ class CourseDownloader {
     await store.evictFor(bytes);
     final again = await store.canWrite(bytes);
     if (again.ok) return true;
+    _outOfRoom = again.reason;
     _emit(_state.copyWith(message: again.reason));
     return false;
   }

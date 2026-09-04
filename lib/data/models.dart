@@ -1586,7 +1586,19 @@ class CourseIndex {
         .toSet();
   }
 
-  bool get isUsable => complete && questionIds.isNotEmpty;
+  /// Whether this answer may be pruned against.
+  ///
+  /// [complete] alone, deliberately. It used to also demand a non-empty
+  /// question list, and that made three real states un-prunable: a
+  /// notes-only course, a course whose every question is now pinned to
+  /// a test, and one Tutor Bello emptied out. In all three the phone
+  /// kept every withdrawn question, readable and practisable with its
+  /// answer key, and a manual "Check for anything new" refused to
+  /// clear them.
+  ///
+  /// Emptiness is an answer. A read that FAILED is not, and the server
+  /// only sets complete when every query behind it succeeded.
+  bool get isUsable => complete;
 }
 
 @immutable
