@@ -159,92 +159,92 @@ jobs:
       # an installable APK, and says loudly in the summary that the
       # signature is throwaway. A silent fallback is how this went
       # unnoticed in the first place.
+      # ============================================================
+      # ONE SIGNATURE, FOR EVER
+      #
+      # Nothing here was signing anything. `flutter build apk --release`
+      # with no signing config silently falls back to signingConfigs
+      # .debug, and the debug keystore is GENERATED FRESH on each CI
+      # runner - so every APK ever produced here carried a different
+      # signature. Android refuses to install an update signed by a
+      # different key, which is why a new build meant "uninstall the old
+      # one first", losing every student's downloaded course with it.
+      # The Play Store is stricter still: the first upload fixes the key
+      # for the life of the listing.
+      #
+      # THE KEYSTORE LIVES IN THE REPO, ENCRYPTED.
+      #
+      # It was a base64 secret first, and that failed twice: 5,912
+      # characters cannot be pasted reliably from a phone, and a value
+      # that arrives truncated or re-wrapped fails at exactly the step
+      # meant to guarantee the signature. A build that depends on a
+      # human transcribing six thousand characters is a broken build.
+      #
+      # So android-signing/bx-release.jks.enc is committed - AES-256
+      # with PBKDF2 at 300k iterations - and the only thing a person has
+      # to paste is a 40-character passphrase. The encrypted file is
+      # useless without it, which is why it is safe in a public repo.
+      #
+      # If the secrets are absent the build still runs and still makes
+      # an installable APK, but says loudly that the signature is
+      # throwaway. A silent fallback is how this went unnoticed at all.
       - name: Release signing key
         id: signing
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSPHRASE: ${{ secrets.ANDROID_KEYSTORE_PASSPHRASE }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+          ENC=android-signing/bx-release.jks.enc
+          if [ -z "$KEYSTORE_PASSPHRASE" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
             echo "signed=false" >> $GITHUB_OUTPUT
             {
-              echo "### ⚠️ UNSIGNED-FOR-RELEASE BUILD"
+              echo "### UNSIGNED-FOR-RELEASE BUILD"
               echo ""
-              echo "\`ANDROID_KEYSTORE_BASE64\` / \`ANDROID_KEYSTORE_PASSWORD\`"
-              echo "are not set, so this APK is signed with a throwaway debug"
-              echo "key. It installs, but students will have to UNINSTALL to"
-              echo "move to the next build, and it cannot go to the Play Store."
+              echo "\`ANDROID_KEYSTORE_PASSPHRASE\` / \`ANDROID_KEYSTORE_PASSWORD\`"
+              echo "are not both set, so this APK carries a throwaway debug key."
+              echo "It installs, but students must UNINSTALL to move to the next"
+              echo "build, and it cannot go to the Play Store."
             } >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
+          test -f "$ENC" || { echo "::error::$ENC is missing from the repo."; exit 1; }
+
           KEYSTORE="$PWD/android/bx-release.jks"
-          # TOLERANT OF HOW A HUMAN ACTUALLY PASTES 5,912 CHARACTERS.
-          #
-          # A phone's text viewer soft-wraps, and copying out of it can
-          # bring real newlines with it; a hurried paste can bring the
-          # surrounding instructions too. `base64 -d` refuses all of
-          # that with "invalid input" and the build dies at the one
-          # step whose whole job is to stop a silent debug signature.
-          #
-          # So it is rebuilt LINE BY LINE, anchored on the keystore's
-          # own header. Every PKCS12 keystore begins "MII" in base64, so
-          # collection starts at the line carrying that and continues
-          # through the pure-base64 lines after it. Wrapped base64
-          # rejoins itself at any width; anything pasted BEFORE the key
-          # is skipped because collection has not started, and anything
-          # after is dropped because prose carries punctuation base64
-          # never does. A row of "=" separators is excluded explicitly -
-          # "=" is a legal base64 character and would otherwise be
-          # swallowed as data.
-          #
-          # Line structure is deliberately preserved rather than
-          # stripping all whitespace up front: strip it globally and the
-          # heading runs into the key with nothing to separate them.
-          CLEAN=$(printf '%s' "$KEYSTORE_B64" | tr -d '\r' | awk '
-            {
-              line = $0
-              gsub(/[[:space:]]/, "", line)
-              if (line !~ /^[A-Za-z0-9+\/=]+$/) next
-              if (line ~ /^=+$/) next
-              if (!started && line ~ /^MII/) started = 1
-              if (started) buf = buf line
-            }
-            END { print buf }')
-          if [ ${#CLEAN} -lt 1000 ]; then
-            echo "::error::ANDROID_KEYSTORE_BASE64 does not contain a keystore."
-            echo "::error::Found ${#CLEAN} usable characters; expected about 5900."
-            echo "::error::Re-copy the ONE long line from the secrets file - the"
-            echo "::error::whole line, and only that line."
-            exit 1
-          fi
-          printf '%s' "$CLEAN" | base64 -d > "$KEYSTORE" || {
-            echo "::error::ANDROID_KEYSTORE_BASE64 is not valid base64 even"
-            echo "::error::after cleaning. Some characters were lost or changed"
-            echo "::error::in the copy. Paste it again from the secrets file."
+          # Whitespace is trimmed from the passphrase: a paste that picks
+          # up a trailing newline or a stray space is the single most
+          # likely way this fails, and it is not worth a failed build.
+          PHRASE=$(printf '%s' "$KEYSTORE_PASSPHRASE" | tr -d '[:space:]')
+          PASSWORD=$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d '\r\n')
+          echo "passphrase received: ${#PHRASE} characters (expected 40)"
+
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 300000 \
+            -in "$ENC" -out "$KEYSTORE" -pass "pass:$PHRASE" 2>/dev/null || {
+            echo "::error::Could not decrypt the keystore."
+            echo "::error::ANDROID_KEYSTORE_PASSPHRASE is wrong, or was cut"
+            echo "::error::short when pasted. It must be exactly 40 characters;"
+            echo "::error::this run received ${#PHRASE}."
             exit 1
           }
-          # Verify it decoded into a real keystore before trusting it. A
-          # truncated secret would otherwise fall through to a debug
-          # signature, which is the exact failure being fixed here.
-          keytool -list -keystore "$KEYSTORE" \
-            -storepass "$KEYSTORE_PASSWORD" > /dev/null || {
-            echo "::error::The keystore decoded, but ANDROID_KEYSTORE_PASSWORD"
-            echo "::error::does not open it. Check the password secret - a"
-            echo "::error::trailing space or a missing last character is the"
+
+          keytool -list -keystore "$KEYSTORE" -storepass "$PASSWORD" > /dev/null || {
+            echo "::error::The keystore decrypted, but ANDROID_KEYSTORE_PASSWORD"
+            echo "::error::does not open it. It received ${#PASSWORD} characters."
+            echo "::error::A trailing space, or a missing last character, is the"
             echo "::error::usual cause."
             exit 1
           }
+
           # storeFile is written ABSOLUTE on purpose. Gradle's file()
-          # inside the android { } block of app/build.gradle.kts
-          # resolves a relative path against android/app/, not android/,
-          # so "bx-release.jks" would look in the wrong directory and
+          # inside the android { } block of app/build.gradle.kts resolves
+          # a relative path against android/app/, not android/, so
+          # "bx-release.jks" would look in the wrong directory and
           # quietly fall back to the debug key.
-          cat > android/key.properties <<PROPS
-          storePassword=$KEYSTORE_PASSWORD
-          keyPassword=$KEYSTORE_PASSWORD
-          keyAlias=belloxdydx
-          storeFile=$KEYSTORE
-          PROPS
+          {
+            echo "storePassword=$PASSWORD"
+            echo "keyPassword=$PASSWORD"
+            echo "keyAlias=belloxdydx"
+            echo "storeFile=$KEYSTORE"
+          } > android/key.properties
           python3 tools/sign_gradle.py
           echo "signed=true" >> $GITHUB_OUTPUT
 
