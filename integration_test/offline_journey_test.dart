@@ -818,6 +818,27 @@ void main() {
       expect(stillDown, isTrue, reason: 'the backend must really be gone');
       debugPrint('[journey] backend killed');
 
+      // TUTOR BELLO'S DATE SURVIVES THE SERVER BEING GONE.
+      //
+      // The manifest lived in memory only, so the one line the owner
+      // asked for — "Tutor Bello last updated this" — existed only
+      // while the phone had a connection. Open the app on the bus with
+      // the data off and every course on the shelf went back to saying
+      // nothing, on the app whose whole point is working offline.
+      //
+      // A fresh notifier is built here deliberately: that is what a
+      // cold start does, and it must find the answer on the disk.
+      final cold = ProviderContainer();
+      addTearDown(cold.dispose);
+      final restored = cold.read(courseStampsProvider);
+      expect(restored, isNotEmpty,
+          reason: 'THE SHELF MUST STILL KNOW WHEN BELLO LAST UPDATED '
+              'EACH COURSE WITH THE SERVER GONE');
+      expect(restored[course.id]?.updatedAt, isNotNull,
+          reason: 'and it must be a real date, not an empty stamp');
+      debugPrint('[journey] Bello date after a cold start with no server: '
+          '${restored[course.id]!.updatedAt}');
+
       // A saved note still opens, read through the app's own repository
       // rather than the store directly — which is what a student
       // tapping it actually goes through.

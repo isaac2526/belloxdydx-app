@@ -155,9 +155,44 @@ class NetSpeedNotifier extends StateNotifier<BxNetSpeed> {
 /// on a resume and after a download. This is the whole of the "there's
 /// a change in this course, download now" badge.
 class CourseStampsNotifier extends StateNotifier<Map<String, CourseStamp>> {
-  CourseStampsNotifier(this._ref) : super(const {});
+  CourseStampsNotifier(this._ref) : super(const {}) {
+    _restore();
+  }
 
   final Ref _ref;
+
+  /// The manifest the last successful read produced, straight off the
+  /// disk with nothing awaited.
+  ///
+  /// Without this the one line the owner asked for — "Tutor Bello last
+  /// updated this" — existed only while the phone had a connection.
+  /// Open the app on the bus with the data off and every course on the
+  /// shelf went back to saying nothing, on the app whose whole point is
+  /// working offline.
+  void _restore() {
+    try {
+      final raw = _ref
+          .read(localStoreProvider)
+          .readJsonSync(BxKeys.cachedManifest);
+      if (raw == null) return;
+      final rows = raw['rows'];
+      if (rows is! List) return;
+      final restored = <String, CourseStamp>{};
+      for (final r in rows) {
+        if (r is! Map) continue;
+        final stamp = CourseStamp.fromJson(Map<String, dynamic>.from(r));
+        if (stamp.id.isNotEmpty) restored[stamp.id] = stamp;
+      }
+      if (restored.isEmpty) return;
+      state = restored;
+      // The revision this answer was read at, so a launch where nothing
+      // has changed skips the manifest entirely rather than spending
+      // forty-eight queries to discover that.
+      _readAtRev = (raw['rev'] as num?)?.toInt() ?? 0;
+    } catch (e) {
+      debugPrint('[course] held manifest unreadable: $e');
+    }
+  }
   DateTime _lastRead = DateTime.fromMillisecondsSinceEpoch(0);
   Future<void>? _inFlight;
 
@@ -202,6 +237,14 @@ class CourseStampsNotifier extends StateNotifier<Map<String, CourseStamp>> {
       _lastRead = DateTime.now();
       _readAtRev = repo.lastManifestRev;
       state = {for (final r in rows) r.id: r};
+      unawaited(_ref.read(localStoreProvider).writeJson(
+            BxKeys.cachedManifest,
+            {
+              'rev': _readAtRev,
+              'rows': [for (final r in rows) r.toJson()],
+            },
+            mirror: true,
+          ));
     } catch (e) {
       // A manifest the app could not read is not an error a student
       // needs to see. The badge simply does not appear this time.

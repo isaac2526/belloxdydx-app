@@ -185,6 +185,12 @@ abstract final class BxKeys {
   static const cachedContent = 'content';
   static const cachedDashboard = 'dashboard';
 
+  /// The per-course manifest: counts, checksums and the date Tutor
+  /// Bello last touched each course. Small enough to mirror into
+  /// preferences so the shelf can draw his date in its first frame,
+  /// with the data off.
+  static const cachedManifest = 'manifest';
+
   /// The last moment the server actually answered a question about this
   /// student's own standing. Not the last sync, not the last screen —
   /// the last time the backend confirmed who they are and whether the
