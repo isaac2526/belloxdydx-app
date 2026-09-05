@@ -29,6 +29,14 @@ on:
         description: "Build the unsigned iOS IPA (costs 10x the minutes)"
         type: boolean
         default: false
+      release:
+        description: "Publish a Release with the finished files attached"
+        type: boolean
+        default: false
+      version:
+        description: "Tag to publish as, e.g. v6.0.0 (only used with Release)"
+        type: string
+        default: ""
 
 concurrency:
   group: build-${{ github.ref }}
@@ -446,11 +454,13 @@ jobs:
     name: Publish the installable files
     runs-on: ubuntu-latest
     needs: [android, ios]
-    # Only for a version tag, and only if Android actually built. The
-    # IPA is nice to have: iOS failing must not withhold the APK.
+    # A version tag, or the Release box ticked on the Run workflow
+    # form — and only if Android actually built. The IPA is nice to
+    # have: iOS failing must not withhold the APK.
     if: >-
       always() &&
-      startsWith(github.ref, 'refs/tags/v') &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.release)) &&
       needs.android.result == 'success'
     permissions:
       contents: write
@@ -461,11 +471,36 @@ jobs:
         with:
           path: dist
 
+      # The tag comes from the ref when one was pushed, and from the
+      # form otherwise — in which case `gh release create` creates it
+      # at this commit. That matters: the token a person has may be
+      # scoped to a branch and refuse to push a tag, while the token
+      # this job runs with can make one through the API.
+      - name: Work out the version
+        id: v
+        run: |
+          set -e
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.version }}"
+            if [ -z "$TAG" ]; then
+              V=$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//' | cut -d+ -f1)
+              TAG="v$V"
+            fi
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v$TAG" ;;
+          esac
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "publishing as $TAG"
+
       - name: Name the files after the version
         id: files
         run: |
           set -e
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ steps.v.outputs.tag }}"
           mkdir -p out
           cp dist/belloxdydx-apk/app-release.apk "out/Belloxdydx-$TAG.apk"
           cp dist/belloxdydx-playstore-aab/app-release.aab "out/Belloxdydx-$TAG-playstore.aab"
@@ -484,7 +519,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ steps.v.outputs.tag }}"
           APK="out/Belloxdydx-$TAG.apk"
           SIZE=$(du -h "$APK" | cut -f1)
           {
