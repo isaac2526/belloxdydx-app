@@ -116,11 +116,14 @@ jobs:
           flutter create --org tech.isaacarinola --project-name belloxdydx \
             --platforms android .
 
-      - name: Install the screenshot killer (FLAG_SECURE)
-        run: |
-          mkdir -p android/app/src/main/kotlin/tech/isaacarinola/belloxdydx
-          cp native/MainActivity.kt \
-            android/app/src/main/kotlin/tech/isaacarinola/belloxdydx/MainActivity.kt
+      # THE APPLICATION ID, AND THE SCREENSHOT KILLER (FLAG_SECURE).
+      #
+      # `flutter create` can only produce `<org>.<project>`, and the id
+      # this app needs is not that shape. It is set here instead, along
+      # with MainActivity, which has to sit in the directory its own
+      # package names or Android cannot find it at launch.
+      - name: Application id and the screenshot killer (FLAG_SECURE)
+        run: python3 tools/set_app_id.py isaacarinola.belloxdydx.app
 
       - name: Branded launch window
         run: |
@@ -394,6 +397,9 @@ jobs:
         run: |
           flutter create --org tech.isaacarinola --project-name belloxdydx \
             --platforms ios .
+
+      - name: Application id
+        run: python3 tools/set_app_id.py isaacarinola.belloxdydx.app
 
       - name: Display name and permission strings
         run: |
