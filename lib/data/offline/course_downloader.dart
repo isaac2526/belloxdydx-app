@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -972,9 +973,10 @@ class CourseDownloader {
     return false;
   }
 
-  /// One transfer. The bytes, or the reason there are none — in the
-  /// words the card will use, because "did not save" told a student
-  /// nothing about whether to try again or to tell Tutor Bello.
+  /// One transfer, with one retry. The bytes, or the reason there are
+  /// none — in the words the card will use, because "did not save"
+  /// told a student nothing about whether to try again or to tell
+  /// Tutor Bello.
   Future<({List<int>? bytes, String? reason})> _download(
     String url, {
     required int cap,
@@ -984,25 +986,80 @@ class CourseDownloader {
     if (uri == null || !uri.hasScheme) {
       return (bytes: null, reason: 'has a broken address');
     }
+    ({List<int>? bytes, String? reason}) last =
+        (bytes: null, reason: 'did not save');
+    for (var attempt = 0; attempt < 2 && !_cancelled; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+      }
+      last = await _fetchOnce(uri, cap);
+      if (last.bytes != null) return last;
+      // A file the server does not have, or one too big for a phone,
+      // will be exactly as absent the second time. Only a line that
+      // gave out is worth asking twice.
+      if (!_worthAnotherGo(last.reason)) return last;
+    }
+    return last;
+  }
+
+  static bool _worthAnotherGo(String? reason) =>
+      reason == 'the connection dropped' ||
+      reason == 'no connection' ||
+      reason == 'the server refused it' ||
+      reason == 'came down empty';
+
+  /// STREAMED, WITH AN IDLE TIMEOUT RATHER THAN A TOTAL ONE.
+  ///
+  /// The whole request used to be given 120 seconds. On the connection
+  /// this app was built for that is not a timeout, it is a size limit:
+  /// a 40 MB past-question paper at 30 KB/s needs twenty minutes of
+  /// perfectly healthy transfer, and it was cut off every time and
+  /// reported as a file that did not save. What actually means the line
+  /// is gone is bytes STOPPING — so the clock is reset by every chunk
+  /// that arrives, and a slow download simply takes as long as it
+  /// takes.
+  Future<({List<int>? bytes, String? reason})> _fetchOnce(
+    Uri uri,
+    int cap,
+  ) async {
     try {
       final started = DateTime.now();
-      final res =
-          await _http.get(uri).timeout(const Duration(seconds: 120));
+      final res = await _http
+          .send(http.Request('GET', uri))
+          .timeout(const Duration(seconds: 45));
       if (res.statusCode == 404 || res.statusCode == 410) {
         return (bytes: null, reason: 'not found on the server');
       }
       if (res.statusCode != 200) {
         return (bytes: null, reason: 'the server refused it');
       }
-      if (res.bodyBytes.isEmpty) return (bytes: null, reason: 'came down empty');
-      if (res.bodyBytes.length > cap) {
+      final declared = res.contentLength;
+      if (declared != null && declared > cap) {
         return (bytes: null, reason: 'too big to keep on a phone');
       }
+
+      final out = BytesBuilder(copy: false);
+      // Nothing at all for this long means the line is gone, however
+      // long the whole transfer has been running.
+      await for (final chunk in res.stream.timeout(const Duration(seconds: 45))) {
+        if (_cancelled) return (bytes: null, reason: 'stopped');
+        out.add(chunk);
+        if (out.length > cap) {
+          return (bytes: null, reason: 'too big to keep on a phone');
+        }
+      }
+      final bytes = out.takeBytes();
+      if (bytes.isEmpty) return (bytes: null, reason: 'came down empty');
+      if (declared != null && declared > 0 && bytes.length < declared) {
+        // The connection closed politely in the middle. Writing this
+        // would put half a PDF on the phone and call it saved.
+        return (bytes: null, reason: 'the connection dropped');
+      }
       _b.reportTransfer(
-        bytes: res.bodyBytes.length,
+        bytes: bytes.length,
         millis: DateTime.now().difference(started).inMilliseconds,
       );
-      return (bytes: res.bodyBytes, reason: null);
+      return (bytes: bytes, reason: null);
     } on TimeoutException {
       return (bytes: null, reason: 'the connection dropped');
     } catch (e) {

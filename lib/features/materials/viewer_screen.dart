@@ -77,17 +77,33 @@ _DocKind _sniffKind(Uint8List bytes) {
 /// a phone that may only have a gigabyte.
 Future<Uint8List?> fetchDocumentBytes(String url) async {
   if (url.isEmpty) return null;
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final client = http.Client();
   try {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return null;
-    final r = await http.get(uri);
-    if (r.statusCode >= 200 && r.statusCode < 300 && r.bodyBytes.isNotEmpty) {
-      return r.bodyBytes;
+    // Streamed, and timed on IDLENESS rather than on the whole
+    // transfer. A plain get() had no timeout at all, so a stalled
+    // connection left the Save button spinning for ever; a whole-file
+    // timeout would instead abandon a big paper on a slow line, which
+    // is the connection this app is for. Bytes arriving resets the
+    // clock; bytes stopping is what means the line is gone.
+    final res = await client
+        .send(http.Request('GET', uri))
+        .timeout(const Duration(seconds: 45));
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+    final out = BytesBuilder(copy: false);
+    await for (final chunk in res.stream.timeout(const Duration(seconds: 45))) {
+      out.add(chunk);
     }
+    final bytes = out.takeBytes();
+    return bytes.isEmpty ? null : bytes;
   } catch (_) {
-    // Offline, a dead link, a timeout — all the same to the reader.
+    // Offline, a dead link, a stalled line — all the same to the
+    // reader, which has its own sentence for it.
+    return null;
+  } finally {
+    client.close();
   }
-  return null;
 }
 
 /// Streams a document to a scratch file and hands back the path.
@@ -123,7 +139,11 @@ Future<({String path, Uint8List head})?> fetchDocumentToFile(
     final head = <int>[];
     var total = 0;
     try {
-      await for (final chunk in res.stream) {
+      // Idle, not total: a forty-megabyte paper on a 30 KB/s line is
+      // twenty honest minutes of transfer, and cutting it off at two
+      // was reported to the student as a file that would not open.
+      await for (final chunk
+          in res.stream.timeout(const Duration(seconds: 45))) {
         if (head.length < 8) {
           head.addAll(chunk.take(8 - head.length));
         }
