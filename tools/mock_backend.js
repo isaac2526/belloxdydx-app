@@ -131,12 +131,45 @@ for (const c of COURSES) {
     MATERIALS.push(m);
     return m;
   };
-  mk('note', `${c.code} · Introduction and key laws`, { topic: 'Foundations' });
+  mk('note', `${c.code} · Introduction and key laws`, {
+    topic: 'Foundations',
+    // A note carrying real attachments — a PDF, a picture and a voice
+    // note — because an attachment that never reaches the phone is the
+    // fault this fixture exists to catch.
+    attachments: [
+      { title: 'Episode 1 handout', kind: 'pdf',
+        url: `${STORAGE}/materials/handout-1.pdf` },
+      { title: 'The board after class', kind: 'image',
+        url: `${STORAGE}/materials/images/board.png` },
+      // A file Tutor Bello named with a per cent sign in it. Naming a
+      // failed unit used to decode an already-decoded path segment,
+      // which threw and took the whole download down with it.
+      { title: 'Revision sheet', kind: 'pdf',
+        url: `${STORAGE}/materials/100%25-revision.pdf` },
+      { title: 'Tutor Bello reads it', kind: 'audio',
+        url: `${STORAGE}/materials/audio/handout-1.mp3` },
+    ],
+  });
   mk('note', `${c.code} · Worked examples`, { topic: 'Practice' });
   mk('note', `${c.code} · Exam focus areas`, { topic: 'Revision' });
   // A fourth note so the "search appears above three items" rule is
   // actually exercised by the interaction test.
   mk('note', `${c.code} · Common mistakes`, { topic: 'Revision' });
+  // A NOTE THAT IS ONLY ITS ATTACHMENT.
+  //
+  // Tutor Bello posts a series episode by episode: the PDF goes up
+  // first and the body is typed later. Six of these on one course were
+  // the whole of a student's "6 files did not save", and offline the
+  // note said "Nothing is attached yet either" over a PDF that was on
+  // the phone. The fixture must contain one.
+  const episode = mk('note', `${c.code} Series, Episode II`, {
+    topic: 'Series',
+    attachments: [
+      { title: 'Episode 2 — Electric Fields', kind: 'pdf',
+        url: `${STORAGE}/materials/episode-2.pdf` },
+    ],
+  });
+  episode.content_html = '';
   mk('slide', `${c.code} · Lecture 1 slides`, {
     topic: 'Week 1',
     url: `${STORAGE}/materials/lecture1.pdf`,
@@ -700,6 +733,17 @@ const RPC = {
       ids = ids.filter((id) => (QUESTIONS.find((q) => q.id === id) || {}).course_id === courseId);
     } else {
       if (!courseId) return { error: 'not_found' };
+      // Both real backends hand back an unfinished sitting of the same
+      // flavour rather than stacking new ones, unless the caller asks
+      // for a fresh draw. The app asks for one on every Practice tap,
+      // and this is where that is proved.
+      if (!p.p_fresh) {
+        const open = Object.entries(state.attempts).find(
+          ([, a]) => a.user_id === u.id && a.mode === 'practice' &&
+            a.status === 'in_progress' && a.course_id === courseId
+        );
+        if (open) return { attemptId: open[0], resumed: true };
+      }
       ids = shuffled(questionsFor(courseId)).slice(0, p.p_count || 20).map((q) => q.id);
     }
 
@@ -1430,6 +1474,7 @@ const server = http.createServer(async (req, res) => {
       if (!u) return send(res, 401, { error: 'unauthenticated' });
       return send(res, 200, RPC.bx_start_attempt(u, {
         p_course_id: body.courseId, p_mode: 'practice', p_count: body.count,
+        p_fresh: body.fresh === true,
       }));
     }
     if (path === '/api/cbt/start') {

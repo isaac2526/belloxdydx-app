@@ -29,6 +29,14 @@ on:
         description: "Build the unsigned iOS IPA (costs 10x the minutes)"
         type: boolean
         default: false
+      release:
+        description: "Publish a Release with the finished files attached"
+        type: boolean
+        default: false
+      version:
+        description: "Tag to publish as, e.g. v6.0.0 (only used with Release)"
+        type: string
+        default: ""
 
 concurrency:
   group: build-${{ github.ref }}
@@ -159,88 +167,176 @@ jobs:
       # an installable APK, and says loudly in the summary that the
       # signature is throwaway. A silent fallback is how this went
       # unnoticed in the first place.
+      # ============================================================
+      # ONE SIGNATURE, FOR EVER
+      #
+      # Nothing here was signing anything. `flutter build apk --release`
+      # with no signing config silently falls back to signingConfigs
+      # .debug, and the debug keystore is GENERATED FRESH on each CI
+      # runner - so every APK ever produced here carried a different
+      # signature. Android refuses to install an update signed by a
+      # different key, which is why a new build meant "uninstall the old
+      # one first", losing every student's downloaded course with it.
+      # The Play Store is stricter still: the first upload fixes the key
+      # for the life of the listing.
+      #
+      # THE KEYSTORE LIVES IN THE REPO, ENCRYPTED.
+      #
+      # It was a base64 secret first, and that failed twice: 5,912
+      # characters cannot be pasted reliably from a phone, and a value
+      # that arrives truncated or re-wrapped fails at exactly the step
+      # meant to guarantee the signature. A build that depends on a
+      # human transcribing six thousand characters is a broken build.
+      #
+      # So android-signing/bx-release.jks.enc is committed - AES-256
+      # with PBKDF2 at 300k iterations - and the only thing a person has
+      # to paste is a 40-character passphrase. The encrypted file is
+      # useless without it, which is why it is safe in a public repo.
+      #
+      # If the secrets are absent the build still runs and still makes
+      # an installable APK, but says loudly that the signature is
+      # throwaway. A silent fallback is how this went unnoticed at all.
       - name: Release signing key
         id: signing
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSPHRASE: ${{ secrets.ANDROID_KEYSTORE_PASSPHRASE }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+          ENC=android-signing/bx-release.jks.enc
+          if [ -z "$KEYSTORE_PASSPHRASE" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
             echo "signed=false" >> $GITHUB_OUTPUT
             {
-              echo "### ⚠️ UNSIGNED-FOR-RELEASE BUILD"
+              echo "### UNSIGNED-FOR-RELEASE BUILD"
               echo ""
-              echo "\`ANDROID_KEYSTORE_BASE64\` / \`ANDROID_KEYSTORE_PASSWORD\`"
-              echo "are not set, so this APK is signed with a throwaway debug"
-              echo "key. It installs, but students will have to UNINSTALL to"
-              echo "move to the next build, and it cannot go to the Play Store."
+              echo "\`ANDROID_KEYSTORE_PASSPHRASE\` / \`ANDROID_KEYSTORE_PASSWORD\`"
+              echo "are not both set, so this APK carries a throwaway debug key."
+              echo "It installs, but students must UNINSTALL to move to the next"
+              echo "build, and it cannot go to the Play Store."
             } >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
+          test -f "$ENC" || { echo "::error::$ENC is missing from the repo."; exit 1; }
+
           KEYSTORE="$PWD/android/bx-release.jks"
-          echo "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
-          # Verify it decoded into a real keystore before trusting it. A
-          # truncated secret would otherwise fall through to a debug
-          # signature, which is the exact failure being fixed here.
-          keytool -list -keystore "$KEYSTORE" \
-            -storepass "$KEYSTORE_PASSWORD" > /dev/null
+          # Whitespace is trimmed from the passphrase: a paste that picks
+          # up a trailing newline or a stray space is the single most
+          # likely way this fails, and it is not worth a failed build.
+          PHRASE=$(printf '%s' "$KEYSTORE_PASSPHRASE" | tr -d '[:space:]')
+          PASSWORD=$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d '\r\n')
+          echo "passphrase received: ${#PHRASE} characters (expected 40)"
+
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 300000 \
+            -in "$ENC" -out "$KEYSTORE" -pass "pass:$PHRASE" 2>/dev/null || {
+            echo "::error::Could not decrypt the keystore."
+            echo "::error::ANDROID_KEYSTORE_PASSPHRASE is wrong, or was cut"
+            echo "::error::short when pasted. It must be exactly 40 characters;"
+            echo "::error::this run received ${#PHRASE}."
+            exit 1
+          }
+
+          keytool -list -keystore "$KEYSTORE" -storepass "$PASSWORD" > /dev/null || {
+            echo "::error::The keystore decrypted, but ANDROID_KEYSTORE_PASSWORD"
+            echo "::error::does not open it. It received ${#PASSWORD} characters."
+            echo "::error::A trailing space, or a missing last character, is the"
+            echo "::error::usual cause."
+            exit 1
+          }
+
           # storeFile is written ABSOLUTE on purpose. Gradle's file()
-          # inside the android { } block of app/build.gradle.kts
-          # resolves a relative path against android/app/, not android/,
-          # so "bx-release.jks" would look in the wrong directory and
+          # inside the android { } block of app/build.gradle.kts resolves
+          # a relative path against android/app/, not android/, so
+          # "bx-release.jks" would look in the wrong directory and
           # quietly fall back to the debug key.
-          cat > android/key.properties <<PROPS
-          storePassword=$KEYSTORE_PASSWORD
-          keyPassword=$KEYSTORE_PASSWORD
-          keyAlias=belloxdydx
-          storeFile=$KEYSTORE
-          PROPS
+          {
+            echo "storePassword=$PASSWORD"
+            echo "keyPassword=$PASSWORD"
+            echo "keyAlias=belloxdydx"
+            echo "storeFile=$KEYSTORE"
+          } > android/key.properties
           python3 tools/sign_gradle.py
           echo "signed=true" >> $GITHUB_OUTPUT
 
       - name: Build APK
         run: flutter build apk --release --split-debug-info=build/symbols
 
-      # Proof, in the log, of which key actually signed it - so
-      # "consistent signature" is something the build demonstrates
-      # rather than something a comment claims.
-      - name: Show the signature that shipped
-        run: |
-          APK=build/app/outputs/flutter-apk/app-release.apk
-          FP=$(keytool -printcert -jarfile "$APK" 2>/dev/null \
-                | grep -m1 "SHA256:" | tr -d ' ')
-          echo "$FP"
-          {
-            echo "### Signature"
-            if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
-              echo "- Signed with the permanent Belloxdydx release key."
-              echo "- Every future build carries this same fingerprint, so"
-              echo "  students update in place and keep their downloads."
-            else
-              echo "- ⚠️ Throwaway debug key - see the warning above."
-            fi
-            echo "- \`$FP\`"
-          } >> $GITHUB_STEP_SUMMARY
+      # ONE APK PER PROCESSOR, AS WELL AS THE UNIVERSAL ONE.
+      #
+      # The universal APK carries the machine code for three
+      # processors, and a phone uses exactly one of them: 63 MB
+      # downloaded to install about 25 MB of app. On a student's data
+      # bundle that is most of a day's browsing spent on padding they
+      # cannot run. The per-processor files are built alongside it —
+      # arm64-v8a is every Android phone sold in years — and the
+      # universal one stays for anyone unsure which they need.
+      - name: Build one APK per processor
+        run: flutter build apk --release --split-per-abi --split-debug-info=build/symbols
+
+      - name: What each APK weighs
+        run: ls -lh build/app/outputs/flutter-apk/*.apk | awk '{print $9, $5}'
 
       - name: Build Play Store bundle
         run: flutter build appbundle --release --split-debug-info=build/symbols
 
       # A signature that silently reverted to debug is worse than a
       # failed build: it ships, it installs, and it breaks every future
-      # update. So when a key was supplied, this proves it was used.
+      # update. So when a key was supplied, this proves the finished
+      # files carry it - by FINGERPRINT, not by a name anyone could put
+      # in a certificate.
+      #
+      # The two formats need two different tools, which is what tripped
+      # the first attempt at this check up. An APK is signed with APK
+      # Signature Scheme v2/v3, a whole-file signature that `keytool
+      # -printcert -jarfile` cannot read at all - it answers "Not a
+      # signed jar file" for a perfectly signed APK. Only apksigner
+      # understands it. An AAB is a plain signed jar, so keytool is
+      # right for that one.
       - name: The key must actually have been used
         if: steps.signing.outputs.signed == 'true'
         run: |
-          for f in build/app/outputs/flutter-apk/app-release.apk \
-                   build/app/outputs/bundle/release/app-release.aab; do
-            OUT=$(keytool -printcert -jarfile "$f" 2>/dev/null)
-            echo "$OUT" | grep -q "O=Belloxdydx" || {
-              echo "::error::$f was NOT signed with the Belloxdydx release key."
-              echo "$OUT" | head -20
-              exit 1
-            }
-            echo "ok: $(basename $f) carries the Belloxdydx release key"
-          done
+          EXPECT=c175c91b17ec363d10adcba1e36fffd2d261c80ff68c119f62f511019103045d
+
+          APKSIGNER=$(ls -1 "$ANDROID_SDK_ROOT"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found under $ANDROID_SDK_ROOT/build-tools."
+            echo "::error::Cannot prove the APK signature; refusing to ship blind."
+            exit 1
+          fi
+
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          got=$("$APKSIGNER" verify --print-certs "$apk" 2>/dev/null \
+                 | grep -i "SHA-256 digest" | tr -d ' ' | tr 'A-Z' 'a-z')
+          echo "$got"
+          case "$got" in
+            *"$EXPECT"*) echo "ok: APK carries the Belloxdydx release key" ;;
+            *)
+              echo "::error::The APK is NOT signed with the Belloxdydx key."
+              echo "::error::Expected $EXPECT"
+              "$APKSIGNER" verify --print-certs "$apk" 2>&1 | head -20
+              exit 1 ;;
+          esac
+
+          aab=build/app/outputs/bundle/release/app-release.aab
+          gotb=$(keytool -printcert -jarfile "$aab" 2>/dev/null \
+                  | grep -i "SHA256:" | tr -d ' :' | tr 'A-Z' 'a-z')
+          echo "$gotb"
+          case "$gotb" in
+            *"$EXPECT"*) echo "ok: AAB carries the Belloxdydx release key" ;;
+            *)
+              echo "::error::The AAB is NOT signed with the Belloxdydx key."
+              echo "::error::Expected $EXPECT"
+              keytool -printcert -jarfile "$aab" 2>&1 | head -20
+              exit 1 ;;
+          esac
+
+          {
+            echo "### Signature verified"
+            echo "Both the APK and the AAB carry the permanent Belloxdydx key."
+            echo ""
+            echo "\`SHA-256 $EXPECT\`"
+            echo ""
+            echo "Every future build carries this same fingerprint, so students"
+            echo "update in place and keep their downloaded courses."
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: Report sizes
         run: |
@@ -251,7 +347,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: belloxdydx-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
@@ -357,3 +456,118 @@ jobs:
           name: belloxdydx-ios-unsigned-ipa
           path: build/ipa/belloxdydx-unsigned.ipa
           if-no-files-found: error
+
+  # ============================================================
+  # PUBLISH THE INSTALLABLE FILES
+  #
+  # An Actions artifact is a zip behind a login that expires in 90
+  # days. A student — or Tutor Bello on his phone — cannot tap one and
+  # install it, and neither can any machine without a token.
+  #
+  # A tagged build therefore also publishes a Release, with the APK,
+  # the Play Store bundle and the unsigned IPA attached as plain files
+  # on a permanent, public, tappable link.
+  # ============================================================
+  release:
+    name: Publish the installable files
+    runs-on: ubuntu-latest
+    needs: [android, ios]
+    # A version tag, or the Release box ticked on the Run workflow
+    # form — and only if Android actually built. The IPA is nice to
+    # have: iOS failing must not withhold the APK.
+    if: >-
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.release)) &&
+      needs.android.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      # The tag comes from the ref when one was pushed, and from the
+      # form otherwise — in which case `gh release create` creates it
+      # at this commit. That matters: the token a person has may be
+      # scoped to a branch and refuse to push a tag, while the token
+      # this job runs with can make one through the API.
+      - name: Work out the version
+        id: v
+        run: |
+          set -e
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.version }}"
+            if [ -z "$TAG" ]; then
+              V=$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//' | cut -d+ -f1)
+              TAG="v$V"
+            fi
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v$TAG" ;;
+          esac
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "publishing as $TAG"
+
+      - name: Name the files after the version
+        id: files
+        run: |
+          set -e
+          TAG="${{ steps.v.outputs.tag }}"
+          mkdir -p out
+          cp dist/belloxdydx-apk/app-release.apk "out/Belloxdydx-$TAG.apk"
+          # The one almost every phone actually wants, and the one for
+          # an older 32-bit handset.
+          cp dist/belloxdydx-apk/app-arm64-v8a-release.apk \
+             "out/Belloxdydx-$TAG-arm64.apk"
+          cp dist/belloxdydx-apk/app-armeabi-v7a-release.apk \
+             "out/Belloxdydx-$TAG-arm32.apk"
+          cp dist/belloxdydx-playstore-aab/app-release.aab "out/Belloxdydx-$TAG-playstore.aab"
+          if [ -f dist/belloxdydx-ios-unsigned-ipa/belloxdydx-unsigned.ipa ]; then
+            cp dist/belloxdydx-ios-unsigned-ipa/belloxdydx-unsigned.ipa \
+               "out/Belloxdydx-$TAG-unsigned.ipa"
+          else
+            echo "no IPA in this run - publishing Android only"
+          fi
+          ls -lh out
+          # Checksums, so a download can be proved intact on the far end.
+          ( cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt )
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${{ steps.v.outputs.tag }}"
+          APK="out/Belloxdydx-$TAG.apk"
+          SIZE=$(du -h "$APK" | cut -f1)
+          {
+            echo "Belloxdydx for Android and iOS, built from \`${GITHUB_SHA}\`."
+            echo ""
+            echo "| File | What it is for |"
+            echo "|---|---|"
+            echo "| \`Belloxdydx-$TAG-arm64.apk\` | **Start here** — every Android phone sold in years |"
+            echo "| \`Belloxdydx-$TAG-arm32.apk\` | Older 32-bit handsets |"
+            echo "| \`Belloxdydx-$TAG.apk\` ($SIZE) | Works on any of them, three times the download |"
+            echo "| \`Belloxdydx-$TAG-playstore.aab\` | Upload to the Play Console |"
+            echo "| \`Belloxdydx-$TAG-unsigned.ipa\` | iPhone testing (needs re-signing) |"
+            echo ""
+            echo "The APK and AAB are signed with the permanent Belloxdydx key,"
+            echo "SHA-256 \`c175c91b17ec363d10adcba1e36fffd2d261c80ff68c119f62f511019103045d\`,"
+            echo "and the build fails if they are not — so this installs straight"
+            echo "over any earlier Belloxdydx without uninstalling, and every"
+            echo "downloaded course survives the update."
+            echo ""
+            echo "\`SHA256SUMS.txt\` proves a download arrived intact."
+          } > notes.md
+          gh release create "$TAG" out/* \
+            --title "Belloxdydx $TAG" \
+            --notes-file notes.md \
+            --target "$GITHUB_SHA"
+          echo "### Release published" >> $GITHUB_STEP_SUMMARY
+          gh release view "$TAG" --json url --jq .url >> $GITHUB_STEP_SUMMARY

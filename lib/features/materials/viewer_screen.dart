@@ -14,6 +14,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/net_speed.dart';
 import '../../data/offline/offline_store.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
@@ -76,17 +77,33 @@ _DocKind _sniffKind(Uint8List bytes) {
 /// a phone that may only have a gigabyte.
 Future<Uint8List?> fetchDocumentBytes(String url) async {
   if (url.isEmpty) return null;
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final client = http.Client();
   try {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return null;
-    final r = await http.get(uri);
-    if (r.statusCode >= 200 && r.statusCode < 300 && r.bodyBytes.isNotEmpty) {
-      return r.bodyBytes;
+    // Streamed, and timed on IDLENESS rather than on the whole
+    // transfer. A plain get() had no timeout at all, so a stalled
+    // connection left the Save button spinning for ever; a whole-file
+    // timeout would instead abandon a big paper on a slow line, which
+    // is the connection this app is for. Bytes arriving resets the
+    // clock; bytes stopping is what means the line is gone.
+    final res = await client
+        .send(http.Request('GET', uri))
+        .timeout(const Duration(seconds: 45));
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+    final out = BytesBuilder(copy: false);
+    await for (final chunk in res.stream.timeout(const Duration(seconds: 45))) {
+      out.add(chunk);
     }
+    final bytes = out.takeBytes();
+    return bytes.isEmpty ? null : bytes;
   } catch (_) {
-    // Offline, a dead link, a timeout — all the same to the reader.
+    // Offline, a dead link, a stalled line — all the same to the
+    // reader, which has its own sentence for it.
+    return null;
+  } finally {
+    client.close();
   }
-  return null;
 }
 
 /// Streams a document to a scratch file and hands back the path.
@@ -122,7 +139,11 @@ Future<({String path, Uint8List head})?> fetchDocumentToFile(
     final head = <int>[];
     var total = 0;
     try {
-      await for (final chunk in res.stream) {
+      // Idle, not total: a forty-megabyte paper on a 30 KB/s line is
+      // twenty honest minutes of transfer, and cutting it off at two
+      // was reported to the student as a file that would not open.
+      await for (final chunk
+          in res.stream.timeout(const Duration(seconds: 45))) {
         if (head.length < 8) {
           head.addAll(chunk.take(8 - head.length));
         }
@@ -188,6 +209,22 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   static const _noDownload =
       'This document did not come down. Check your data or Wi-Fi, then '
       'pull to refresh.';
+
+  /// What to say when there is no line AND no copy. "Check your data
+  /// or Wi-Fi" is true and useless — the student knows their data is
+  /// off. This says what to do about it next time.
+  static const _notHeldYet =
+      'You are offline and this one was not among the files saved to '
+      'this phone. Open the course with data on and tap Download — it '
+      'brings every note, slide, past question and picture down, and '
+      'then this opens with no data at all.';
+
+  bool get _noLine =>
+      ref.read(netSpeedProvider).grade == BxNetGrade.offline;
+
+  String _friendlyError(Object? e) => e is BxError
+      ? e.message
+      : 'Check your data or Wi-Fi, then try again.';
 
   Future<void> _refresh() async {
     _preparedFor = null;
@@ -375,6 +412,15 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
       ref.read(vaultProvider.notifier).refresh();
       if (!mounted) return;
+      if (failure == null) {
+        // Re-prepare from the vault copy, so the offer to save it
+        // disappears and the reader is drawing the kept file rather
+        // than the scratch one. Left as it was, the page went on
+        // offering "Save" beside an app-bar icon that had already
+        // turned into "Remove".
+        _preparedFor = null;
+        setState(() => _offline = true);
+      }
       bxToast(
         context,
         failure ?? 'Saved. It opens now with no data at all.',
@@ -531,10 +577,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         return BxPage(
           onRefresh: _refresh,
           child: BxErrorState(
-            title: 'This document did not open',
-            message: e is BxError
-                ? e.message
-                : 'Check your data or Wi-Fi, then try again.',
+            title: _noLine
+                ? 'This one is not on this phone yet'
+                : 'This document did not open',
+            message: _noLine ? _notHeldYet : _friendlyError(e),
             onRetry: _refresh,
           ),
         );
@@ -591,8 +637,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       return BxPage(
         onRefresh: _refresh,
         child: BxErrorState(
-          title: 'This document did not open',
-          message: _error!,
+          title: _noLine && _error == _noDownload
+              ? 'This one is not on this phone yet'
+              : 'This document did not open',
+          message: _noLine && _error == _noDownload ? _notHeldYet : _error!,
           onRetry: () => setState(() {
             _preparedFor = null;
             _error = null;
@@ -642,6 +690,24 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                     icon: Icons.edit_calendar_outlined,
                   ),
               ],
+            ),
+          ],
+          // THE SAVE, INSIDE THE DOCUMENT.
+          //
+          // "add download button inside everything just in case" — an
+          // icon in the app bar is easy to miss and hard to reach with
+          // a thumb, so the offer sits on the page until it is taken
+          // and then gets out of the way.
+          if (!_offline) ...[
+            const SizedBox(height: BxSpace.xs),
+            BxBanner(
+              title: 'Keep this on your phone',
+              message: 'Saved, it opens with your data off — and stays '
+                  'until you remove it.',
+              icon: Icons.download_for_offline_outlined,
+              accent: BxAccent.gold,
+              actionLabel: _busy ? null : 'Save',
+              onAction: _busy ? null : () => _save(m, code),
             ),
           ],
           if (_stale) ...[
@@ -715,6 +781,16 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   'so it opens in a viewer instead of the page reader.',
                   style: BxType.body(c.inkSoft),
                 ),
+                if (ref.watch(netSpeedProvider).grade == BxNetGrade.offline) ...[
+                  const SizedBox(height: BxSpace.sm),
+                  Text(
+                    'You are offline. The slide viewer needs a connection — '
+                    'it is the one thing in this course that cannot be kept '
+                    'on the phone. Ask Tutor Bello for a PDF copy if you '
+                    'need it with your data off.',
+                    style: BxType.small(c.warning),
+                  ),
+                ],
                 const SizedBox(height: BxSpace.lg),
                 Align(
                   alignment: Alignment.centerLeft,
@@ -924,7 +1000,13 @@ class _PdfSurfaceState extends State<PdfSurface> {
 }
 
 /// A pushed full-screen reader for a PDF attached to a note.
-class PdfDocumentPage extends StatefulWidget {
+///
+/// THE DISK IS ASKED FIRST. An attached PDF is stored under its URL —
+/// by the course download and by the note's own Save — and this page
+/// used to go straight to the network for it regardless, so a student
+/// who had downloaded the whole course was told "did not come down"
+/// over a file that was sitting on the phone.
+class PdfDocumentPage extends ConsumerStatefulWidget {
   final String title;
   final String? subtitle;
   final String url;
@@ -937,12 +1019,16 @@ class PdfDocumentPage extends StatefulWidget {
   });
 
   @override
-  State<PdfDocumentPage> createState() => _PdfDocumentPageState();
+  ConsumerState<PdfDocumentPage> createState() => _PdfDocumentPageState();
 }
 
-class _PdfDocumentPageState extends State<PdfDocumentPage> {
-  Uint8List? _bytes;
+class _PdfDocumentPageState extends ConsumerState<PdfDocumentPage> {
+  String? _path;
   bool _loading = true;
+  bool _saving = false;
+
+  /// True when the page was opened from the phone's own copy.
+  bool _offline = false;
   String? _error;
   int _page = 0;
   int _pages = 0;
@@ -953,21 +1039,80 @@ class _PdfDocumentPageState extends State<PdfDocumentPage> {
     _load();
   }
 
+  /// The saved copy's path, if the phone really has one.
+  Future<String?> _savedCopy() async {
+    final local = Offline.pathFor(widget.url);
+    if (local == null) return null;
+    try {
+      final f = File(local);
+      if (await f.exists() && await f.length() > 0) return local;
+    } catch (_) {}
+    return null;
+  }
+
   Future<void> _load() async {
     setState(() {
       _loading = true;
       _error = null;
     });
-    final bytes = await fetchDocumentBytes(widget.url);
+    final saved = await _savedCopy();
     if (!mounted) return;
+    if (saved != null) {
+      setState(() {
+        _path = saved;
+        _offline = true;
+        _loading = false;
+      });
+      return;
+    }
+    // Streamed to a scratch file, never held whole in memory — the same
+    // rule the main reader follows for a forty-megabyte paper.
+    final got = await fetchDocumentToFile(
+        widget.url, 'att-${assetKeyFor(widget.url)}');
+    if (!mounted) return;
+    final noLine =
+        ref.read(netSpeedProvider).grade == BxNetGrade.offline;
     setState(() {
-      _bytes = bytes;
+      _path = got?.path;
+      _offline = false;
       _loading = false;
-      _error = bytes == null
-          ? 'This attachment did not come down. Check your data or Wi-Fi and '
-              'try again.'
+      _error = got == null
+          ? (noLine
+              ? 'This attachment is not on this phone yet, and there is no '
+                  'connection to fetch it. Open it once with data, or tap '
+                  'Download on the course, and it stays.'
+              : 'This attachment did not come down. Check your data or '
+                  'Wi-Fi and try again.')
           : null;
     });
+  }
+
+  /// Keeps the open copy under its URL, where the note's attachment row
+  /// and the course download both look for it.
+  Future<void> _save() async {
+    if (_saving || _offline) return;
+    final path = _path;
+    final store = Offline.store;
+    if (path == null) return;
+    if (store == null) {
+      bxToast(context, 'This device cannot hold offline copies.', error: true);
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      final bytes = await File(path).readAsBytes();
+      await store.putAsset(widget.url, bytes);
+      await store.flush();
+      if (!mounted) return;
+      setState(() => _offline = true);
+      bxToast(context, 'Saved. This attachment opens with no data now.');
+    } catch (e) {
+      if (!mounted) return;
+      bxToast(context, ref.read(backendProvider).faultFor(e).message,
+          error: true);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -977,6 +1122,26 @@ class _PdfDocumentPageState extends State<PdfDocumentPage> {
       appBar: BxAppBar(
         title: widget.title,
         subtitle: _pages > 0 ? 'page $_page of $_pages' : widget.subtitle,
+        actions: [
+          if (_path != null)
+            IconButton(
+              tooltip: _offline ? 'On this phone' : 'Save for offline',
+              onPressed: _offline || _saving ? null : _save,
+              icon: _saving
+                  ? SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: c.gold),
+                    )
+                  : Icon(
+                      _offline
+                          ? Icons.offline_pin_rounded
+                          : Icons.download_for_offline_outlined,
+                      color: _offline ? c.success : null,
+                    ),
+            ),
+        ],
       ),
       body: BxPage(
         scrollable: false,
@@ -986,6 +1151,15 @@ class _PdfDocumentPageState extends State<PdfDocumentPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const ThreatStrip(),
+            if (_offline) ...[
+              const SizedBox(height: BxSpace.xs),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: BxChip('Offline copy',
+                    accent: BxAccent.success,
+                    icon: Icons.offline_pin_rounded),
+              ),
+            ],
             const SizedBox(height: BxSpace.sm),
             Expanded(
               child: _loading
@@ -1006,7 +1180,7 @@ class _PdfDocumentPageState extends State<PdfDocumentPage> {
                             child: Stack(
                               children: [
                                 PdfSurface(
-                                  bytes: _bytes,
+                                  filePath: _path,
                                   onPages: (page, pages) {
                                     if (!mounted ||
                                         (page == _page && pages == _pages)) {

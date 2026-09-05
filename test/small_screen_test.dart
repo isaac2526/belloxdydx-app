@@ -2,6 +2,7 @@ import 'package:belloxdydx/core/providers.dart';
 import 'package:belloxdydx/core/security.dart';
 import 'package:belloxdydx/core/theme/app_theme.dart';
 import 'package:belloxdydx/data/local_store.dart';
+import 'package:belloxdydx/data/offline/course_downloader.dart';
 import 'package:belloxdydx/features/security/lock_screen.dart';
 import 'package:belloxdydx/ui/ui.dart';
 import 'package:flutter/material.dart';
@@ -264,6 +265,33 @@ void theDownloadCardOnASmallPhone() {
         ],
       );
       expect(overflows(tester), isEmpty);
+    });
+  });
+
+  group('the sentence naming what did not save', () {
+    // "6 files did not save" told a student nothing they could act on,
+    // so the card names them now — and a named list is long. On the
+    // phones these students hold it must wrap rather than paint the
+    // yellow-and-black stripe across the card.
+    testWidgets('wraps at 320dp and the largest text allowed',
+        (tester) async {
+      final message = CourseDownloader.failureMessage(6, const [
+        CourseDownloadFailure(
+            title: 'PHY 102 Series, Episode II — Electric Fields',
+            reason: 'not found on the server'),
+        CourseDownloadFailure(
+            title: 'Lecture 4 slides', reason: 'the connection dropped'),
+        CourseDownloadFailure(
+            title: 'a picture in Worked examples', reason: 'came down empty'),
+      ]);
+      await pumpAt(
+        tester,
+        Text(message, style: const TextStyle(fontSize: 11)),
+        size: const Size(320, 640),
+      );
+      expect(overflows(tester), isEmpty);
+      expect(find.textContaining('Episode II'), findsOneWidget,
+          reason: 'the whole point is that it names them');
     });
   });
 

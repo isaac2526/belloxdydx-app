@@ -227,6 +227,10 @@ class _SectionScreenState extends ConsumerState<SectionScreen> {
       );
     }
 
+    // What is already on this phone, so a row can carry a small pin and
+    // a student with the data off knows what will open BEFORE tapping.
+    final onPhone = ref.watch(vaultProvider).map((i) => i.id).toSet();
+
     // One subtree from here on, so typing in the search box never rebuilds
     // the field itself and never drops the caret.
     return Column(
@@ -268,6 +272,13 @@ class _SectionScreenState extends ConsumerState<SectionScreen> {
                 subtitle: _subtitleFor(m),
                 locked: !activated,
                 leading: _mark(context, m.kind),
+                trailing: onPhone.contains(m.id)
+                    ? Tooltip(
+                        message: 'On this phone',
+                        child: Icon(Icons.offline_pin_rounded,
+                            size: 18, color: context.bx.success),
+                      )
+                    : null,
                 onTap: activated
                     ? () => context.push(_destinationFor(m))
                     : () => showActivationGate(

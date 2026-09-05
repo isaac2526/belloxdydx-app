@@ -254,6 +254,12 @@ class CourseDownloadNotifier extends StateNotifier<CourseDownloadState> {
     await _engine.run();
     // The catalogue changed underneath anything watching it.
     _ref.read(offlineRecordTick.notifier).state++;
+    // Including the vault's own list, which is what the Vault screen
+    // shows and what puts the "on this phone" pin on a section row. It
+    // was only ever refreshed by a hand-tapped Save, so everything a
+    // course download brought down stayed invisible on those rows
+    // until the next launch.
+    _ref.read(vaultProvider.notifier).refresh();
     // The badge is re-read from the server rather than assumed: a
     // question added while the download was running must still show up
     // as a change.

@@ -10,6 +10,7 @@ import 'backend.dart';
 import 'local_store.dart';
 import '../core/security.dart';
 import 'offline/offline_store.dart';
+import 'offline/round_picker.dart';
 import 'models.dart';
 
 /// ============================================================
@@ -987,7 +988,13 @@ class ContentRepository {
 
       // Reading a note is the moment to keep it. Nothing about that
       // costs the student anything — the bytes are already down.
-      if (offline != null && m.hasBody) {
+      //
+      // A note with no body but something attached is kept too: its
+      // entry is what lets the attachment list survive the data going
+      // off. (The attachment's own bytes come with Save or Download.)
+      if (offline != null &&
+          m.kind == MaterialKind.note &&
+          (m.hasBody || m.attachments.isNotEmpty)) {
         final header = _materials.where((h) => h.id == id).firstOrNull;
         final sig = m.updatedAt?.toIso8601String() ??
             header?.updatedAt?.toIso8601String() ??
@@ -1002,6 +1009,10 @@ class ContentRepository {
                 courseCode: courseById(m.courseId)?.code ?? '',
                 courseId: m.courseId,
                 sig: sig,
+                attachments: [
+                  for (final a in m.attachments)
+                    OfflineAttachment(title: a.title, url: a.url, kind: a.kind),
+                ],
               );
               await offline.flush();
             } catch (e) {
@@ -1025,7 +1036,11 @@ class ContentRepository {
       // so a slide or a past question sitting complete on the disk
       // threw a network error before anything got as far as looking at
       // the disk. The file was always there. Nothing ever opened it.
-      if (savedHtml == null && saved?.hasDoc != true) rethrow;
+      //
+      // And an ENTRY counts, even with no body and no document: a note
+      // that is only its attachments has one now, and its attachment
+      // list is the whole reason to open it offline.
+      if (savedHtml == null && saved == null) rethrow;
 
       return StudyMaterial(
         id: id,
@@ -1043,6 +1058,15 @@ class ContentRepository {
         // hand to the viewer.
         url: header?.url ?? '',
         contentHtml: savedHtml ?? '',
+        // What was clipped to it, off the saved entry. Left out, the
+        // reader said "Nothing is attached yet either" over a PDF that
+        // was sitting on the disk.
+        attachments: [
+          for (final a in saved?.attachments ?? const <OfflineAttachment>[])
+            Attachment(title: a.title, url: a.url, kind: a.kind),
+          if (saved == null || saved.attachments.isEmpty)
+            ...?header?.attachments,
+        ],
         // The date has to describe the BODY on this screen.
         //
         // `header` comes off the shelf, which refreshes from the server
@@ -1136,6 +1160,12 @@ class AssessmentRepository {
     String? shareCode,
     int count = 20,
   }) async {
+    // Cleared FIRST, so the flag always describes the round this call
+    // produced. Left over from a previous start, it announced a
+    // brand-new offline round as "carrying on the round you left" —
+    // which is exactly the sentence the student was already confused
+    // by.
+    _resumed = false;
     if (policyForStart.maintenance) {
       throw BxError(policyForStart.closedMessage, code: 'maintenance');
     }
@@ -1146,7 +1176,15 @@ class AssessmentRepository {
         'p_test_id': testId,
         'p_share_code': shareCode,
         'p_count': count,
+        // A practice round is a NEW round. Both backends otherwise hand
+        // back an unfinished sitting of the same flavour, which is
+        // right for a timed test and is why "Practice" on a flapping
+        // line dealt the same twenty questions again and again. A
+        // backend that has not learnt this yet simply ignores it, and
+        // [lastRoundWasResumed] then says so on screen.
+        if (mode == 'practice') 'p_fresh': true,
       });
+      _resumed = mode == 'practice' && r['resumed'] == true;
       final err = r['error']?.toString();
       if (err != null) throw BxError(_startMessage(err));
       final id = r['attemptId']?.toString() ?? r['attempt_id']?.toString();
@@ -1166,11 +1204,29 @@ class AssessmentRepository {
       'mode': mode,
       if (courseId != null) 'courseId': courseId,
       'count': count,
+      if (mode == 'practice') 'fresh': true,
     });
+    _resumed = mode == 'practice' && r['resumed'] == true;
     final id = r['attemptId']?.toString();
     if (id == null) throw const BxError('Could not start practice.');
     return id;
   }
+
+  bool _resumed = false;
+
+  /// True when the LAST round started came back as one the student had
+  /// left unfinished rather than a new draw.
+  ///
+  /// Both backends resume an in-progress sitting of the same flavour
+  /// instead of stacking new ones. That is right for a timed test, and
+  /// it is why "Practice" on a flapping H+ line dealt the same twenty
+  /// questions over and over: every start that got through handed back
+  /// the round they had walked away from, and every start that timed
+  /// out dealt a fresh offline one. The round is genuinely theirs and
+  /// is never thrown away or graded behind their back — the screen
+  /// says what happened instead, and `fresh` above stops it at the
+  /// source on a backend that understands the flag.
+  bool get lastRoundWasResumed => _resumed;
 
   String _startMessage(String code) => switch (code) {
         'not_activated' => 'Activate your account to start this.',
@@ -1917,6 +1973,8 @@ class AssessmentRepository {
   /// it marks itself, it shows the explanations, it feeds the local
   /// mistakes list, and it says plainly that it is not on the record.
   Future<String> startOfflinePractice({String? courseId, int count = 20}) async {
+    // A round dealt from this phone is always a new round.
+    _resumed = false;
     final store = _store;
     if (store == null) {
       throw const BxError('This device cannot keep offline questions.');
@@ -1944,9 +2002,19 @@ class AssessmentRepository {
           'Open the course and tap Download — that brings the answers down '
           'too.');
     }
-    rows = markable;
-    rows.shuffle();
-    final picked = rows.take(count.clamp(1, rows.length)).toList();
+    final bucket = (courseId == null || courseId.isEmpty) ? 'general' : courseId;
+    final picked = dealOfflineRound(
+      markable,
+      count: count,
+      recentlyServed: store.recentlyServed(bucket),
+      pictureIsHeld: (url) => store.hasAsset(_b.fileUrl(url)),
+    );
+    // Not awaited: the ring is convenience state, and the catalogue is
+    // re-encoded whole when it is written. Blocking the first question
+    // of a round on that is a visible stall on the phones this feature
+    // is for, and losing the last round's ids to a hard kill costs one
+    // round of repeat-avoidance.
+    unawaited(store.rememberServed(bucket, picked.map((r) => '${r['id'] ?? ''}')));
 
     final id = '$kLocalAttemptPrefix${DateTime.now().millisecondsSinceEpoch}';
     await store.putAttempt(id, {
@@ -1959,6 +2027,7 @@ class AssessmentRepository {
     });
     return id;
   }
+
 
   Future<AttemptSession?> _localSession(String id) async {
     final store = _store;

@@ -8,6 +8,8 @@ import 'package:go_router/go_router.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../data/models.dart';
+import '../../data/net_speed.dart';
+import '../../data/offline/offline_store.dart';
 import '../../ui/ui.dart';
 import '../shell/app_shell.dart';
 
@@ -894,6 +896,18 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
 
   // ---------------------------------------------------------- media
 
+  /// What the box says when a picture cannot be drawn. With no line and
+  /// no saved copy the honest sentence is the one the student can act
+  /// on — "That image would not load" was read as a broken app.
+  String _pictureExcuse(String url) {
+    final offline = ref.read(netSpeedProvider).grade == BxNetGrade.offline;
+    if (offline && !Offline.holds(url)) {
+      return 'This picture is not on this phone yet. Tap Download on the '
+          'course when you have data and it comes with the rest.';
+    }
+    return 'That image would not load.';
+  }
+
   Widget _image(String url, {double maxHeight = 300}) {
     final c = context.bx;
     return BxScaleTap(
@@ -923,7 +937,7 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen> {
                       size: 17, color: c.muted),
                   const SizedBox(width: BxSpace.xs),
                   Flexible(
-                    child: Text('That image would not load.',
+                    child: Text(_pictureExcuse(url),
                         style: BxType.small(c.muted)),
                   ),
                 ],

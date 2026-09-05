@@ -51,6 +51,12 @@ import 'package:path_provider/path_provider.dart';
 /// trying to read a shape we no longer write.
 const int kOfflineIndexVersion = 3;
 
+/// How many "did not save" rows one course record keeps by name.
+const int kMaxRecordedFailures = 20;
+
+/// How many recently dealt question ids one bucket remembers.
+const int kServedMemory = 400;
+
 @immutable
 class OfflineItem {
   /// The material id, or a synthetic key for a question set.
@@ -78,6 +84,16 @@ class OfflineItem {
   /// items are never evicted to make room and never expire.
   final bool pinned;
 
+  /// What was clipped to this note — each one's title, URL and kind —
+  /// so the note can still list them with the data off.
+  ///
+  /// The bytes of an attachment live in the asset store under the URL's
+  /// key, and this list is the only thing that ties them back to the
+  /// note. Without it a downloaded PDF sat complete on the disk while
+  /// the note it belonged to said "Nothing is attached yet either" —
+  /// which is exactly what a student photographed and sent in.
+  final List<OfflineAttachment> attachments;
+
   const OfflineItem({
     required this.id,
     required this.title,
@@ -90,6 +106,7 @@ class OfflineItem {
     this.savedAtMs = 0,
     this.sig = '',
     this.pinned = false,
+    this.attachments = const [],
   });
 
   DateTime get savedAt => DateTime.fromMillisecondsSinceEpoch(savedAtMs);
@@ -116,6 +133,7 @@ class OfflineItem {
   }
   bool get hasDoc => (docRel ?? '').isNotEmpty;
   bool get hasHtml => (htmlRel ?? '').isNotEmpty;
+  bool get hasAttachments => attachments.isNotEmpty;
 
   String get sizeLabel => formatBytes(bytes);
 
@@ -130,6 +148,7 @@ class OfflineItem {
     int? savedAtMs,
     String? sig,
     bool? pinned,
+    List<OfflineAttachment>? attachments,
   }) =>
       OfflineItem(
         id: id,
@@ -143,6 +162,7 @@ class OfflineItem {
         savedAtMs: savedAtMs ?? this.savedAtMs,
         sig: sig ?? this.sig,
         pinned: pinned ?? this.pinned,
+        attachments: attachments ?? this.attachments,
       );
 
   factory OfflineItem.fromJson(Map<String, dynamic> j) => OfflineItem(
@@ -157,6 +177,10 @@ class OfflineItem {
         savedAtMs: (j['at'] as num?)?.toInt() ?? 0,
         sig: '${j['sig'] ?? ''}',
         pinned: j['pin'] == true,
+        attachments: [
+          for (final a in (j['att'] as List? ?? const []))
+            if (a is Map) OfflineAttachment.fromJson(Map<String, dynamic>.from(a)),
+        ],
       );
 
   Map<String, dynamic> toJson() => {
@@ -171,7 +195,36 @@ class OfflineItem {
         'at': savedAtMs,
         'sig': sig,
         if (pinned) 'pin': true,
+        if (attachments.isNotEmpty)
+          'att': [for (final a in attachments) a.toJson()],
       };
+}
+
+/// One thing clipped to a saved note. The same three fields the
+/// backend sends for an attachment, kept here so the store does not
+/// depend on the model layer.
+@immutable
+class OfflineAttachment {
+  final String title;
+  final String url;
+
+  /// pdf | image | audio | file
+  final String kind;
+
+  const OfflineAttachment({
+    required this.title,
+    required this.url,
+    this.kind = 'file',
+  });
+
+  factory OfflineAttachment.fromJson(Map<String, dynamic> j) =>
+      OfflineAttachment(
+        title: '${j['title'] ?? j['t'] ?? ''}',
+        url: '${j['url'] ?? j['u'] ?? ''}',
+        kind: '${j['kind'] ?? j['k'] ?? 'file'}',
+      );
+
+  Map<String, dynamic> toJson() => {'t': title, 'u': url, 'k': kind};
 }
 
 @immutable
@@ -310,6 +363,10 @@ class OfflineStore {
   /// it holds counts as well as a stamp: `updated_at` cannot see a
   /// deletion, and a count cannot see an edit.
   final Map<String, Map<String, dynamic>> _courses = {};
+
+  /// The question ids most recently handed to an offline round, per
+  /// bucket, newest last. See [recentlyServed].
+  final Map<String, List<String>> _served = {};
   String _owner = '';
   int _syncedAtMs = 0;
 
@@ -375,11 +432,18 @@ class OfflineStore {
           if (v is Map) _courses['$k'] = Map<String, dynamic>.from(v);
         });
       }
+      final served = map['served'];
+      if (served is Map) {
+        served.forEach((k, v) {
+          if (v is List) _served['$k'] = [for (final id in v) '$id'];
+        });
+      }
     } catch (e) {
       debugPrint('[offline] unreadable index, starting clean: $e');
       _items.clear();
       _assets.clear();
       _courses.clear();
+      _served.clear();
     }
   }
 
@@ -432,6 +496,7 @@ class OfflineStore {
         'items': {for (final e in _items.entries) e.key: e.value.toJson()},
         'assets': {for (final e in _assets.entries) e.key: e.value.toJson()},
         'courses': _courses,
+        'served': _served,
       });
       // Written aside and renamed: a kill mid-write leaves the previous
       // catalogue intact instead of a truncated one.
@@ -504,6 +569,7 @@ class OfflineStore {
     _items.clear();
     _assets.clear();
     _courses.clear();
+    _served.clear();
     _questionHome.clear();
     _homeMapped = false;
     _owner = '';
@@ -554,6 +620,8 @@ class OfflineStore {
     int heldFiles = 0,
     int heldAssets = 0,
     String reason = '',
+    int failed = 0,
+    List<Map<String, String>> failures = const [],
   }) async {
     if (courseId.isEmpty) return;
     _courses[courseId] = {
@@ -590,10 +658,124 @@ class OfflineStore {
       // telling the student in Tutor Bello's name, every launch for
       // ever, that he changed something.
       'reason': reason,
+      // WHICH files did not save and WHY, by name, so the card can say
+      // "Episode 2 · not found on the server" instead of a bare number
+      // the student can do nothing with. Capped: the sentence on the
+      // card lists a handful, and a record is re-encoded whole.
+      'failed': failed,
+      'failures': failures.take(kMaxRecordedFailures).toList(),
       'at': DateTime.now().millisecondsSinceEpoch,
     };
     _touch();
     await flush();
+  }
+
+  /// How many notes, slides and papers of one course are on the phone
+  /// right now — counted off the catalogue, not off the last run.
+  ///
+  /// A run only knows what IT moved, and an Update that found every
+  /// picture already here reported "0 pictures" over a phone full of
+  /// them. The catalogue is the truth about what is held.
+  int heldFilesFor(String courseId) => heldFileIdsFor(courseId).length;
+
+  /// The ids of those, so a running download can keep a tally instead
+  /// of re-counting the whole catalogue after every single file.
+  Iterable<String> heldFileIdsFor(String courseId) => courseId.isEmpty
+      ? const []
+      : _items.values
+          .where((i) => i.courseId == courseId && i.kind != 'questions')
+          .map((i) => i.id);
+
+  /// Drops a document filed under a MATERIAL id while keeping the row.
+  ///
+  /// One thing needs this: an older build filed a note's first attached
+  /// PDF as a document under the note's own id, and nothing reads that
+  /// any more — attachments are opened by URL out of the asset store.
+  /// Left there it is the same file twice on a phone that has to count
+  /// its megabytes, and worse, [putNote] rewrites the row's `bytes` to
+  /// the length of the note body, so those megabytes stop counting
+  /// against the library ceiling while still sitting on the disk.
+  ///
+  /// Only ever called once the replacement really is held.
+  Future<void> forgetDocument(String id) async {
+    final i = _items[id];
+    if (i == null || !i.hasDoc) return;
+    try {
+      final f = File(resolve(i.docRel!));
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    _items[id] = OfflineItem(
+      id: i.id,
+      title: i.title,
+      courseCode: i.courseCode,
+      courseId: i.courseId,
+      kind: i.kind,
+      docRel: null,
+      htmlRel: i.htmlRel,
+      bytes: i.hasHtml ? i.bytes : 0,
+      savedAtMs: i.savedAtMs,
+      sig: i.sig,
+      pinned: i.pinned,
+      attachments: i.attachments,
+    );
+    _touch();
+    await flush();
+  }
+
+  /// Forgets one asset so the next download fetches it again. Used when
+  /// the catalogue says a picture is here and the disk disagrees.
+  Future<void> forgetAsset(String url) async {
+    final key = assetKeyFor(url);
+    final a = _assets.remove(key);
+    if (a == null) return;
+    try {
+      final f = File(resolve(a.rel));
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    _touch();
+    // Written now, not in two and a half seconds. This runs at the
+    // START of a download, and a download on these phones is routinely
+    // killed or backgrounded early — leaving a catalogue that still
+    // claims a file this call has already deleted.
+    await flush();
+  }
+
+  // ------------------------------------------------------------
+  // Which questions an offline round handed out last
+  // ------------------------------------------------------------
+
+  /// Question ids recently served to an offline round in this bucket,
+  /// oldest first. Deliberately a memory rather than a rule: the picker
+  /// prefers what is NOT in here, and only reaches into it when the
+  /// bank is smaller than the round.
+  ///
+  /// An offline round used to be a fresh shuffle of the whole bank every
+  /// time, with no memory at all — so a 75-question course dealt the
+  /// same handful again and again ("it's repeating almost the same
+  /// question"). Twenty from seventy-five overlap by five on average,
+  /// and by the fourth round most of what comes up has been seen.
+  List<String> recentlyServed(String bucket) =>
+      List.unmodifiable(_served[_safeName(bucket)] ?? const []);
+
+  /// Records the ids of the round just dealt. Kept as a ring of the
+  /// last [kServedMemory] so the memory covers several rounds of the
+  /// biggest bank without growing for ever.
+  Future<void> rememberServed(String bucket, Iterable<String> ids) async {
+    final key = _safeName(bucket);
+    final ring = _served[key] ?? <String>[];
+    for (final id in ids) {
+      if (id.isEmpty) continue;
+      ring.remove(id);
+      ring.add(id);
+    }
+    while (ring.length > kServedMemory) {
+      ring.removeAt(0);
+    }
+    _served[key] = ring;
+    // Coalesced like every other convenience write. Flushing here put
+    // a whole-catalogue encode and fsync on the UI isolate in front of
+    // the first question of every offline round.
+    _touch();
   }
 
   /// Removes a course from the phone entirely — its record, its
@@ -636,6 +818,12 @@ class OfflineStore {
     }
 
     _courses.remove(courseId);
+    // And what it had dealt. Left behind, a course the student removed
+    // and downloaded again came back with every question already
+    // counted as seen — so the first round after a re-download was
+    // dealt entirely out of the "seen lately" pile, which is the
+    // repetition the ring exists to prevent.
+    _served.remove(_safeName(courseId));
     _touch();
     await flush();
     debugPrint('[offline] forgot $courseId, reclaimed ${formatBytes(freed)}');
@@ -762,7 +950,20 @@ class OfflineStore {
       try {
         final f = File(resolve(rel));
         if (!await f.exists()) return false;
-        if (await f.length() <= 0) return false;
+        // A zero-length file is a truncated write — unless it is the
+        // body of a note that HAS no body yet, which is saved as an
+        // empty file on purpose so the note still has an entry and its
+        // attachments still have a home.
+        //
+        // The row may ALSO carry a document: an older build filed a
+        // note's first attached PDF under the note's own id, and
+        // putNote carries that docRel forward. Refusing such a row
+        // handed an upgrading student the "N files did not save" loop
+        // back on every run, with every byte present on the disk — so
+        // when a document is there it is the substance and an empty
+        // body is never the thing that fails the check.
+        final emptyByDesign = rel == i.htmlRel && (i.hasDoc || i.bytes == 0);
+        if (await f.length() <= 0 && !emptyByDesign) return false;
         sawSomething = true;
       } catch (_) {
         return false;
@@ -881,6 +1082,12 @@ class OfflineStore {
   }
 
   /// Saves a note body. Cheap enough that every note is kept.
+  ///
+  /// An EMPTY body is saved too. A note Tutor Bello has not typed yet
+  /// but has clipped a PDF to is a real note — the student opens it for
+  /// the PDF — and refusing to catalogue it left every such note with
+  /// no entry at all, so offline it "did not open" and every download
+  /// counted it as a file that did not save.
   Future<OfflineItem> putNote({
     required String id,
     required String title,
@@ -889,6 +1096,7 @@ class OfflineStore {
     String courseId = '',
     String sig = '',
     bool pinned = false,
+    List<OfflineAttachment>? attachments,
   }) async {
     final rel = await _writeText('notes', '$id.html', html);
     final existing = _items[id];
@@ -904,6 +1112,7 @@ class OfflineStore {
       savedAtMs: DateTime.now().millisecondsSinceEpoch,
       sig: sig,
       pinned: pinned || (existing?.pinned ?? false),
+      attachments: attachments ?? existing?.attachments ?? const [],
     );
     _items[id] = entry;
     _touch();
@@ -922,9 +1131,11 @@ class OfflineStore {
     String sig = '',
     bool pinned = true,
     String? html,
+    List<OfflineAttachment>? attachments,
   }) async {
     final rel = await _write('docs', '$id.$extension', bytes);
-    String? htmlRel = _items[id]?.htmlRel;
+    final existing = _items[id];
+    String? htmlRel = existing?.htmlRel;
     if (html != null && html.isNotEmpty) {
       htmlRel = await _writeText('notes', '$id.html', html);
     }
@@ -940,6 +1151,7 @@ class OfflineStore {
       savedAtMs: DateTime.now().millisecondsSinceEpoch,
       sig: sig,
       pinned: pinned,
+      attachments: attachments ?? existing?.attachments ?? const [],
     );
     _items[id] = entry;
     _touch();

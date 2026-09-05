@@ -150,7 +150,7 @@ const int _minSampleBytes = 8 * 1024;
 /// Two seconds to answer a small request is a connection a student can
 /// feel, whatever the throughput says.
 const int _poorLatencyMs = 2000;
-const int _goodLatencyMs = 600;
+const int _goodLatencyMs = 800;
 
 /// How many samples the rolling window keeps. Short on purpose: a
 /// student walking out of a lecture hall changes network in seconds and
@@ -164,11 +164,21 @@ class NetSpeedMeter extends ChangeNotifier {
   bool _unmetered = false;
   bool _reachable = true;
 
+  /// The last kind of line we actually saw working.
+  ///
+  /// When Wi-Fi drops, the platform reports "no connection", so
+  /// `_unmetered` is false by the time the offline reading is
+  /// published — and a Wi-Fi student was shown crossed-out CELLULAR
+  /// bars, which is the shape change this was meant to stop. The kind
+  /// of line only changes while there IS one.
+  bool _lastLine = false;
+
   BxNetSpeed _value = const BxNetSpeed();
   BxNetSpeed get value => _value;
 
   /// Called from the connectivity watcher.
   void setUnmetered(bool v) {
+    if (v) _lastLine = true;
     if (_unmetered == v) return;
     _unmetered = v;
     // The line changed underneath us; what was measured on the old one
@@ -179,6 +189,7 @@ class NetSpeedMeter extends ChangeNotifier {
   }
 
   void setReachable(bool v) {
+    if (v) _lastLine = _unmetered;
     if (_reachable == v) return;
     _reachable = v;
     _recompute();
@@ -214,7 +225,9 @@ class NetSpeedMeter extends ChangeNotifier {
 
   void _recompute() {
     if (!_reachable) {
-      _publish(const BxNetSpeed(grade: BxNetGrade.offline));
+      // The kind of line is kept: a phone with its data off should show
+      // the bars it will have when it comes back, crossed out.
+      _publish(BxNetSpeed(grade: BxNetGrade.offline, unmetered: _lastLine));
       return;
     }
 
@@ -229,10 +242,24 @@ class NetSpeedMeter extends ChangeNotifier {
     }
     final bps = millis > 0 ? bytes * 1000 / millis : 0.0;
 
+    // NEAR THE FAST END OF THE WINDOW, BUT NOT THE FASTEST REPLY.
+    //
+    // A small reply's elapsed time is the line's round trip PLUS
+    // whatever the server spent making it — and the website's
+    // functions sleep between requests, so one cold start can take
+    // three seconds on its own. Read as latency, the median painted a
+    // student's perfectly good 4.5G red for as long as the app was
+    // open.
+    //
+    // The fastest reply is the other mistake: one lucky cached answer
+    // would then speak for the whole window and call a line that takes
+    // three seconds on everything else "fast". A low percentile throws
+    // out the cold start without letting a single sample carry the
+    // verdict — it takes two fast replies to move the reading.
     var latency = 0;
     if (_latencies.isNotEmpty) {
       final sorted = _latencies.toList()..sort();
-      latency = sorted[sorted.length ~/ 2];
+      latency = sorted[(sorted.length - 1) ~/ 4];
     }
 
     final hasLatency = _latencies.isNotEmpty;
