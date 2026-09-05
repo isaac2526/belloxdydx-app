@@ -237,6 +237,20 @@ void main() {
       expect(msg, isNot(contains('File 5')));
     });
 
+    test('the tally adds up when the stored list was capped', () {
+      // A record keeps at most kMaxRecordedFailures names but the count
+      // of everything that failed, so "and N more" has to complete the
+      // HEADLINE. Counted against the list instead, a run of 114
+      // failures read "114 files did not save: a · b · c and 17 more"
+      // — a sentence contradicting itself.
+      final msg = CourseDownloader.failureMessage(114, [
+        for (var i = 0; i < kMaxRecordedFailures; i++)
+          CourseDownloadFailure(title: 'File $i', reason: 'no connection'),
+      ]);
+      expect(msg, contains('114 files did not save'));
+      expect(msg, contains('and 111 more'));
+    });
+
     test('one file reads as one file', () {
       final msg = CourseDownloader.failureMessage(
           1, const [CourseDownloadFailure(title: 'A', reason: '')]);

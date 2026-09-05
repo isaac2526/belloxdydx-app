@@ -141,6 +141,11 @@ for (const c of COURSES) {
         url: `${STORAGE}/materials/handout-1.pdf` },
       { title: 'The board after class', kind: 'image',
         url: `${STORAGE}/materials/images/board.png` },
+      // A file Tutor Bello named with a per cent sign in it. Naming a
+      // failed unit used to decode an already-decoded path segment,
+      // which threw and took the whole download down with it.
+      { title: 'Revision sheet', kind: 'pdf',
+        url: `${STORAGE}/materials/100%25-revision.pdf` },
       { title: 'Tutor Bello reads it', kind: 'audio',
         url: `${STORAGE}/materials/audio/handout-1.mp3` },
     ],

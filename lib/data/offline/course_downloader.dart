@@ -251,12 +251,19 @@ class _Unit {
 
   String get key => kind == 'asset' ? url : (material?.id ?? id);
 
-  /// The name a student would recognise. Never a URL.
+  /// The name a student would recognise, and a DIFFERENT one for each
+  /// file — a list that says "a picture on a question" three times
+  /// names nothing.
+  ///
+  /// Uri.pathSegments is already decoded, so decoding it again is not
+  /// only redundant: it throws on a file Tutor Bello named with a per
+  /// cent sign in it, and that throw came out of the worker and took
+  /// the whole download with it.
   String get title {
     if (kind != 'asset') return material?.title ?? '';
     if (owner.isNotEmpty) return owner;
     final last = Uri.tryParse(url)?.pathSegments.lastOrNull ?? '';
-    return last.isEmpty ? 'A picture' : Uri.decodeComponent(last);
+    return last.isEmpty ? 'A picture' : last;
   }
 }
 
@@ -387,7 +394,10 @@ class CourseDownloader {
     final buf = StringBuffer('$count $noun did not save');
     if (named.isNotEmpty) {
       final shown = named.take(3).map((f) => f.line).toList();
-      final more = named.length - shown.length;
+      // Counted against the HEADLINE, not against the list — the list
+      // is capped when it is written to disk, so "and 17 more" under a
+      // headline of 114 was a sentence contradicting itself.
+      final more = count - shown.length;
       buf.write(': ${shown.join(' · ')}');
       if (more > 0) buf.write(' and $more more');
     }
@@ -505,10 +515,28 @@ class CourseDownloader {
       var bytes = 0;
       var failed = 0;
       final failures = <CourseDownloadFailure>[];
+      // Keyed by URL for a picture and by material id for a file, so a
+      // file that fails in the worker is not counted AGAIN by the check
+      // at the end — which is how one missing attachment came to read
+      // as "2 files did not save".
+      final failedKeys = <String>{};
       final queue = List<_Unit>.from(units);
+
+      // WHAT THE PHONE HOLDS, KEPT AS A RUNNING TALLY.
+      //
+      // These two numbers used to be recomputed from scratch on every
+      // completed unit — a SHA-1 per referenced picture and a walk of
+      // the whole catalogue, three times a unit, on the UI isolate of
+      // a cheap phone. Counted once here and added to as things land.
+      final heldAssets = <String>{
+        for (final u in referenced)
+          if (store.hasAsset(u)) canonicalAssetUrl(u),
+      };
+      final heldFiles = store.heldFileIdsFor(courseId).toSet();
 
       void lost(_Unit unit, String reason) {
         failed++;
+        failedKeys.add(unit.key);
         failures.add(CourseDownloadFailure(title: unit.title, reason: reason));
         debugPrint('[course] ${unit.kind} ${unit.key}: $reason');
       }
@@ -523,6 +551,11 @@ class CourseDownloader {
             final out = await _perform(unit, store);
             if (out.ok) {
               bytes += out.bytes;
+              if (unit.kind == 'asset') {
+                heldAssets.add(canonicalAssetUrl(unit.url));
+              } else {
+                heldFiles.add(unit.key);
+              }
             } else {
               lost(unit, out.reason ?? 'did not save');
             }
@@ -535,8 +568,8 @@ class CourseDownloader {
             bytes: bytes,
             failed: failed,
             failures: List.unmodifiable(failures),
-            assets: referenced.where(store.hasAsset).length,
-            materials: store.heldFilesFor(courseId),
+            assets: heldAssets.length,
+            materials: heldFiles.length,
             label: _labelFor(unit),
           ));
           await Future<void>.delayed(const Duration(milliseconds: 1));
@@ -581,21 +614,23 @@ class CourseDownloader {
       // from the server moments ago, so it is in the alive set and none
       // of it can have been pruned. Subtracting would only weaken the
       // check.
-      final missing = await _verify(store, units, questionRows, failures);
+      final missing =
+          await _verify(store, units, questionRows, failures, failedKeys);
       final heldQuestions = (await store.questions(courseId)).length;
       // Counted off the catalogue and the disk AFTER the run, so the
       // number is what the phone holds, not what this run happened to
-      // move.
-      final heldFiles = store.heldFilesFor(courseId);
-      final heldAssets = referenced.where(store.hasAsset).length;
+      // move. One pass, once, rather than the running tally the
+      // progress line used.
+      final finalFiles = store.heldFilesFor(courseId);
+      final finalAssets = referenced.where(store.hasAsset).length;
 
       final ok = missing == 0 && failed == 0;
       await store.putCourseRecord(
         courseId,
         // What actually landed, kept apart from what the server has.
         heldQuestions: heldQuestions,
-        heldFiles: heldFiles,
-        heldAssets: heldAssets,
+        heldFiles: finalFiles,
+        heldAssets: finalAssets,
         reason: ok ? '' : (_outOfRoom ?? 'incomplete'),
         failed: failed + missing,
         failures: [for (final f in failures) f.toJson()],
@@ -621,8 +656,8 @@ class CourseDownloader {
         bytes: bytes,
         failed: failed + missing,
         questions: heldQuestions,
-        materials: heldFiles,
-        assets: heldAssets,
+        materials: finalFiles,
+        assets: finalAssets,
         held: true,
         updateAvailable: !ok,
         savedAtMs: DateTime.now().millisecondsSinceEpoch,
@@ -767,7 +802,9 @@ class CourseDownloader {
       if (m.kind == MaterialKind.note) {
         units.add(_Unit.note(m));
         for (final u in urlsInHtml(m.contentHtml)) {
-          wantAsset(u, 'a picture in ${m.title}');
+          // Named after the file, so two missing pictures in the same
+          // note are two lines rather than the same line twice.
+          wantAsset(u, '');
         }
         // Every attachment, whatever its kind. A note whose attached
         // PDF is missing is not saved, it is half-saved — and the
@@ -833,7 +870,10 @@ class CourseDownloader {
       referenced.add(resolved);
       if (store.hasAsset(resolved)) return;
       if (!wanted.add(canonicalAssetUrl(resolved))) return;
-      units.add(_Unit.asset(resolved, owner: 'a picture on a question'));
+      // No owner: the file's own name is what tells one missing
+      // diagram from another in the "did not save" sentence, and the
+      // progress label falls back to friendly words on its own.
+      units.add(_Unit.asset(resolved));
     }
 
     for (final row in await store.questions(courseId)) {
@@ -1078,11 +1118,15 @@ class CourseDownloader {
     List<_Unit> units,
     int expectedQuestions,
     List<CourseDownloadFailure> failures,
+    Set<String> alreadyFailed,
   ) async {
     var missing = 0;
-    final alreadyNamed = {for (final f in failures) f.title};
     for (final u in units) {
       if (_cancelled) break;
+      // Already counted, by name, when the transfer itself failed.
+      // Counting it again here made every failure worth two on the
+      // card: one missing attachment read as "2 files did not save".
+      if (!alreadyFailed.add(u.key)) continue;
       // A note is verified by its ENTRY, which an empty body has too.
       // Checking for a non-empty body counted every note Tutor Bello
       // had not typed yet as missing, on every run, whatever the line
@@ -1093,10 +1137,11 @@ class CourseDownloader {
       };
       if (!ok) {
         missing++;
-        if (alreadyNamed.add(u.title)) {
-          failures.add(CourseDownloadFailure(
-              title: u.title, reason: 'not on the disk after saving'));
-        }
+        failures.add(CourseDownloadFailure(
+            title: u.title, reason: 'not on the disk after saving'));
+      } else {
+        // It landed after all — do not leave its key looking failed.
+        alreadyFailed.remove(u.key);
       }
     }
     if (expectedQuestions > 0) {

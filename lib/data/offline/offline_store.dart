@@ -676,11 +676,15 @@ class OfflineStore {
   /// A run only knows what IT moved, and an Update that found every
   /// picture already here reported "0 pictures" over a phone full of
   /// them. The catalogue is the truth about what is held.
-  int heldFilesFor(String courseId) => courseId.isEmpty
-      ? 0
+  int heldFilesFor(String courseId) => heldFileIdsFor(courseId).length;
+
+  /// The ids of those, so a running download can keep a tally instead
+  /// of re-counting the whole catalogue after every single file.
+  Iterable<String> heldFileIdsFor(String courseId) => courseId.isEmpty
+      ? const []
       : _items.values
           .where((i) => i.courseId == courseId && i.kind != 'questions')
-          .length;
+          .map((i) => i.id);
 
   /// Forgets one asset so the next download fetches it again. Used when
   /// the catalogue says a picture is here and the disk disagrees.
