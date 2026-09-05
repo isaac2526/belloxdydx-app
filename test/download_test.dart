@@ -397,6 +397,43 @@ void main() {
               'question its place in the deal');
     });
 
+    test('an explanation diagram that never came down defers too', () {
+      // The explanation panel opens the moment an answer is committed,
+      // so a missing explanation image lands on the student just as
+      // hard as a missing question image.
+      final rows = <Map<String, dynamic>>[
+        {'id': 'clean1', 'correct_key': 'A'},
+        {'id': 'clean2', 'correct_key': 'A'},
+        {
+          'id': 'blindExplanation',
+          'correct_key': 'A',
+          'explanation_image_url': 'https://s.co/why.png',
+        },
+      ];
+      final two = dealOfflineRound(rows, count: 2,
+          recentlyServed: const [],
+          pictureIsHeld: (_) => false,
+          random: Random(5));
+      expect(two.map((r) => '${r['id']}'), isNot(contains('blindExplanation')));
+    });
+
+    test('a voice note that never came down defers too', () {
+      final rows = <Map<String, dynamic>>[
+        {'id': 'clean1', 'correct_key': 'A'},
+        {'id': 'clean2', 'correct_key': 'A'},
+        {
+          'id': 'blindAudio',
+          'correct_key': 'A',
+          'question_audio_url': 'https://s.co/q.mp3',
+        },
+      ];
+      final two = dealOfflineRound(rows, count: 2,
+          recentlyServed: const [],
+          pictureIsHeld: (_) => false,
+          random: Random(5));
+      expect(two.map((r) => '${r['id']}'), isNot(contains('blindAudio')));
+    });
+
     test('an empty bank deals nothing rather than throwing', () {
       expect(
           dealOfflineRound(const [], count: 20,
@@ -416,6 +453,11 @@ void main() {
           reason: 'a question dealt again moves to the end rather than '
               'sitting twice in the ring');
 
+      // The write is coalesced — the ring is convenience state and
+      // must not put a whole-catalogue encode in front of the first
+      // question of a round — so the catalogue is written here the way
+      // the app's own 2.5-second timer writes it.
+      await store.flush();
       final reopened = await open();
       expect(reopened.recentlyServed('phy102'), ['a', 'b', 'c', 'd']);
       expect(reopened.recentlyServed('other'), isEmpty);

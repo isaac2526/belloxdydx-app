@@ -1160,6 +1160,12 @@ class AssessmentRepository {
     String? shareCode,
     int count = 20,
   }) async {
+    // Cleared FIRST, so the flag always describes the round this call
+    // produced. Left over from a previous start, it announced a
+    // brand-new offline round as "carrying on the round you left" —
+    // which is exactly the sentence the student was already confused
+    // by.
+    _resumed = false;
     if (policyForStart.maintenance) {
       throw BxError(policyForStart.closedMessage, code: 'maintenance');
     }
@@ -1967,6 +1973,8 @@ class AssessmentRepository {
   /// it marks itself, it shows the explanations, it feeds the local
   /// mistakes list, and it says plainly that it is not on the record.
   Future<String> startOfflinePractice({String? courseId, int count = 20}) async {
+    // A round dealt from this phone is always a new round.
+    _resumed = false;
     final store = _store;
     if (store == null) {
       throw const BxError('This device cannot keep offline questions.');
@@ -2001,7 +2009,12 @@ class AssessmentRepository {
       recentlyServed: store.recentlyServed(bucket),
       pictureIsHeld: (url) => store.hasAsset(_b.fileUrl(url)),
     );
-    await store.rememberServed(bucket, picked.map((r) => '${r['id'] ?? ''}'));
+    // Not awaited: the ring is convenience state, and the catalogue is
+    // re-encoded whole when it is written. Blocking the first question
+    // of a round on that is a visible stall on the phones this feature
+    // is for, and losing the last round's ids to a hard kill costs one
+    // round of repeat-avoidance.
+    unawaited(store.rememberServed(bucket, picked.map((r) => '${r['id'] ?? ''}')));
 
     final id = '$kLocalAttemptPrefix${DateTime.now().millisecondsSinceEpoch}';
     await store.putAttempt(id, {

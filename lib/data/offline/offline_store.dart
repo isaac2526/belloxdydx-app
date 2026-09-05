@@ -736,8 +736,10 @@ class OfflineStore {
       ring.removeAt(0);
     }
     _served[key] = ring;
+    // Coalesced like every other convenience write. Flushing here put
+    // a whole-catalogue encode and fsync on the UI isolate in front of
+    // the first question of every offline round.
     _touch();
-    await flush();
   }
 
   /// Removes a course from the phone entirely — its record, its

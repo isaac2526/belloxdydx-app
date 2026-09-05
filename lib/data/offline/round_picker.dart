@@ -24,11 +24,14 @@ import 'dart:math';
 ///      round after round; this walks the whole bank before it
 ///      repeats one.
 ///
-///   2. **A question with a picture comes up when its picture is on
-///      the phone.** One whose diagram never came down is not
-///      dropped — it is still a question — but it goes to the back,
-///      so a student sees "That image would not load" only when
-///      there is nothing better left to deal.
+///   2. **A question whose media is on the phone comes first.** One
+///      whose diagram or voice note never came down is not dropped —
+///      it is still a question, and a NEW question with a missing
+///      picture still teaches more than one the student answered ten
+///      minutes ago. So the order is: unseen and whole, then unseen
+///      but missing something, then seen. A student only meets the
+///      grey "not on this phone yet" box once the whole bank has been
+///      through once.
 ///
 /// Pure, so a test can hand it a bank and a memory and read what it
 /// deals.
@@ -50,7 +53,19 @@ List<Map<String, dynamic>> dealOfflineRound(
   String idOf(Map<String, dynamic> r) => '${r['id'] ?? ''}';
   final held = pictureIsHeld ?? (String _) => true;
   bool picturesHere(Map<String, dynamic> r) {
-    for (final key in const ['question_image_url', 'questionImageUrl']) {
+    for (final key in const [
+      'question_image_url',
+      'questionImageUrl',
+      // The explanation opens the moment an answer is committed, so a
+      // missing explanation diagram lands on the student just as hard
+      // as a missing question one.
+      'explanation_image_url',
+      'explanationImageUrl',
+      'question_audio_url',
+      'questionAudioUrl',
+      'explanation_audio_url',
+      'explanationAudioUrl',
+    ]) {
       final v = r[key];
       if (v is String && v.trim().isNotEmpty && !held(v)) {
         return false;
