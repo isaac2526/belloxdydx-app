@@ -697,6 +697,11 @@ class OfflineStore {
       if (await f.exists()) await f.delete();
     } catch (_) {}
     _touch();
+    // Written now, not in two and a half seconds. This runs at the
+    // START of a download, and a download on these phones is routinely
+    // killed or backgrounded early — leaving a catalogue that still
+    // claims a file this call has already deleted.
+    await flush();
   }
 
   // ------------------------------------------------------------
@@ -775,6 +780,12 @@ class OfflineStore {
     }
 
     _courses.remove(courseId);
+    // And what it had dealt. Left behind, a course the student removed
+    // and downloaded again came back with every question already
+    // counted as seen — so the first round after a re-download was
+    // dealt entirely out of the "seen lately" pile, which is the
+    // repetition the ring exists to prevent.
+    _served.remove(_safeName(courseId));
     _touch();
     await flush();
     debugPrint('[offline] forgot $courseId, reclaimed ${formatBytes(freed)}');
@@ -905,7 +916,15 @@ class OfflineStore {
         // body of a note that HAS no body yet, which is saved as an
         // empty file on purpose so the note still has an entry and its
         // attachments still have a home.
-        final emptyByDesign = rel == i.htmlRel && i.bytes == 0 && !i.hasDoc;
+        //
+        // The row may ALSO carry a document: an older build filed a
+        // note's first attached PDF under the note's own id, and
+        // putNote carries that docRel forward. Refusing such a row
+        // handed an upgrading student the "N files did not save" loop
+        // back on every run, with every byte present on the disk — so
+        // when a document is there it is the substance and an empty
+        // body is never the thing that fails the check.
+        final emptyByDesign = rel == i.htmlRel && (i.hasDoc || i.bytes == 0);
         if (await f.length() <= 0 && !emptyByDesign) return false;
         sawSomething = true;
       } catch (_) {

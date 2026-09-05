@@ -157,6 +157,42 @@ void main() {
       expect(m.attachments.single.kind, 'pdf');
     });
 
+    test('one saved by an older build still verifies after an upgrade',
+        () async {
+      // Before this work, saving from inside a note filed its first
+      // attached PDF as a DOCUMENT under the note's own id. Upgrading,
+      // the course download writes the empty body over the same row —
+      // which now carries both a docRel and a zero-length html. A
+      // check that refused that row handed the student back the exact
+      // "N files did not save" loop this whole change removes, with
+      // every byte present on the disk.
+      final store = await open();
+      await store.putDocument(
+        id: 'ep2',
+        title: 'Episode II',
+        kind: 'note',
+        bytes: utf8.encode('%PDF-1.4 an episode'),
+        extension: 'pdf',
+        courseId: 'phy102',
+      );
+      await store.putNote(
+        id: 'ep2',
+        title: 'Episode II',
+        html: '',
+        courseId: 'phy102',
+        attachments: const [
+          OfflineAttachment(
+              title: 'Episode 2', url: 'https://s.co/ep2.pdf', kind: 'pdf'),
+        ],
+      );
+
+      final item = store.item('ep2')!;
+      expect(item.hasDoc, isTrue, reason: 'the old PDF is still there');
+      expect(await store.verifyItem('ep2'), isTrue,
+          reason: 'THE UPGRADE PATH MUST NOT REPORT A COMPLETE COURSE '
+              'AS BROKEN');
+    });
+
     test('a note with neither body nor entry still throws', () async {
       final store = await open();
       Offline.store = store;
@@ -383,6 +419,28 @@ void main() {
       final reopened = await open();
       expect(reopened.recentlyServed('phy102'), ['a', 'b', 'c', 'd']);
       expect(reopened.recentlyServed('other'), isEmpty);
+    });
+
+    test('is dropped when the course is removed from the phone', () async {
+      // A student clears PHY 102 to free space and downloads it again.
+      // With the ring left behind, every question in the fresh copy is
+      // already "seen lately" and the first round is dealt entirely
+      // out of the repeat pile — the exact complaint the ring exists
+      // to prevent.
+      final store = await open();
+      await store.putQuestions('phy102', [
+        {'id': 'q1', 'correct_key': 'A'},
+      ]);
+      await store.putCourseRecord('phy102',
+          materials: 1, questions: 1, stamp: '', ok: true);
+      await store.rememberServed('phy102', ['q1', 'q2']);
+
+      await store.forgetCourse('phy102');
+      expect(store.recentlyServed('phy102'), isEmpty);
+
+      final reopened = await open();
+      expect(reopened.recentlyServed('phy102'), isEmpty,
+          reason: 'and it must not come back on the next launch');
     });
 
     test('does not grow without end', () async {
