@@ -193,6 +193,40 @@ void main() {
               'AS BROKEN');
     });
 
+    test('the duplicate an older build left behind can be dropped',
+        () async {
+      // The old in-note Save wrote the attached PDF under the NOTE's
+      // id. Nothing reads that any more, and putNote rewrites the
+      // row's size to the length of the body — so those megabytes stop
+      // counting against the 900 MB ceiling while still sitting on the
+      // disk. Once the same file is held as an asset, the duplicate
+      // goes.
+      final store = await open();
+      final pdf = utf8.encode('%PDF-1.4${'x' * 4000}');
+      await store.putDocument(
+        id: 'ep2',
+        title: 'Episode II',
+        kind: 'note',
+        bytes: pdf,
+        extension: 'pdf',
+        courseId: 'phy102',
+      );
+      final docPath = await store.documentPath('ep2');
+      expect(docPath, isNotNull);
+
+      await store.putNote(
+          id: 'ep2', title: 'Episode II', html: '', courseId: 'phy102');
+      await store.forgetDocument('ep2');
+
+      expect(store.item('ep2'), isNotNull,
+          reason: 'the note itself stays — only its duplicate goes');
+      expect(store.item('ep2')!.hasDoc, isFalse);
+      expect(File(docPath!).existsSync(), isFalse,
+          reason: 'the bytes leave the phone, not just the catalogue');
+      expect(await store.verifyItem('ep2'), isTrue,
+          reason: 'and the note still passes the download\'s own check');
+    });
+
     test('a note with neither body nor entry still throws', () async {
       final store = await open();
       Offline.store = store;
@@ -538,6 +572,42 @@ void main() {
           reason: 'the kind of line is not forgotten when it drops, so '
               'the icon does not change shape as well as colour');
       expect(bxNetIcon(meter.value), Icons.signal_cellular_off_rounded);
+    });
+
+    test('one lucky fast reply does not excuse a bad line', () {
+      // The other half of the same rule, and the easier one to get
+      // wrong: reading the FASTEST reply in the window lets a single
+      // cached answer speak for a line that takes three seconds on
+      // everything else.
+      final meter = NetSpeedMeter();
+      addTearDown(meter.dispose);
+      for (var i = 0; i < 7; i++) {
+        meter.sample(bytes: 500, millis: 3000);
+      }
+      expect(meter.value.grade, BxNetGrade.poor);
+      meter.sample(bytes: 500, millis: 500);
+      expect(meter.value.grade, BxNetGrade.poor,
+          reason: 'seven three-second replies and one fast one is a bad '
+              'line, and a student watching a download crawl must not '
+              'be told otherwise');
+    });
+
+    test('a Wi-Fi student who loses Wi-Fi still sees a Wi-Fi icon', () {
+      // The platform reports "no connection", so the metered flag is
+      // already false by the time the offline reading is published —
+      // which turned a dropped Wi-Fi into crossed-out CELLULAR bars,
+      // the exact shape change this was meant to stop.
+      final meter = NetSpeedMeter();
+      addTearDown(meter.dispose);
+      meter.setUnmetered(true);
+      meter.sample(bytes: 400, millis: 100);
+      expect(bxNetIcon(meter.value), Icons.wifi_rounded);
+
+      meter.setUnmetered(false);
+      meter.setReachable(false);
+      expect(meter.value.grade, BxNetGrade.offline);
+      expect(bxNetIcon(meter.value), Icons.signal_wifi_off_rounded,
+          reason: 'the last line that actually worked was Wi-Fi');
     });
 
     test('one slow cold reply does not condemn a good line', () {

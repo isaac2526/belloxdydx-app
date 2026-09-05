@@ -412,6 +412,15 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
       ref.read(vaultProvider.notifier).refresh();
       if (!mounted) return;
+      if (failure == null) {
+        // Re-prepare from the vault copy, so the offer to save it
+        // disappears and the reader is drawing the kept file rather
+        // than the scratch one. Left as it was, the page went on
+        // offering "Save" beside an app-bar icon that had already
+        // turned into "Remove".
+        _preparedFor = null;
+        setState(() => _offline = true);
+      }
       bxToast(
         context,
         failure ?? 'Saved. It opens now with no data at all.',

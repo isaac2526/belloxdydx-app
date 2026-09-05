@@ -616,6 +616,13 @@ class CourseDownloader {
       // check.
       final missing =
           await _verify(store, units, questionRows, failures, failedKeys);
+      // Now that this course's attachments are on the phone as assets,
+      // any duplicate a previous build left under a note's own id can
+      // go. It is the same bytes twice, and putNote rewrote the row's
+      // size to the length of the body — so those megabytes had also
+      // stopped counting against the library ceiling while still
+      // sitting on the disk.
+      await _dropLegacyDocuments(store, materials);
       final heldQuestions = (await store.questions(courseId)).length;
       // Counted off the catalogue and the disk AFTER the run, so the
       // number is what the phone holds, not what this run happened to
@@ -1113,6 +1120,28 @@ class CourseDownloader {
 
   /// Reads back everything this run went for and returns how much of it
   /// is not actually on the disk.
+  /// Removes a document filed under a NOTE's id — the shape an older
+  /// build used for a note's first attached PDF — once every one of
+  /// that note's attachments is really held as an asset.
+  Future<void> _dropLegacyDocuments(
+    OfflineStore store,
+    List<StudyMaterial> materials,
+  ) async {
+    for (final m in materials) {
+      if (_cancelled) break;
+      if (m.kind != MaterialKind.note) continue;
+      if (store.item(m.id)?.hasDoc != true) continue;
+      var allHeld = m.attachments.isNotEmpty;
+      for (final a in m.attachments) {
+        if (!await store.verifyAsset(_b.fileUrl(a.url))) {
+          allHeld = false;
+          break;
+        }
+      }
+      if (allHeld) await store.forgetDocument(m.id);
+    }
+  }
+
   Future<int> _verify(
     OfflineStore store,
     List<_Unit> units,

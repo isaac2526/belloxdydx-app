@@ -686,6 +686,42 @@ class OfflineStore {
           .where((i) => i.courseId == courseId && i.kind != 'questions')
           .map((i) => i.id);
 
+  /// Drops a document filed under a MATERIAL id while keeping the row.
+  ///
+  /// One thing needs this: an older build filed a note's first attached
+  /// PDF as a document under the note's own id, and nothing reads that
+  /// any more — attachments are opened by URL out of the asset store.
+  /// Left there it is the same file twice on a phone that has to count
+  /// its megabytes, and worse, [putNote] rewrites the row's `bytes` to
+  /// the length of the note body, so those megabytes stop counting
+  /// against the library ceiling while still sitting on the disk.
+  ///
+  /// Only ever called once the replacement really is held.
+  Future<void> forgetDocument(String id) async {
+    final i = _items[id];
+    if (i == null || !i.hasDoc) return;
+    try {
+      final f = File(resolve(i.docRel!));
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    _items[id] = OfflineItem(
+      id: i.id,
+      title: i.title,
+      courseCode: i.courseCode,
+      courseId: i.courseId,
+      kind: i.kind,
+      docRel: null,
+      htmlRel: i.htmlRel,
+      bytes: i.hasHtml ? i.bytes : 0,
+      savedAtMs: i.savedAtMs,
+      sig: i.sig,
+      pinned: i.pinned,
+      attachments: i.attachments,
+    );
+    _touch();
+    await flush();
+  }
+
   /// Forgets one asset so the next download fetches it again. Used when
   /// the catalogue says a picture is here and the disk disagrees.
   Future<void> forgetAsset(String url) async {

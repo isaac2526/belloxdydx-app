@@ -229,6 +229,14 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           ],
         );
         missed = await _keepMedia(store, m, repo);
+        if (missed.isEmpty && store.item(m.id)?.hasDoc == true) {
+          // An older build filed this note's first attached PDF as a
+          // document under the note's own id, where nothing looks for
+          // it any more. Now that the same file is held as an asset —
+          // and only now — the duplicate goes, so the phone is not
+          // carrying it twice.
+          await store.forgetDocument(m.id);
+        }
         await store.flush();
       } catch (e) {
         // Only a genuine ENOSPC says "free up space". This used to say
@@ -270,8 +278,13 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     };
     for (final entry in urls.entries) {
       final url = repo.fileUrl(entry.key);
-      if (url.isEmpty) continue;
-      if (store.hasAsset(url) && await store.verifyAsset(url)) continue;
+      if (url.isEmpty) {
+        // An attachment with no usable address is missing, not skipped.
+        missed.add(entry.value);
+        continue;
+      }
+      final claimed = store.hasAsset(url);
+      if (claimed && await store.verifyAsset(url)) continue;
       try {
         final bytes = await fetchDocumentBytes(url);
         if (bytes != null && bytes.isNotEmpty) {
@@ -281,6 +294,12 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       } catch (_) {
         // Named below rather than swallowed.
       }
+      // The catalogue said it was here and the disk disagreed, and we
+      // could not replace it. Stop claiming it — otherwise the row
+      // reads "on this phone", the Save button that would retry is
+      // disabled because everything looks held, and the student is
+      // left with a pinned attachment that opens to a network error.
+      if (claimed) await store.forgetAsset(url);
       missed.add(entry.value);
     }
     return missed;
