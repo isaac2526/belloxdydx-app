@@ -79,6 +79,28 @@ enum CourseDownloadPhase {
   cancelled,
 }
 
+/// One file that did not land, by name and with the reason — so the
+/// card can say "Episode 2 · not found on the server" rather than a
+/// bare "6 files did not save" the student can do nothing with.
+@immutable
+class CourseDownloadFailure {
+  final String title;
+  final String reason;
+
+  const CourseDownloadFailure({required this.title, required this.reason});
+
+  factory CourseDownloadFailure.fromJson(Map<dynamic, dynamic> j) =>
+      CourseDownloadFailure(
+        title: '${j['title'] ?? ''}',
+        reason: '${j['reason'] ?? ''}',
+      );
+
+  Map<String, String> toJson() => {'title': title, 'reason': reason};
+
+  /// "Episode 2 (not found on the server)"
+  String get line => reason.isEmpty ? title : '$title ($reason)';
+}
+
 @immutable
 class CourseDownloadState {
   final String courseId;
@@ -103,6 +125,9 @@ class CourseDownloadState {
 
   /// Set only on failure, and only ever from the closed fault set.
   final String? message;
+
+  /// What did not save last time, by name. Empty when everything did.
+  final List<CourseDownloadFailure> failures;
 
   /// True when the server is publishing something this phone does not
   /// hold. This is the "there's a change in this course, download now"
@@ -136,6 +161,7 @@ class CourseDownloadState {
     this.materials = 0,
     this.assets = 0,
     this.message,
+    this.failures = const [],
     this.updateAvailable = false,
     this.held = false,
     this.savedAtMs = 0,
@@ -168,6 +194,7 @@ class CourseDownloadState {
     int? materials,
     int? assets,
     String? message,
+    List<CourseDownloadFailure>? failures,
     bool? updateAvailable,
     bool? held,
     int? savedAtMs,
@@ -186,6 +213,7 @@ class CourseDownloadState {
         materials: materials ?? this.materials,
         assets: assets ?? this.assets,
         message: clearMessage ? null : (message ?? this.message),
+        failures: clearMessage ? const [] : (failures ?? this.failures),
         updateAvailable: updateAvailable ?? this.updateAvailable,
         held: held ?? this.held,
         savedAtMs: savedAtMs ?? this.savedAtMs,
@@ -200,22 +228,44 @@ class _Unit {
   final String url;
   final StudyMaterial? material;
 
+  /// For an asset: what it belongs to, in words — "a picture in Newton's
+  /// laws", "the PDF attached to Episode II" — so a failure can be
+  /// named on the card.
+  final String owner;
+
   const _Unit.note(this.material)
       : kind = 'note',
         id = '',
-        url = '';
+        url = '',
+        owner = '';
   const _Unit.doc(this.material)
       : kind = 'doc',
         id = '',
-        url = '';
-  const _Unit.asset(this.url)
+        url = '',
+        owner = '';
+  const _Unit.asset(this.url, {this.owner = ''})
       : kind = 'asset',
         id = '',
         material = null;
 
   String get key => kind == 'asset' ? url : (material?.id ?? id);
-  String get title => kind == 'asset' ? '' : (material?.title ?? '');
+
+  /// The name a student would recognise. Never a URL.
+  String get title {
+    if (kind != 'asset') return material?.title ?? '';
+    if (owner.isNotEmpty) return owner;
+    final last = Uri.tryParse(url)?.pathSegments.lastOrNull ?? '';
+    return last.isEmpty ? 'A picture' : Uri.decodeComponent(last);
+  }
 }
+
+/// What one transfer came to: whether it is on the disk, how many
+/// bytes moved, and — when it is not — the reason in words.
+typedef _Outcome = ({bool ok, int bytes, String? reason});
+
+const _Outcome _held = (ok: true, bytes: 0, reason: null);
+
+_Outcome _lost(String reason) => (ok: false, bytes: 0, reason: reason);
 
 class CourseDownloader {
   CourseDownloader({
@@ -274,6 +324,14 @@ class CourseDownloader {
     final ok = rec['ok'] == true;
     int held(String key, String fallback) =>
         (rec[key] as num?)?.toInt() ?? (rec[fallback] as num?)?.toInt() ?? 0;
+    final failures = ok
+        ? const <CourseDownloadFailure>[]
+        : [
+            for (final f in (rec['failures'] as List? ?? const []))
+              if (f is Map) CourseDownloadFailure.fromJson(f),
+          ];
+    final failed = (rec['failed'] as num?)?.toInt() ?? failures.length;
+    final reason = '${rec['reason'] ?? ''}';
     return CourseDownloadState(
       courseId: courseId,
       phase: ok ? CourseDownloadPhase.done : CourseDownloadPhase.failed,
@@ -295,9 +353,16 @@ class CourseDownloader {
       // Bello's name, every launch for ever, that he had changed
       // something. He had not. A run that did not finish says so in its
       // own words instead, and offers to try again.
+      failed: ok ? 0 : failed,
+      // By name where the names were kept. The generic sentence is
+      // only for a record an older build wrote, or a run the store
+      // itself stopped — and the store writes its own sentence.
       message: ok
           ? null
-          : _whyItStopped('${rec['reason'] ?? ''}'),
+          : (failures.isNotEmpty && (reason.isEmpty || reason == 'incomplete'))
+              ? failureMessage(failed > 0 ? failed : failures.length, failures)
+              : _whyItStopped(reason),
+      failures: failures,
     );
   }
 
@@ -308,6 +373,37 @@ class CourseDownloader {
     }
     // Anything else came from the store, which writes sentences.
     return reason;
+  }
+
+  /// The sentence under the card when a run did not land everything:
+  /// how many, WHICH ones, and what to do. A number on its own — "6
+  /// files did not save", every time, however steady the line — was
+  /// the whole of what a student could see, and it turned out to be
+  /// six notes that had no body yet and were never missing at all.
+  @visibleForTesting
+  static String failureMessage(int count, List<CourseDownloadFailure> named) {
+    final noun = count == 1 ? 'file' : 'files';
+    final buf = StringBuffer('$count $noun did not save');
+    if (named.isNotEmpty) {
+      final shown = named.take(3).map((f) => f.line).toList();
+      final more = named.length - shown.length;
+      buf.write(': ${shown.join(' · ')}');
+      if (more > 0) buf.write(' and $more more');
+    }
+    buf.write('. Tap Update on a steadier connection and only the missing '
+        'ones are fetched.');
+    return buf.toString();
+  }
+
+  /// A thrown error, in the words the card uses.
+  static String _reasonFor(Object e) {
+    final fault = classify(e);
+    return switch (fault) {
+      BxFault.offline => 'no connection',
+      BxFault.timeout => 'the connection dropped',
+      BxFault.notFound => 'not found on the server',
+      _ => 'did not save',
+    };
   }
 
   /// Folds a fresh manifest row in without downloading anything. This
@@ -380,13 +476,23 @@ class CourseDownloader {
       // routinely referenced by a note AND by a question about it, and
       // two workers downloading it at once is a wasted transfer on a
       // student's bundle.
+      // Every picture, voice note and attachment this course points
+      // at, whether or not it still has to be fetched. What is on the
+      // phone is counted from THIS after the run — a run only knows
+      // what it moved, and an Update that found every picture already
+      // here used to report "0 pictures" over a phone full of them.
+      final referenced = <String>{};
       final wanted = <String>{};
-      final units = _plan(store, materials, wanted)
+      final units = _plan(store, materials, wanted, referenced)
         // The pictures on the questions are planned from the BANK, not
         // from the pages that just arrived, so a re-download picks up a
         // diagram that failed last time even when its question row has
         // not changed since.
-        ..addAll(await _questionAssets(store, wanted));
+        ..addAll(await _questionAssets(store, wanted, referenced));
+      // The catalogue said these were here. The disk gets the last word:
+      // anything it cannot find is forgotten and fetched again now,
+      // rather than trusted for ever.
+      units.addAll(await _reclaim(store, referenced, wanted));
       _emit(_state.copyWith(
         phase: CourseDownloadPhase.running,
         total: units.length,
@@ -397,9 +503,14 @@ class CourseDownloader {
       var done = 0;
       var bytes = 0;
       var failed = 0;
-      var savedNotes = 0;
-      var savedAssets = 0;
+      final failures = <CourseDownloadFailure>[];
       final queue = List<_Unit>.from(units);
+
+      void lost(_Unit unit, String reason) {
+        failed++;
+        failures.add(CourseDownloadFailure(title: unit.title, reason: reason));
+        debugPrint('[course] ${unit.kind} ${unit.key}: $reason');
+      }
 
       Future<void> worker() async {
         while (!_cancelled && queue.isNotEmpty) {
@@ -408,28 +519,23 @@ class CourseDownloader {
             // Read into a local and add afterwards. `bytes += await …`
             // reads the counter, suspends, and writes back a value
             // three workers may all have read before any of them wrote.
-            final moved = await _perform(unit, store);
-            if (moved > 0) {
-              bytes += moved;
-              if (unit.kind == 'asset') {
-                savedAssets++;
-              } else {
-                savedNotes++;
-              }
+            final out = await _perform(unit, store);
+            if (out.ok) {
+              bytes += out.bytes;
             } else {
-              failed++;
+              lost(unit, out.reason ?? 'did not save');
             }
           } catch (e) {
-            failed++;
-            debugPrint('[course] ${unit.kind} ${unit.key} failed: $e');
+            lost(unit, _reasonFor(e));
           }
           done++;
           _emit(_state.copyWith(
             done: done,
             bytes: bytes,
             failed: failed,
-            assets: savedAssets,
-            materials: savedNotes,
+            failures: List.unmodifiable(failures),
+            assets: referenced.where(store.hasAsset).length,
+            materials: store.heldFilesFor(courseId),
             label: _labelFor(unit),
           ));
           await Future<void>.delayed(const Duration(milliseconds: 1));
@@ -474,17 +580,24 @@ class CourseDownloader {
       // from the server moments ago, so it is in the alive set and none
       // of it can have been pruned. Subtracting would only weaken the
       // check.
-      final missing = await _verify(store, units, questionRows);
+      final missing = await _verify(store, units, questionRows, failures);
       final heldQuestions = (await store.questions(courseId)).length;
+      // Counted off the catalogue and the disk AFTER the run, so the
+      // number is what the phone holds, not what this run happened to
+      // move.
+      final heldFiles = store.heldFilesFor(courseId);
+      final heldAssets = referenced.where(store.hasAsset).length;
 
       final ok = missing == 0 && failed == 0;
       await store.putCourseRecord(
         courseId,
         // What actually landed, kept apart from what the server has.
         heldQuestions: heldQuestions,
-        heldFiles: savedNotes,
-        heldAssets: savedAssets,
+        heldFiles: heldFiles,
+        heldAssets: heldAssets,
         reason: ok ? '' : (_outOfRoom ?? 'incomplete'),
+        failed: failed + missing,
+        failures: [for (final f in failures) f.toJson()],
         // The MANIFEST's numbers, not what we saved. They differ when
         // the server withheld a question pinned to a sitting, and
         // storing what we saved would leave the badge lit forever.
@@ -507,16 +620,14 @@ class CourseDownloader {
         bytes: bytes,
         failed: failed + missing,
         questions: heldQuestions,
+        materials: heldFiles,
+        assets: heldAssets,
         held: true,
         updateAvailable: !ok,
         savedAtMs: DateTime.now().millisecondsSinceEpoch,
         updatedAt: stamp?.stamp ?? _state.updatedAt,
-        message: ok
-            ? null
-            : '${failed + missing} '
-                '${failed + missing == 1 ? 'file' : 'files'} did not save. '
-                'Tap Update on a steadier connection and only the missing '
-                'ones are fetched.',
+        failures: List.unmodifiable(failures),
+        message: ok ? null : failureMessage(failed + missing, failures),
       ));
     } catch (e) {
       _emit(_state.copyWith(
@@ -637,29 +748,31 @@ class CourseDownloader {
     OfflineStore store,
     List<StudyMaterial> materials,
     Set<String> wanted,
+    Set<String> referenced,
   ) {
     final units = <_Unit>[];
 
-    void wantAsset(String? url) {
+    void wantAsset(String? url, String owner) {
       if (url == null || url.trim().isEmpty) return;
       final resolved = _b.fileUrl(url);
       if (resolved.isEmpty) return;
+      referenced.add(resolved);
       if (store.hasAsset(resolved)) return;
       if (!wanted.add(canonicalAssetUrl(resolved))) return;
-      units.add(_Unit.asset(resolved));
+      units.add(_Unit.asset(resolved, owner: owner));
     }
 
     for (final m in materials) {
       if (m.kind == MaterialKind.note) {
         units.add(_Unit.note(m));
         for (final u in urlsInHtml(m.contentHtml)) {
-          wantAsset(u);
+          wantAsset(u, 'a picture in ${m.title}');
         }
         // Every attachment, whatever its kind. A note whose attached
         // PDF is missing is not saved, it is half-saved — and the
         // background sync only ever took the images and the audio.
         for (final a in m.attachments) {
-          wantAsset(a.url);
+          wantAsset(a.url, a.title.isEmpty ? 'attached to ${m.title}' : a.title);
         }
         continue;
       }
@@ -670,12 +783,33 @@ class CourseDownloader {
       if (m.url.isEmpty) continue;
       final ext = extensionForUrl(m.url, fallback: '');
       if (const ['png', 'jpg', 'jpeg', 'webp', 'gif'].contains(ext)) {
-        wantAsset(m.url);
+        wantAsset(m.url, m.title);
         continue;
       }
       units.add(_Unit.doc(m));
     }
 
+    return units;
+  }
+
+  /// Re-checks, on the disk, every asset the catalogue claims to hold
+  /// for this course. Whatever is not really there is forgotten and
+  /// planned again, so a phone whose files were cleared behind the
+  /// app's back gets them back on the next Update instead of reporting
+  /// "on this phone" over a hole.
+  Future<List<_Unit>> _reclaim(
+    OfflineStore store,
+    Set<String> referenced,
+    Set<String> wanted,
+  ) async {
+    final units = <_Unit>[];
+    for (final url in referenced) {
+      if (_cancelled) break;
+      if (!store.hasAsset(url)) continue;
+      if (await store.verifyAsset(url)) continue;
+      await store.forgetAsset(url);
+      if (wanted.add(canonicalAssetUrl(url))) units.add(_Unit.asset(url));
+    }
     return units;
   }
 
@@ -687,6 +821,7 @@ class CourseDownloader {
   Future<List<_Unit>> _questionAssets(
     OfflineStore store,
     Set<String> wanted,
+    Set<String> referenced,
   ) async {
     final units = <_Unit>[];
 
@@ -694,9 +829,10 @@ class CourseDownloader {
       if (url == null || url.trim().isEmpty) return;
       final resolved = _b.fileUrl(url);
       if (resolved.isEmpty) return;
+      referenced.add(resolved);
       if (store.hasAsset(resolved)) return;
       if (!wanted.add(canonicalAssetUrl(resolved))) return;
-      units.add(_Unit.asset(resolved));
+      units.add(_Unit.asset(resolved, owner: 'a picture on a question'));
     }
 
     for (final row in await store.questions(courseId)) {
@@ -736,11 +872,12 @@ class CourseDownloader {
 
   String _labelFor(_Unit u) => switch (u.kind) {
         'note' => u.title.isEmpty ? 'Notes' : u.title,
-        'asset' => 'Pictures and voice notes',
+        'asset' => u.owner.isEmpty ? 'Pictures and voice notes' : u.owner,
         _ => u.title.isEmpty ? 'Documents' : u.title,
       };
 
-  Future<int> _perform(_Unit unit, OfflineStore store) => switch (unit.kind) {
+  Future<_Outcome> _perform(_Unit unit, OfflineStore store) =>
+      switch (unit.kind) {
         'note' => _saveNote(unit.material!, store),
         'asset' => _saveAsset(unit.url, store),
         _ => _saveDoc(unit.material!, store),
@@ -748,14 +885,15 @@ class CourseDownloader {
 
   /// The body already arrived with the bundle, so this costs no request
   /// at all — which is the point of sending content_html with the page.
-  Future<int> _saveNote(StudyMaterial m, OfflineStore store) async {
-    final html = m.contentHtml;
-    if (html.trim().isEmpty) {
-      // A note with no body is not a failure, it is an empty note.
-      // Counting it as one would make a perfectly downloaded course
-      // report errors forever.
-      return 1;
-    }
+  ///
+  /// A note with NO body is saved as well, with its attachment list.
+  /// It used to be skipped as "not a failure, an empty note" — and
+  /// then the check at the end could not find it and counted it as a
+  /// file that did not save, on every run, for ever. Six notes of a
+  /// series still being written were the whole of a student's stable
+  /// "6 files did not save".
+  Future<_Outcome> _saveNote(StudyMaterial m, OfflineStore store) async {
+    final html = m.contentHtml.trim().isEmpty ? '' : m.contentHtml;
     final course = _content.courseById(m.courseId);
     await store.putNote(
       id: m.id,
@@ -767,20 +905,27 @@ class CourseDownloader {
       // The student asked for this course by name, so nothing in it is
       // eligible for eviction to make room for a background sync.
       pinned: true,
+      attachments: [
+        for (final a in m.attachments)
+          OfflineAttachment(title: a.title, url: a.url, kind: a.kind),
+      ],
     );
-    return utf8Length(html);
+    return (ok: true, bytes: utf8Length(html), reason: null);
   }
 
-  Future<int> _saveDoc(StudyMaterial m, OfflineStore store) async {
+  Future<_Outcome> _saveDoc(StudyMaterial m, OfflineStore store) async {
     final url = _b.fileUrl(m.url);
-    if (store.isCurrent(m.id, sigFor(m)) && store.item(m.id)?.hasDoc == true) {
+    if (store.isCurrent(m.id, sigFor(m)) &&
+        store.item(m.id)?.hasDoc == true &&
+        await store.verifyItem(m.id)) {
       // Already held at this exact version. Not a transfer, and not a
       // failure either.
-      return 1;
+      return _held;
     }
-    final bytes = await _download(url, cap: _maxFile);
-    if (bytes == null) return 0;
-    if (!await _makeRoom(store, bytes.length)) return 0;
+    final got = await _download(url, cap: _maxFile);
+    final bytes = got.bytes;
+    if (bytes == null) return _lost(got.reason ?? 'did not save');
+    if (!await _makeRoom(store, bytes.length)) return _lost('no room left');
 
     final course = _content.courseById(m.courseId);
     await store.putDocument(
@@ -793,20 +938,25 @@ class CourseDownloader {
       courseId: m.courseId.isEmpty ? courseId : m.courseId,
       sig: sigFor(m),
       pinned: true,
+      attachments: [
+        for (final a in m.attachments)
+          OfflineAttachment(title: a.title, url: a.url, kind: a.kind),
+      ],
     );
-    if (!await store.verifyItem(m.id)) return 0;
-    return bytes.length;
+    if (!await store.verifyItem(m.id)) return _lost('could not be written');
+    return (ok: true, bytes: bytes.length, reason: null);
   }
 
-  Future<int> _saveAsset(String url, OfflineStore store) async {
-    if (url.isEmpty) return 0;
-    if (store.hasAsset(url)) return 1;
-    final bytes = await _download(url, cap: _maxFile);
-    if (bytes == null) return 0;
-    if (!await _makeRoom(store, bytes.length)) return 0;
+  Future<_Outcome> _saveAsset(String url, OfflineStore store) async {
+    if (url.isEmpty) return _lost('has no address');
+    if (store.hasAsset(url) && await store.verifyAsset(url)) return _held;
+    final got = await _download(url, cap: _maxFile);
+    final bytes = got.bytes;
+    if (bytes == null) return _lost(got.reason ?? 'did not save');
+    if (!await _makeRoom(store, bytes.length)) return _lost('no room left');
     await store.putAsset(url, bytes);
-    if (!await store.verifyAsset(url)) return 0;
-    return bytes.length;
+    if (!await store.verifyAsset(url)) return _lost('could not be written');
+    return (ok: true, bytes: bytes.length, reason: null);
   }
 
   /// Room is checked BEFORE the write, not discovered by it. A failed
@@ -822,24 +972,41 @@ class CourseDownloader {
     return false;
   }
 
-  Future<List<int>?> _download(String url, {required int cap}) async {
-    if (url.isEmpty) return null;
+  /// One transfer. The bytes, or the reason there are none — in the
+  /// words the card will use, because "did not save" told a student
+  /// nothing about whether to try again or to tell Tutor Bello.
+  Future<({List<int>? bytes, String? reason})> _download(
+    String url, {
+    required int cap,
+  }) async {
+    if (url.isEmpty) return (bytes: null, reason: 'has no address');
     final uri = Uri.tryParse(url);
-    if (uri == null || !uri.hasScheme) return null;
+    if (uri == null || !uri.hasScheme) {
+      return (bytes: null, reason: 'has a broken address');
+    }
     try {
       final started = DateTime.now();
       final res =
           await _http.get(uri).timeout(const Duration(seconds: 120));
-      if (res.statusCode != 200) return null;
-      if (res.bodyBytes.isEmpty) return null;
-      if (res.bodyBytes.length > cap) return null;
+      if (res.statusCode == 404 || res.statusCode == 410) {
+        return (bytes: null, reason: 'not found on the server');
+      }
+      if (res.statusCode != 200) {
+        return (bytes: null, reason: 'the server refused it');
+      }
+      if (res.bodyBytes.isEmpty) return (bytes: null, reason: 'came down empty');
+      if (res.bodyBytes.length > cap) {
+        return (bytes: null, reason: 'too big to keep on a phone');
+      }
       _b.reportTransfer(
         bytes: res.bodyBytes.length,
         millis: DateTime.now().difference(started).inMilliseconds,
       );
-      return res.bodyBytes;
-    } catch (_) {
-      return null;
+      return (bytes: res.bodyBytes, reason: null);
+    } on TimeoutException {
+      return (bytes: null, reason: 'the connection dropped');
+    } catch (e) {
+      return (bytes: null, reason: _reasonFor(e));
     }
   }
 
@@ -853,16 +1020,27 @@ class CourseDownloader {
     OfflineStore store,
     List<_Unit> units,
     int expectedQuestions,
+    List<CourseDownloadFailure> failures,
   ) async {
     var missing = 0;
+    final alreadyNamed = {for (final f in failures) f.title};
     for (final u in units) {
       if (_cancelled) break;
+      // A note is verified by its ENTRY, which an empty body has too.
+      // Checking for a non-empty body counted every note Tutor Bello
+      // had not typed yet as missing, on every run, whatever the line
+      // was doing.
       final ok = switch (u.kind) {
         'asset' => await store.verifyAsset(u.url),
-        'note' => (await store.readNote(u.material!.id))?.isNotEmpty ?? false,
         _ => await store.verifyItem(u.material!.id),
       };
-      if (!ok) missing++;
+      if (!ok) {
+        missing++;
+        if (alreadyNamed.add(u.title)) {
+          failures.add(CourseDownloadFailure(
+              title: u.title, reason: 'not on the disk after saving'));
+        }
+      }
     }
     if (expectedQuestions > 0) {
       final held = await store.questions(courseId);

@@ -50,25 +50,20 @@ class BxNetChip extends ConsumerWidget {
     if (net.grade == BxNetGrade.unknown) return const SizedBox.shrink();
     if (onlyWhenItMatters && !net.isSlow) return const SizedBox.shrink();
 
-    // THE SIGNAL BARS, ALWAYS THE SAME SHAPE, ONLY THE COLOUR MOVING.
+    // THE SIGNAL BARS: THE SHAPE OF THE LINE, THE COLOUR OF THE GRADE.
     //
-    // It used to change icon with the grade — a cloud when offline, a
-    // tick when poor, two bars when fair — so there was nothing steady
-    // for the eye to read. Now it is one wifi-signal shape whose bars
-    // fill up and whose colour says the rest:
+    // Wi-Fi is drawn as a Wi-Fi fan, mobile data as cellular bars — the
+    // same two shapes the phone's own status bar uses, so a student
+    // reads it without learning anything. It used to draw a Wi-Fi fan
+    // for every slow reading whatever the line was, so a student on
+    // 4.5G was shown a red Wi-Fi icon and rightly called it wrong. The
+    // bars fill up with the grade and the colour says the rest:
     //
     //   green  = good     · everything in the app is comfortable
     //   amber  = ok       · usable, slower on pictures and PDFs
     //   red    = bad      · text only, downloads will crawl
     //   red ✕  = no line  · nothing but what is already on the phone
-    final icon = switch (net.grade) {
-      BxNetGrade.offline => Icons.signal_wifi_off_rounded,
-      BxNetGrade.poor => Icons.network_wifi_1_bar_rounded,
-      BxNetGrade.fair => Icons.network_wifi_2_bar_rounded,
-      _ => net.unmetered
-          ? Icons.wifi_rounded
-          : Icons.signal_cellular_alt_rounded,
-    };
+    final icon = bxNetIcon(net);
 
     if (iconOnly) {
       final c = context.bx;
@@ -103,15 +98,7 @@ class BxNetLine extends ConsumerWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(
-          net.grade == BxNetGrade.offline
-              ? Icons.signal_wifi_off_rounded
-              : net.unmetered
-                  ? Icons.wifi_rounded
-                  : Icons.signal_cellular_alt_rounded,
-          size: 14,
-          color: net.tint(c),
-        ),
+        Icon(bxNetIcon(net), size: 14, color: net.tint(c)),
         const SizedBox(width: 4),
         // Flexible, because this line sits beside other things in a
         // narrow box — a progress caption on a 320dp phone at the
@@ -129,4 +116,26 @@ class BxNetLine extends ConsumerWidget {
       ],
     );
   }
+}
+
+/// The one icon for a reading, shared by the chip and the line.
+///
+/// Wi-Fi readings use the Wi-Fi fan, mobile data the cellular bars —
+/// and the number of bars follows the grade. Visible for testing so a
+/// test can assert that mobile data never wears a Wi-Fi shape.
+IconData bxNetIcon(BxNetSpeed net) {
+  if (net.unmetered) {
+    return switch (net.grade) {
+      BxNetGrade.offline => Icons.signal_wifi_off_rounded,
+      BxNetGrade.poor => Icons.network_wifi_1_bar_rounded,
+      BxNetGrade.fair => Icons.network_wifi_3_bar_rounded,
+      _ => Icons.wifi_rounded,
+    };
+  }
+  return switch (net.grade) {
+    BxNetGrade.offline => Icons.signal_cellular_off_rounded,
+    BxNetGrade.poor => Icons.signal_cellular_alt_1_bar_rounded,
+    BxNetGrade.fair => Icons.signal_cellular_alt_2_bar_rounded,
+    _ => Icons.signal_cellular_alt_rounded,
+  };
 }

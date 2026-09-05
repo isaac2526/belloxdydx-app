@@ -10,6 +10,7 @@ import '../../core/router.dart';
 import '../../data/local_store.dart';
 import '../../data/backend.dart';
 import '../../data/models.dart';
+import '../../data/net_speed.dart';
 import '../../data/offline/offline_store.dart';
 import '../../data/repositories.dart';
 import '../../ui/ui.dart';
@@ -204,40 +205,30 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
         return;
       }
 
-      // A note travels as its body. If a PDF is clipped to it, the bytes
-      // ride along too, so the whole thing opens with no network at all.
-      // Its pictures and voice notes come as well — a note whose diagram
-      // is missing is half-saved, and half-saved is what made the vault
-      // feel like a lie.
+      // A note travels as its body AND its attachment list, and every
+      // attachment's bytes come down with it — PDFs included — into
+      // the same place the course download puts them, so the attachment
+      // row finds them by URL with the data off. The first PDF used to
+      // be filed as a document under the note's own id, where no screen
+      // ever looked for it: the note reader opened attachments by URL,
+      // and the network said no.
       String? failure;
+      var missed = const <String>[];
       try {
-        final pdf = _firstPdf(m);
-        final bytes =
-            pdf == null ? null : await fetchDocumentBytes(repo.fileUrl(pdf.url));
-        if (bytes != null) {
-          await store.putDocument(
-            id: m.id,
-            title: m.title,
-            courseCode: code,
-            courseId: m.courseId,
-            kind: 'note',
-            bytes: bytes,
-            extension: 'pdf',
-            sig: m.updatedAt?.toIso8601String() ?? m.url,
-            html: m.contentHtml,
-          );
-        } else {
-          await store.putNote(
-            id: m.id,
-            title: m.title,
-            courseCode: code,
-            courseId: m.courseId,
-            html: m.contentHtml,
-            sig: m.updatedAt?.toIso8601String() ?? m.url,
-            pinned: true,
-          );
-        }
-        await _keepMedia(store, m, repo);
+        await store.putNote(
+          id: m.id,
+          title: m.title,
+          courseCode: code,
+          courseId: m.courseId,
+          html: m.contentHtml,
+          sig: m.updatedAt?.toIso8601String() ?? m.url,
+          pinned: true,
+          attachments: [
+            for (final a in m.attachments)
+              OfflineAttachment(title: a.title, url: a.url, kind: a.kind),
+          ],
+        );
+        missed = await _keepMedia(store, m, repo);
         await store.flush();
       } catch (e) {
         // Only a genuine ENOSPC says "free up space". This used to say
@@ -247,47 +238,52 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
 
       ref.read(vaultProvider.notifier).refresh();
       if (!mounted) return;
+      setState(() {});
       bxToast(
         context,
-        failure ?? 'Saved. This note now opens with no data.',
-        error: failure != null,
+        failure ??
+            (missed.isEmpty
+                ? 'Saved. This note now opens with no data.'
+                : 'Saved, but ${missed.length == 1 ? 'one attachment' : '${missed.length} attachments'} '
+                    'did not come down: ${missed.take(2).join(', ')}. '
+                    'Tap Save again on a steadier line.'),
+        error: failure != null || missed.isNotEmpty,
       );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  /// Pulls down every picture and voice note the body points at.
-  Future<void> _keepMedia(
+  /// Pulls down every picture and voice note the body points at, and
+  /// every attachment whatever its kind. Returns the titles of the
+  /// attachments that did NOT come down, so the toast can name them.
+  Future<List<String>> _keepMedia(
     OfflineStore store,
     StudyMaterial m,
     ContentRepository repo,
   ) async {
-    final urls = <String>{
+    final missed = <String>[];
+    final urls = <String, String>{
       for (final match in kEmbeddedStorageUrl.allMatches(m.contentHtml))
-        match.group(0)!,
-      for (final a in m.attachments)
-        if (a.kind == 'image' || a.kind == 'audio') a.url,
+        match.group(0)!: 'a picture in this note',
+      for (final a in m.attachments) a.url: a.title,
     };
-    for (final raw in urls) {
-      final url = repo.fileUrl(raw);
-      if (url.isEmpty || store.hasAsset(url)) continue;
+    for (final entry in urls.entries) {
+      final url = repo.fileUrl(entry.key);
+      if (url.isEmpty) continue;
+      if (store.hasAsset(url) && await store.verifyAsset(url)) continue;
       try {
         final bytes = await fetchDocumentBytes(url);
         if (bytes != null && bytes.isNotEmpty) {
           await store.putAsset(url, bytes);
+          continue;
         }
       } catch (_) {
-        // One missing picture is not a reason to fail the save.
+        // Named below rather than swallowed.
       }
+      missed.add(entry.value);
     }
-  }
-
-  Attachment? _firstPdf(StudyMaterial m) {
-    for (final a in m.attachments) {
-      if (a.kind == 'pdf' || documentExtension(a.url) == 'pdf') return a;
-    }
-    return null;
+    return missed;
   }
 
 
@@ -371,11 +367,20 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     if (material == null) {
       if (async.hasError) {
         final e = async.error;
+        final noLine =
+            ref.read(netSpeedProvider).grade == BxNetGrade.offline;
         return BxErrorState(
-          title: 'This note did not open',
-          message: e is BxError
-              ? e.message
-              : 'Check your data or Wi-Fi, then try again.',
+          title: noLine
+              ? 'This note is not on this phone yet'
+              : 'This note did not open',
+          message: noLine
+              ? 'You are offline and this one was not among the files '
+                  'saved to this phone. Open the course with data on and '
+                  'tap Download — it brings every note, picture and '
+                  'attachment down, and then this opens with no data.'
+              : e is BxError
+                  ? e.message
+                  : 'Check your data or Wi-Fi, then try again.',
           onRetry: _refresh,
         );
       }
@@ -430,7 +435,60 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
             onAction: () => context.go(Routes.courses),
           ),
         if (material.attachments.isNotEmpty) _attachments(material),
+        // The same Save as the icon in the bar, where a thumb finds it
+        // — "add download button inside everything just in case".
+        if (_vaultOk) _keepRow(material, saved),
       ],
+    );
+  }
+
+  /// One plain row at the foot of the note: keep it, or it is kept.
+  Widget _keepRow(StudyMaterial m, bool saved) {
+    final c = context.bx;
+    final code = ref
+            .read(contentProvider)
+            .valueOrNull
+            ?.courseById(m.courseId)
+            ?.code ??
+        '';
+    final held = m.attachments
+        .where((a) => Offline.holds(ref.read(contentRepoProvider).fileUrl(a.url)))
+        .length;
+    final allHere = saved && held == m.attachments.length;
+    return BxCard(
+      padding: const EdgeInsets.all(BxSpace.md),
+      accent: allHere ? BxAccent.success : BxAccent.neutral,
+      child: Row(
+        children: [
+          Icon(
+            allHere
+                ? Icons.offline_pin_rounded
+                : Icons.download_for_offline_outlined,
+            color: allHere ? c.success : c.gold,
+          ),
+          const SizedBox(width: BxSpace.sm),
+          Expanded(
+            child: Text(
+              allHere
+                  ? (m.attachments.isEmpty
+                      ? 'On this phone. Opens with no data.'
+                      : 'On this phone with ${m.attachments.length == 1 ? 'its attachment' : 'all ${m.attachments.length} attachments'}. Opens with no data.')
+                  : saved
+                      ? 'The note is on this phone, but $held of ${m.attachments.length} attachments came down. Save again to fetch the rest.'
+                      : 'Keep this note on your phone, with everything attached to it.',
+              style: BxType.small(allHere ? c.inkSoft : c.ink),
+            ),
+          ),
+          const SizedBox(width: BxSpace.sm),
+          BxButton(
+            allHere ? 'Saved' : 'Save',
+            kind: allHere ? BxButtonKind.secondary : BxButtonKind.primary,
+            onPressed: _busy || allHere
+                ? null
+                : () => _toggleSave(m, code, false),
+          ),
+        ],
+      ),
     );
   }
 
@@ -547,6 +605,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final c = context.bx;
     final url = ref.read(contentRepoProvider).fileUrl(a.url);
     final kind = a.kind.isNotEmpty ? a.kind : documentExtension(a.url);
+    final here = Offline.holds(url);
 
     switch (kind) {
       case 'image':
@@ -592,8 +651,11 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       case 'pdf':
         return BxListRow(
           title: a.title,
-          subtitle: 'PDF · opens in the reading room',
+          subtitle: here ? 'PDF · on this phone' : 'PDF · opens in the reading room',
           leading: Icon(Icons.picture_as_pdf_rounded, color: c.danger),
+          trailing: here
+              ? Icon(Icons.offline_pin_rounded, size: 18, color: c.success)
+              : null,
           onTap: url.isEmpty
               ? null
               : () => Navigator.of(context).push(
@@ -610,7 +672,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       default:
         return BxListRow(
           title: a.title,
-          subtitle: 'Opens outside the app',
+          subtitle: 'Opens outside the app · needs data',
           leading: Icon(Icons.attachment_rounded, color: c.muted),
           trailing: Icon(Icons.open_in_new_rounded, size: 18, color: c.muted),
           onTap: url.isEmpty ? null : () => _openLink(url),

@@ -150,7 +150,7 @@ const int _minSampleBytes = 8 * 1024;
 /// Two seconds to answer a small request is a connection a student can
 /// feel, whatever the throughput says.
 const int _poorLatencyMs = 2000;
-const int _goodLatencyMs = 600;
+const int _goodLatencyMs = 800;
 
 /// How many samples the rolling window keeps. Short on purpose: a
 /// student walking out of a lecture hall changes network in seconds and
@@ -214,7 +214,9 @@ class NetSpeedMeter extends ChangeNotifier {
 
   void _recompute() {
     if (!_reachable) {
-      _publish(const BxNetSpeed(grade: BxNetGrade.offline));
+      // The kind of line is kept: a phone with its data off should show
+      // the bars it will have when it comes back, crossed out.
+      _publish(BxNetSpeed(grade: BxNetGrade.offline, unmetered: _unmetered));
       return;
     }
 
@@ -229,10 +231,18 @@ class NetSpeedMeter extends ChangeNotifier {
     }
     final bps = millis > 0 ? bytes * 1000 / millis : 0.0;
 
+    // THE BEST ROUND TRIP IN THE WINDOW, NOT THE TYPICAL ONE.
+    //
+    // A small reply's elapsed time is the line's round trip PLUS
+    // whatever the server spent making the reply — and the website's
+    // functions sleep between requests, so a cold one can take two or
+    // three seconds on its own. Read as latency that painted a
+    // student's perfectly good 4.5G red for as long as the app was
+    // open. The fastest recent reply is the one with the least server
+    // in it, so it is the closest thing to the line itself.
     var latency = 0;
     if (_latencies.isNotEmpty) {
-      final sorted = _latencies.toList()..sort();
-      latency = sorted[sorted.length ~/ 2];
+      latency = _latencies.reduce((a, b) => a < b ? a : b);
     }
 
     final hasLatency = _latencies.isNotEmpty;

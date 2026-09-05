@@ -136,10 +136,18 @@ class _CourseHubScreenState extends ConsumerState<CourseHubScreen> {
       // Falls back to this phone's own bank when the server cannot be
       // reached — which is the whole reason the Download button below
       // exists.
-      final attemptId = await ref
-          .read(assessmentRepoProvider)
-          .startPracticeOrOffline(course.id);
+      final repo = ref.read(assessmentRepoProvider);
+      final attemptId = await repo.startPracticeOrOffline(course.id);
       if (!mounted) return;
+      // The server hands back a round the student walked away from
+      // rather than a new one. Their work is never thrown away for
+      // them, so the honest thing is to say so — silently dealing the
+      // same twenty questions is what reads as "it keeps repeating".
+      if (repo.lastRoundWasResumed) {
+        bxToast(context,
+            'Carrying on the round you left. End it and the next one is '
+            'fresh questions.');
+      }
       await context.push(Routes.practice(attemptId));
     } catch (e) {
       if (!mounted) return;

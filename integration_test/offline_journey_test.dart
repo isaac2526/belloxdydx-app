@@ -346,7 +346,10 @@ void main() {
             'note whose diagram is missing is half-saved: $onDisk');
 
     // A saved note is genuinely readable, and it is the real body.
-    final firstNote = store.readable.firstWhere((i) => i.kind == 'note');
+    // Deliberately one that HAS a body: the fixture also contains a
+    // note that is only its attachment, and that one is saved too.
+    final firstNote = store.readable.firstWhere(
+        (i) => i.kind == 'note' && i.bytes > 200);
     final html = await store.readNote(firstNote.id);
     expect(html, isNotNull);
     expect(html!.length, greaterThan(200),
@@ -615,6 +618,63 @@ void main() {
     debugPrint('[journey] on the phone: ${after.length} questions, '
         '$markableAfter markable (was $markableBefore)');
 
+    // ---- EVERY ATTACHMENT, AND THE NOTE THAT IS ONLY ITS ATTACHMENT --
+    //
+    // "I entered explanatory Notes section, i press a topic that has
+    //  slides and note ... the note showed the slide is bringing
+    //  network error"
+    //
+    // Tutor Bello posts a series episode by episode: the PDF first, the
+    // body later. Every such note used to be counted as saved by the
+    // downloader and then reported as missing by its own check, on
+    // every run, for ever — and offline it said "Nothing is attached
+    // yet either" over a PDF that was on the phone.
+    final withAttachments = container
+        .read(contentRepoProvider)
+        .materialsFor(course.id, const {MaterialKind.note})
+        .toList();
+    expect(withAttachments, isNotEmpty);
+
+    final bodyless = await tester.runAsync(() async {
+      for (final h in withAttachments) {
+        final full = await container.read(contentRepoProvider).material(h.id);
+        if (!full.hasBody && full.attachments.isNotEmpty) return full;
+      }
+      return null;
+    });
+    expect(bodyless, isNotNull,
+        reason: 'the fixture must contain a note that is only its '
+            'attachment — it is the shape that produced "6 files did '
+            'not save"');
+    expect(store.has(bodyless!.id), isTrue,
+        reason: 'AN ATTACHMENT-ONLY NOTE MUST BE CATALOGUED. Without a '
+            'row it cannot be opened offline and it is counted as a '
+            'file that did not save on every single run.');
+    expect(await tester.runAsync(() => store.verifyItem(bodyless.id)), isTrue,
+        reason: 'and the download\'s own check must accept it');
+    expect(store.item(bodyless.id)!.attachments, isNotEmpty,
+        reason: 'its attachment list has to be on the disk — nothing '
+            'else ties the downloaded PDF back to the note');
+    for (final a in store.item(bodyless.id)!.attachments) {
+      final url = container.read(contentRepoProvider).fileUrl(a.url);
+      expect(store.assetPath(url), isNotNull,
+          reason: 'the attached ${a.kind} "${a.title}" must be on the '
+              'phone after a whole-course download');
+      expect(File(store.assetPath(url)!).existsSync(), isTrue);
+    }
+    debugPrint('[journey] attachment-only note "${bodyless.title}" saved '
+        'with ${store.item(bodyless.id)!.attachments.length} attachment(s)');
+
+    // What the card tells the student is what the PHONE holds, not what
+    // this run happened to move. An Update that finds every picture
+    // already here used to print "0 pictures" over a phone full of them.
+    expect(download.assets, greaterThan(0),
+        reason: 'the pictures on this phone must be counted, not the '
+            'ones this particular run transferred');
+    expect(download.materials, greaterThan(0));
+    expect(download.failures, isEmpty,
+        reason: 'nothing failed, so nothing may be named');
+
     // And it survives being read back from a fresh catalogue, which is
     // what the next launch does.
     final record = store.courseRecord(course.id);
@@ -661,6 +721,12 @@ void main() {
         container.read(courseDownloadProvider(course.id).notifier).start());
     await tester.pump(const Duration(seconds: 2));
     final updated = container.read(courseDownloadProvider(course.id));
+    expect(updated.assets, greaterThan(0),
+        reason: 'AN UPDATE MUST NOT DROP THE COUNT. Everything was '
+            'already held, so nothing was transferred — and the card '
+            'used to read "0 pictures" over a full phone.');
+    expect(updated.failed, 0,
+        reason: 'a second run over a complete phone cannot fail');
     expect(updated.phase, CourseDownloadPhase.done,
         reason: 'the update said: ${updated.label} / ${updated.message}');
     expect(updated.updateAvailable, isFalse,
@@ -1063,6 +1129,62 @@ void main() {
         debugPrint('[journey] offline round: ${session.questions.length} '
             'questions, marked on the device');
       }
+
+      // AN ATTACHED PDF OPENS WITH THE SERVER GONE.
+      //
+      // "the note showed the slide is bringing network error" — the
+      // reader opened attachments by URL over the network only, so a
+      // student who had downloaded the whole course was told the file
+      // had not come down while it sat on the disk.
+      final offlineEpisode = await tester.runAsync(
+          () => container.read(contentRepoProvider).material(bodyless.id));
+      expect(offlineEpisode, isNotNull,
+          reason: 'A NOTE THAT IS ONLY ITS ATTACHMENT MUST STILL OPEN');
+      expect(offlineEpisode!.attachments, isNotEmpty,
+          reason: 'THE WHOLE COMPLAINT: offline it said "Nothing is '
+              'attached yet either" over a PDF on the phone');
+      for (final a in offlineEpisode.attachments) {
+        final url = container.read(contentRepoProvider).fileUrl(a.url);
+        final path = Offline.pathFor(url);
+        expect(path, isNotNull,
+            reason: 'the reader looks the attachment up by URL — that '
+                'lookup must find it with no server');
+        expect(File(path!).existsSync(), isTrue);
+      }
+      debugPrint('[journey] attached PDF opened offline from disk');
+
+      // TWO OFFLINE ROUNDS IN A ROW MUST NOT BE THE SAME ROUND.
+      //
+      // "in offline it's repeating almost the same question"
+      final roundA = await tester.runAsync(() => container
+          .read(assessmentRepoProvider)
+          .startPracticeOrOffline(course.id));
+      final sessionA = await tester.runAsync(() =>
+          container.read(assessmentRepoProvider).openAttempt(roundA!));
+      final roundB = await tester.runAsync(() => container
+          .read(assessmentRepoProvider)
+          .startPracticeOrOffline(course.id));
+      final sessionB = await tester.runAsync(() =>
+          container.read(assessmentRepoProvider).openAttempt(roundB!));
+      final idsA = sessionA!.questions.map((q) => q.id).toSet();
+      final idsB = sessionB!.questions.map((q) => q.id).toSet();
+      final overlap = idsA.intersection(idsB).length;
+      final bank = (await tester.runAsync(() => store.questions(course.id)) ??
+              const <Map<String, dynamic>>[])
+          .where(isMarkableOffline)
+          .length;
+      // The least a second round CAN repeat: everything unseen is dealt
+      // before anything seen, so the only repeats are the ones the bank
+      // is too small to avoid.
+      final forced = (idsA.length + idsB.length - bank).clamp(0, idsB.length);
+      debugPrint('[journey] two offline rounds: ${idsA.length} and '
+          '${idsB.length} questions, $overlap in common '
+          '(bank $bank, unavoidable $forced)');
+      expect(overlap, forced,
+          reason: 'THE SECOND ROUND MUST DEAL EVERY QUESTION THE FIRST '
+              'ONE DID NOT before it repeats a single one. A memoryless '
+              'shuffle overlaps by about a quarter of the round, which '
+              'is what "it\'s repeating almost the same question" is.');
 
       // And the course a student DOWNLOADED opens a round of its own,
       // by course, with the server gone. This is the sentence the
