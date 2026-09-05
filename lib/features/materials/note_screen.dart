@@ -252,7 +252,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
         failure ??
             (missed.isEmpty
                 ? 'Saved. This note now opens with no data.'
-                : 'Saved, but ${missed.length == 1 ? 'one attachment' : '${missed.length} attachments'} '
+                : 'Saved, but ${missed.length == 1 ? 'one file' : '${missed.length} files'} '
                     'did not come down: ${missed.take(2).join(', ')}. '
                     'Tap Save again on a steadier line.'),
         error: failure != null || missed.isNotEmpty,
