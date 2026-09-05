@@ -430,3 +430,83 @@ jobs:
           name: belloxdydx-ios-unsigned-ipa
           path: build/ipa/belloxdydx-unsigned.ipa
           if-no-files-found: error
+
+  # ============================================================
+  # PUBLISH THE INSTALLABLE FILES
+  #
+  # An Actions artifact is a zip behind a login that expires in 90
+  # days. A student — or Tutor Bello on his phone — cannot tap one and
+  # install it, and neither can any machine without a token.
+  #
+  # A tagged build therefore also publishes a Release, with the APK,
+  # the Play Store bundle and the unsigned IPA attached as plain files
+  # on a permanent, public, tappable link.
+  # ============================================================
+  release:
+    name: Publish the installable files
+    runs-on: ubuntu-latest
+    needs: [android, ios]
+    # Only for a version tag, and only if Android actually built. The
+    # IPA is nice to have: iOS failing must not withhold the APK.
+    if: >-
+      always() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.android.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Name the files after the version
+        id: files
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p out
+          cp dist/belloxdydx-apk/app-release.apk "out/Belloxdydx-$TAG.apk"
+          cp dist/belloxdydx-playstore-aab/app-release.aab "out/Belloxdydx-$TAG-playstore.aab"
+          if [ -f dist/belloxdydx-ios-unsigned-ipa/belloxdydx-unsigned.ipa ]; then
+            cp dist/belloxdydx-ios-unsigned-ipa/belloxdydx-unsigned.ipa \
+               "out/Belloxdydx-$TAG-unsigned.ipa"
+          else
+            echo "no IPA in this run - publishing Android only"
+          fi
+          ls -lh out
+          # Checksums, so a download can be proved intact on the far end.
+          ( cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt )
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          APK="out/Belloxdydx-$TAG.apk"
+          SIZE=$(du -h "$APK" | cut -f1)
+          {
+            echo "Belloxdydx for Android and iOS, built from \`${GITHUB_SHA}\`."
+            echo ""
+            echo "| File | What it is for |"
+            echo "|---|---|"
+            echo "| \`Belloxdydx-$TAG.apk\` ($SIZE) | Install straight onto an Android phone |"
+            echo "| \`Belloxdydx-$TAG-playstore.aab\` | Upload to the Play Console |"
+            echo "| \`Belloxdydx-$TAG-unsigned.ipa\` | iPhone testing (needs re-signing) |"
+            echo ""
+            echo "The APK and AAB are signed with the permanent Belloxdydx key,"
+            echo "SHA-256 \`c175c91b17ec363d10adcba1e36fffd2d261c80ff68c119f62f511019103045d\`,"
+            echo "and the build fails if they are not — so this installs straight"
+            echo "over any earlier Belloxdydx without uninstalling, and every"
+            echo "downloaded course survives the update."
+            echo ""
+            echo "\`SHA256SUMS.txt\` proves a download arrived intact."
+          } > notes.md
+          gh release create "$TAG" out/* \
+            --title "Belloxdydx $TAG" \
+            --notes-file notes.md \
+            --target "$GITHUB_SHA"
+          echo "### Release published" >> $GITHUB_STEP_SUMMARY
+          gh release view "$TAG" --json url --jq .url >> $GITHUB_STEP_SUMMARY
